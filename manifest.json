@@ -1,0 +1,66 @@
+{
+  "manifest_version": 3,
+  "name": "SessionBox - 多账号登录",
+  "short_name": "SessionBox",
+  "version": "2.0.0",
+  "description": "单浏览器多账号登录；多开后以标签页标题显示账号名以区分账号。",
+  "minimum_chrome_version": "110",
+  "icons": {
+    "16": "assets/Icon16.png",
+    "48": "assets/Icon48.png",
+    "128": "assets/Icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "SessionBox - 多账号登录",
+    "default_popup": "ui/popup/popup.html",
+    "default_icon": {
+      "16": "assets/Icon16.png",
+      "48": "assets/Icon48.png",
+      "128": "assets/Icon128.png"
+    }
+  },
+  "options_page": "ui/options/options.html",
+  "permissions": ["tabs", "scripting", "cookies", "storage", "contextMenus"],
+  "host_permissions": [],
+  "optional_host_permissions": ["*://*/*"],
+  "commands": {
+    "add_current_site": {
+      "description": "将当前站点添加为会话站点（动态授权）",
+      "suggested_key": {
+        "default": "Ctrl+Shift+E"
+      }
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/title-hook.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/virtual-storage.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/auto-login.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/main/*.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

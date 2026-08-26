@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../theme.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="card head">
+      <h1>SessionBox · 多账号</h1>
+      <a class="btn-ghost" href="../options/options.html" target="_blank">站点管理</a>
+    </header>
+
+    <section class="card control">
+      <label class="field">
+        <span>站点</span>
+        <select id="site"></select>
+      </label>
+      <form id="create" class="field">
+        <span>会话信息</span>
+        <input id="username" placeholder="用户名（登录账号）" autocomplete="off" />
+        <input id="alias" placeholder="账号名（用作标签标题）" autocomplete="off" />
+        <input id="password" type="password" placeholder="密码（可选，用于自动登录）" autocomplete="off" />
+        <button class="btn-primary" type="submit">添加并打开</button>
+      </form>
+    </section>
+
+    <p class="hint">未看到目标站点？请先在“站点管理”中添加站点并授权。</p>
+
+    <ul id="list" class="list"></ul>
+    <p class="empty" id="empty">暂无会话</p>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
