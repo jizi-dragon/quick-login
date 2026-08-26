@@ -68,7 +68,7 @@ function renderSessions(sessions: Session[]): void {
 
     const open = document.createElement('button');
     open.className = 'btn-ghost';
-    open.textContent = '打开';
+    open.textContent = '切换';
     open.addEventListener('click', () => void send({ kind: 'session.open', id: s.id, host: s.siteHost }));
 
     const del = document.createElement('button');

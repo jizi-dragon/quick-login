@@ -22,7 +22,7 @@ chrome.runtime.onMessage.addListener((msg: unknown) => {
   if (
     msg &&
     typeof msg === 'object' &&
-    (msg as { type?: string }).type === CONTENT_MESSAGE.announceSession
+    (msg as { type?: string }).type === CONTENT_MESSAGE.setTitle
   ) {
     alias = (msg as { alias?: string }).alias ?? '';
     apply();

@@ -49,17 +49,6 @@ export const sessionManager = {
     return next;
   },
 
-  /** 更新会话登录成功后的最终 URL（用于重开时直接进入目标页） */
-  async updateLastVisitedUrl(id: string, url: string): Promise<Session> {
-    const session = await db.sessions.get(id);
-    if (!session) {
-      throw new Error(`会话不存在: ${id}`);
-    }
-    const next = { ...session, lastVisitedUrl: url, updatedAt: Date.now() };
-    await db.sessions.put(next);
-    return next;
-  },
-
   /** 保存/更新加密后的账号密码 */
   async updateCredentials(id: string, credentials: EncryptedCredentials): Promise<Session> {
     const session = await db.sessions.get(id);
@@ -71,9 +60,8 @@ export const sessionManager = {
     return next;
   },
 
-  /** 删除会话记录；不影响已打开的标签页（绑定按标签关闭清理） */
+  /** 删除会话记录；已打开的标签页不受影响（绑定按标签关闭清理） */
   async delete(id: string): Promise<void> {
     await db.sessions.delete(id);
-    await db.cookieBags.delete(id);
   },
 };

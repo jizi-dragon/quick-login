@@ -42,8 +42,6 @@ const options = {
   entryPoints: {
     'background': path.join(srcDir, 'background', 'service-worker.ts'),
     'content/title-hook': path.join(srcDir, 'content', 'title-hook.ts'),
-    'content/virtual-storage': path.join(srcDir, 'content', 'virtual-storage.ts'),
-    'content/main/virtual-storage-runtime': path.join(srcDir, 'content', 'main', 'virtual-storage-runtime.ts'),
     'content/auto-login': path.join(srcDir, 'content', 'auto-login.ts'),
     'ui/popup/popup': path.join(srcDir, 'ui', 'popup', 'popup.ts'),
     'ui/options/options': path.join(srcDir, 'ui', 'options', 'options.ts'),

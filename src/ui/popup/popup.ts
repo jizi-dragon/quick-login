@@ -47,7 +47,7 @@ function render(): void {
 
     const open = document.createElement('button');
     open.className = 'icon-btn';
-    open.textContent = '打开';
+    open.textContent = '切换';
     open.addEventListener('click', () => void openSession(s));
 
     li.append(dot, meta, open);

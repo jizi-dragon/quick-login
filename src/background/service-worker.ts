@@ -1,7 +1,6 @@
 import type { Result, RuntimeRequest, RuntimeResponse } from '../shared/messages';
 import { CONTENT_MESSAGE } from '../shared/constants';
 import { accountRegistry } from './core/account-registry';
-import { cookieFence } from './core/isolation/cookie-fence';
 import { credentials } from './core/credentials';
 import { navigation, registerNavigationHandlers } from './core/navigation';
 import { sessionManager } from './core/session-manager';
@@ -30,11 +29,7 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
     case 'session.get':
       return { kind: 'session.get', result: await tryRun(() => sessionManager.getOrThrow(req.id)) };
     case 'session.create': {
-      const r = await tryRun(async () => {
-        const session = await sessionManager.create(req.input);
-        await navigation.captureHostJarIfUnowned(session.id, session.siteHost);
-        return session;
-      });
+      const r = await tryRun(() => sessionManager.create(req.input));
       return { kind: 'session.create', result: r };
     }
     case 'session.update': {
@@ -52,12 +47,11 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
     case 'session.open': {
       const r = await tryRun(async () => {
         const session = await sessionManager.getOrThrow(req.id);
-        // 复用已开标签优先；无则直达 lastVisitedUrl / 或自动登录
         let creds: { username: string; password: string } | undefined;
         if (session.credentials) {
           creds = await credentials.decryptCredentials(session.credentials);
         }
-        const { tabId } = await navigation.openOrCreate(session, creds);
+        const { tabId } = await navigation.switchAccount(session, creds);
         return { tabId };
       });
       return { kind: 'session.open', result: r };
@@ -82,7 +76,6 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
             accountAlias: req.accountAlias || req.username || req.host,
             siteHost: req.host,
           });
-          await navigation.captureHostJarIfUnowned(session.id, session.siteHost);
         }
 
         // 本次带入了明文账号密码：加密持久化，并作为本次自动登录凭证
@@ -97,7 +90,7 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
           creds = await credentials.decryptCredentials(session.credentials);
         }
 
-        const { tabId, reused } = await navigation.openOrCreate(session, creds);
+        const { tabId, reused } = await navigation.switchAccount(session, creds);
         return { tabId, sessionId: session.id, reused };
       });
       return { kind: 'session.openOrCreate', result: r };
@@ -109,14 +102,6 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       });
       return { kind: 'session.updateCredentials', result: r };
     }
-    case 'session.updateLastVisitedUrl': {
-      const r = await tryRun(async () => {
-        await sessionManager.updateLastVisitedUrl(req.id, req.url);
-      });
-      return { kind: 'session.updateLastVisitedUrl', result: r };
-    }
-    case 'site.cookieBag.read':
-      return { kind: 'site.cookieBag.read', result: await tryRun(() => cookieFence.bag(req.sessionId)) };
     case 'site.grants.list':
       return { kind: 'site.grants.list', result: await tryRun(() => siteAuth.list()) };
     case 'site.grant.add':

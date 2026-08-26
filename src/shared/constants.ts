@@ -1,14 +1,10 @@
-export const STORAGE_PREFIX = 'sb:';
-
 export const IDB_NAME = 'sessionbox-reborn';
 export const IDB_VERSION = 1;
 export const IDB_STORE_SESSIONS = 'sessions';
-export const IDB_STORE_COOKIE_BAGS = 'cookie-bags';
 
 /** 存在 session 级 chrome.storage.session 中的键 */
 export const SESSION_KEYS = {
   sessionTabBindings: 'sb:tabBindings',
-  jarOwners: 'sb:jarOwners',
   pendingAutoLogins: 'sb:pendingAutoLogins',
 } as const;
 
@@ -17,9 +13,9 @@ export const LOCAL_KEYS = {
   siteGrants: 'sb:siteGrants',
 } as const;
 
-/** background 向会话标签内容脚本下发「激活」消息的 type */
+/** background 向内容脚本下发的消息 type */
 export const CONTENT_MESSAGE = {
-  announceSession: 'sb:activate',
+  setTitle: 'sb:setTitle',
   autoLogin: 'sb:autoLogin',
   autoLoginRequest: 'sb:autoLoginRequest',
 } as const;

@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "SessionBox - 多账号登录",
   "short_name": "SessionBox",
-  "version": "2.0.0",
-  "description": "单浏览器多账号登录；多开后以标签页标题显示账号名以区分账号。",
+  "version": "2.1.0",
+  "description": "单浏览器多账号免密快速切换；切换账号后以标签页标题显示账号名以区分。",
   "minimum_chrome_version": "110",
   "icons": {
     "16": "assets/Icon16.png",
@@ -43,21 +43,9 @@
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["content/virtual-storage.js"],
-      "run_at": "document_start",
-      "all_frames": true
-    },
-    {
-      "matches": ["<all_urls>"],
       "js": ["content/auto-login.js"],
       "run_at": "document_idle",
       "all_frames": true
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["content/main/*.js"],
-      "matches": ["<all_urls>"]
     }
   ],
   "content_security_policy": {

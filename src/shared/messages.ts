@@ -1,4 +1,4 @@
-import type { CookieBag, Session, SiteGrant } from './types';
+import type { Session, SiteGrant } from './types';
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -12,8 +12,6 @@ export type RuntimeRequest =
   | { kind: 'session.open'; id: string; host: string }
   | { kind: 'session.openOrCreate'; host: string; username?: string; password?: string; accountAlias?: string }
   | { kind: 'session.updateCredentials'; id: string; username: string; password: string }
-  | { kind: 'session.updateLastVisitedUrl'; id: string; url: string }
-  | { kind: 'site.cookieBag.read'; sessionId: string }
   | { kind: 'site.grants.list' }
   | { kind: 'site.grant.add'; host: string };
 
@@ -26,8 +24,6 @@ export type RuntimeResponse =
   | { kind: 'session.open'; result: Result<{ tabId: number }> }
   | { kind: 'session.openOrCreate'; result: Result<{ tabId: number; sessionId: string; reused: boolean }> }
   | { kind: 'session.updateCredentials'; result: Result<void> }
-  | { kind: 'session.updateLastVisitedUrl'; result: Result<void> }
-  | { kind: 'site.cookieBag.read'; result: Result<CookieBag | undefined> }
   | { kind: 'site.grants.list'; result: Result<SiteGrant[]> }
   | { kind: 'site.grant.add'; result: Result<SiteGrant> };
 
