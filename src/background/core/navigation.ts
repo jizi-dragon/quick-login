@@ -111,20 +111,29 @@ function hasCookie(session: Session, host: string): Promise<boolean> {
   return cookieFence.bag(session.id).then((bag) => !!bag && bag.host === host && bag.cookies.length > 0);
 }
 
-/** 已绑定标签待自动登录的凭证暂存（tabId → 凭证）。
- * 凭证需被同一标签页的主 frame 与 iframe frame 共同读取（用户名在主 frame、密码常在 iframe），
- * 故采用「只读共享 + 超时清理」而非「取到即消费」。 */
-const pendingAutoLogins = new Map<number, { username: string; password: string; at: number }>();
 const AUTO_LOGIN_TTL = 60_000;
 
+function pendingKey(tabId: number): string {
+  return `${SESSION_KEYS.pendingAutoLogins}:${tabId}`;
+}
+
+/** 缓存待自动登录凭证到 chrome.storage.session（service worker 回收后不丢失） */
+async function setPendingAutoLogin(tabId: number, username: string, password: string): Promise<void> {
+  await chrome.storage.session.set({
+    [pendingKey(tabId)]: { username, password, at: Date.now() },
+  });
+}
+
 /** content 脚本（含各 iframe frame）就绪后主动索取凭证；超时视为失效 */
-function getPendingAutoLogin(tabId: number): { username: string; password: string } | null {
-  const entry = pendingAutoLogins.get(tabId);
+async function getPendingAutoLogin(tabId: number): Promise<{ username: string; password: string } | null> {
+  const key = pendingKey(tabId);
+  const stored = await chrome.storage.session.get(key);
+  const entry = stored[key] as { username: string; password: string; at: number } | undefined;
   if (!entry) {
     return null;
   }
   if (Date.now() - entry.at > AUTO_LOGIN_TTL) {
-    pendingAutoLogins.delete(tabId);
+    await chrome.storage.session.remove(key);
     return null;
   }
   return { username: entry.username, password: entry.password };
@@ -132,7 +141,7 @@ function getPendingAutoLogin(tabId: number): { username: string; password: strin
 
 /** 向已绑定标签下发自动登录：先缓存凭证（供内容脚本主动拉取），再尝试即时下发 */
 async function triggerAutoLogin(tabId: number, username: string, password: string): Promise<void> {
-  pendingAutoLogins.set(tabId, { username, password, at: Date.now() });
+  await setPendingAutoLogin(tabId, username, password);
   try {
     await chrome.tabs.sendMessage(tabId, {
       type: CONTENT_MESSAGE.autoLogin,
@@ -294,7 +303,7 @@ export function registerNavigationHandlers(): void {
 
   // 标签关闭：先行固化登录态，再清除绑定与待登录凭证
   chrome.tabs.onRemoved.addListener((tabId) => {
-    pendingAutoLogins.delete(tabId);
+    void chrome.storage.session.remove(pendingKey(tabId));
     void captureIfOwner(tabId).finally(() => {
       if (bindings.delete(tabId)) {
         void persistBindings();

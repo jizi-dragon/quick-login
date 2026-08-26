@@ -9,6 +9,7 @@ export const IDB_STORE_COOKIE_BAGS = 'cookie-bags';
 export const SESSION_KEYS = {
   sessionTabBindings: 'sb:tabBindings',
   jarOwners: 'sb:jarOwners',
+  pendingAutoLogins: 'sb:pendingAutoLogins',
 } as const;
 
 /** 存在 chrome.storage.local 中的站点清单键 */

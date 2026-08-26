@@ -76,7 +76,8 @@ Chrome 单一浏览器实例内，Cookie 罐（cookie jar）是**全局共享**�
 - 登录成功后，离场标签 / 关闭标签时通过 `captureIfOwner` 把当前 jar（含刚写入的登录 Cookie）固化为该会话的权威快照；标签在目标 host 内完成导航时同步固化（`tabs.onUpdated`），并把该 URL 记为 `lastVisitedUrl`。
 - 重开会话（`session.openOrCreate`）：优先复用该会话已打开的标签页；否则若已有登录 Cookie，直接进入 `lastVisitedUrl`（登录后的首页），站点凭 Cookie 自动进入已登录态；无 Cookie 时才落到 `/login` 并自动填充。
 - **账号密码加密存储（credentials.ts）**：用户录入的「账号密码」经 `crypto.subtle` AES-GCM 加密后存入会话（各字段独立 IV），密钥由设备种子经 PBKDF2 派生。仅在 Cookie 失效、需重新登录时才解密用于自动填充。
-- **自动登录兜底（auto-login.ts，all_frames）**：当会话已存凭证但 Cookie 无效时，弹窗打开会话后向目标标签注入自动填表脚本。因密码框常位于内嵌 iframe，脚本以 `all_frames` 注入，各层 frame 自行定位用户名/密码/同意复选框/登录按钮，填充后提交。
+- **自动登录兜底（auto-login.ts，all_frames）**：当会话已存凭证但 Cookie 无效时，弹窗打开会话后向目标标签注入自动填表脚本。因密码框常位于内嵌 `srcdoc` iframe（`<all_urls>` 的 content script 不注入 `about:srcdoc`），不能用「各 frame 自行填」模型——**必须由顶层 frame 直接访问 `iframe.contentDocument` 填密码**；用户名/复选框/登录按钮在顶层，直接在顶层填充。React/Ant Design 受控组件用原生 `HTMLInputElement.prototype.value` setter + `input`/`change` 事件触发。
+- 待自动登录凭证经 `chrome.storage.session` 暂存（key 包含 tabId），service worker 回收后不丢失；内容脚本在 `document_idle` 就绪后主动经 `sb:autoLoginRequest` 索取，失败轻量重试。
 - 新建会话时（`session.create`），若用户正停留在该站点且 jar 未被任何会话持有（普通已登录浏览），`captureHostJarIfUnowned` 会把当前登录态捕获为该新建会话初始 Cookie 包，同为自动登录兜底。
 
 ### 4.2c 会话复用策略（问题4：已存在复用 / 不存在新建）

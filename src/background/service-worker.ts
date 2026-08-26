@@ -132,7 +132,11 @@ chrome.runtime.onMessage.addListener((req: RuntimeRequest, sender, sendResponse)
     (req as { type?: string }).type === CONTENT_MESSAGE.autoLoginRequest
   ) {
     const tabId = sender.tab?.id;
-    sendResponse(tabId === undefined ? null : navigation.getPendingAutoLogin(tabId));
+    if (tabId === undefined) {
+      sendResponse(null);
+      return true;
+    }
+    void navigation.getPendingAutoLogin(tabId).then((creds) => sendResponse(creds));
     return true;
   }
   void dispatch(req).then(sendResponse);
