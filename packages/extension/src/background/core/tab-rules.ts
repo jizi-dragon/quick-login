@@ -1,16 +1,17 @@
 /**
- * DNR session 规则管理 —— 「多平面隔离」的网络平面 v4。
+ * DNR session 规则管理 —— 「多平面隔离」的网络平面 v4.1。
  *
- * 每个绑定标签页维护三条 session 规则：
+ * 每个绑定标签页维护至多两条 session 规则：
  *  1) AUTH 规则：Authorization → set 'Bearer <token>'（token 可能为 null：未捕获前不装）；
- *  2) COOKIE 规则：Cookie 请求头 → remove（与 token 无关，绑定即装）；
- *  3) CACHE 规则（v3.3 新增）：GET 接口查询串追加 `_qlck=t<tabId>` —— 把共享 HTTP 缓存
- *     按标签页硬性分区。实测发现低代码平台把权限/菜单等敏感接口做成可缓存响应，
- *     而浏览器 HTTP 缓存按 URL 存取且全 profile 共享：第一个登录账号的响应会被后续
- *     不同账号直接命中（不出网），造成「普通用户获得管理员权限」或反向剥离。
- *     追加常量参数后同一标签缓存键稳定、跨标签必然不同，泄漏源被切断；服务端对
- *     未知 query 参数通常忽略，POST 不在范围内不受影响。
+ *  2) COOKIE 规则：Cookie 请求头 → remove（与 token 无关，绑定即装）。
  *
+ * CACHE 分区平面（v3.3 引入的 `_qlck=t<tabId>`）自 v4.1 起改由 MAIN 壳页面层实现
+ * （shield-main.ts 的 fetch/XHR 包装直接追加查询参数）：Chrome 的 DNR 从未实现
+ * `redirect.urlTransform`（MDN 该字段为 Firefox 专属；Chromium 一直以
+ * "Unexpected property: 'urlTransform'" 拒绝），且 updateSessionRules 是原子批量——
+ * 该无效规则曾导致同批的 COOKIE/AUTH 规则全部被拒（四象限泄漏期间网络平面全死的根因）。
+ *
+ * 安装策略：逐条安装 + 单条失败降级（不再原子批量连坐）。
  * 页面存储层继续由 MAIN 壳虚拟化；目标站为无状态 JWT 设计（DESIGN.md §3）。
  */
 
@@ -18,25 +19,30 @@
 const AUTH_BASE = 100_000;
 /** COOKIE 规则 id 区间 */
 const COOKIE_BASE = 200_000;
-/** CACHE 分区规则 id 区间 */
-const CACHE_BASE = 300_000;
-
-/** 缓存分区开关（如服务端对未知 query 参数敏感可置 false 快速回退） */
-const CACHE_PARTITION_ENABLED = true;
 
 interface RuleMeta {
   authId?: number;
   cookieId?: number;
-  cacheId?: number;
   /** 当前 AUTH 规则的 token；null 表示未装 AUTH 规则 */
   token: string | null;
 }
 
 const installed = new Map<number, RuleMeta>();
 
+/** 诊断埋点（与 parallel-session 共用 storage.local['ql:diag'] 环形缓冲） */
+async function diag(msg: string): Promise<void> {
+  try {
+    const key = 'ql:diag';
+    const cur = (await chrome.storage.local.get(key))[key] as string[] | undefined;
+    const next = [...(cur ?? []).slice(-59), `${new Date().toISOString().slice(11, 23)} ${msg}`];
+    await chrome.storage.local.set({ [key]: next });
+  } catch {
+    // 埋点失败不影响业务
+  }
+}
+
 let nextAuthId = AUTH_BASE;
 let nextCookieId = COOKIE_BASE;
-let nextCacheId = CACHE_BASE;
 
 const ALL_MATCH_TYPES: chrome.declarativeNetRequest.ResourceType[] = [
   'main_frame',
@@ -90,60 +96,35 @@ function buildCookieStripRule(ruleId: number, host: string, tabId: number): chro
   });
 }
 
-/** 缓存分区：GET 接口追加 _qlck=t<tabId>，把共享 HTTP 缓存按标签硬性分区 */
-function buildCachePartitionRule(ruleId: number, host: string, tabId: number): chrome.declarativeNetRequest.Rule {
-  return asRule({
-    id: ruleId,
-    priority: 1,
-    action: {
-      type: 'redirect',
-      redirect: {
-        urlTransform: {
-          queryTransform: {
-            setParams: { _qlck: `t${tabId}` },
-          },
-        },
-      },
-    },
-    condition: {
-      resourceTypes: ['xmlhttprequest'],
-      // 仅 GET 可被缓存；POST/PUT 等写操作不分区
-      requestMethods: ['GET'],
-      requestDomains: [host],
-      tabIds: [tabId],
-    },
-  });
-}
-
-async function updateRules(removeRuleIds: number[], addRules: chrome.declarativeNetRequest.Rule[]): Promise<void> {
-  if (!removeRuleIds.length && !addRules.length) {
-    return;
+/** 单条规则安装（返回是否成功；失败仅记录诊断，不阻断其余规则） */
+async function addOne(rule: chrome.declarativeNetRequest.Rule): Promise<boolean> {
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({ addRules: [rule] });
+    return true;
+  } catch (e) {
+    void diag(`addRule #${rule.id} 失败：${e instanceof Error ? e.message : String(e)}`);
+    return false;
   }
-  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules });
 }
 
 export const tabRules = {
   /**
    * 设置/更新某绑定标签页的网络平面规则。
-   * - COOKIE 剥离规则与 CACHE 分区规则绑定即装；
+   * - COOKIE 剥离规则绑定即装；
    * - token 非 null 时装/换 AUTH 规则；null 时摘除。
+   * 逐条安装：单条失败不连坐其余规则。
    */
   async applyBinding(host: string, tabId: number, token: string | null): Promise<void> {
     const meta: RuleMeta = installed.get(tabId) ?? { token: null };
 
     const removes: number[] = [];
-    const adds: chrome.declarativeNetRequest.Rule[] = [];
 
     // COOKIE 剥离规则
     if (meta.cookieId === undefined) {
-      meta.cookieId = nextCookieId++;
-      adds.push(buildCookieStripRule(meta.cookieId, host, tabId));
-    }
-
-    // CACHE 分区规则
-    if (CACHE_PARTITION_ENABLED && meta.cacheId === undefined) {
-      meta.cacheId = nextCacheId++;
-      adds.push(buildCachePartitionRule(meta.cacheId, host, tabId));
+      const ruleId = nextCookieId++;
+      if (await addOne(buildCookieStripRule(ruleId, host, tabId))) {
+        meta.cookieId = ruleId;
+      }
     }
 
     // AUTH 规则
@@ -156,14 +137,26 @@ export const tabRules = {
     } else if (meta.token !== token) {
       if (meta.authId !== undefined) {
         removes.push(meta.authId);
+        meta.authId = undefined;
       }
-      meta.authId = meta.authId ?? nextAuthId++;
-      adds.push(buildAuthRule(meta.authId, host, tabId, token));
-      meta.token = token;
+      const ruleId = nextAuthId++;
+      if (await addOne(buildAuthRule(ruleId, host, tabId, token))) {
+        meta.authId = ruleId;
+        meta.token = token;
+      }
     }
 
-    await updateRules(removes, adds);
+    if (removes.length) {
+      try {
+        await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: removes });
+      } catch (e) {
+        void diag(`updateRules 移除失败 ids=${removes.join(',')}：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     installed.set(tabId, meta);
+    void diag(
+      `applyBinding tab=${tabId} token=${token ? '有' : '无'} cookieId=${meta.cookieId ?? '-'} authId=${meta.authId ?? '-'}`,
+    );
   },
 
   /** 标签关闭 / 解绑：摘除其全部规则 */
@@ -179,9 +172,6 @@ export const tabRules = {
     if (meta.authId !== undefined) {
       removes.push(meta.authId);
     }
-    if (meta.cacheId !== undefined) {
-      removes.push(meta.cacheId);
-    }
     try {
       if (removes.length) {
         await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: removes });
@@ -190,6 +180,7 @@ export const tabRules = {
       // 忽略
     }
     installed.delete(tabId);
+    void diag(`clearTab tab=${tabId} del=${removes.length}`);
   },
 
   /**
@@ -229,18 +220,28 @@ export const tabRules = {
     );
     nextCookieId = Math.max(
       COOKIE_BASE,
-      ...existing.filter((r) => r.id >= COOKIE_BASE && r.id < CACHE_BASE).map((r) => r.id + 1),
+      ...existing.filter((r) => r.id >= COOKIE_BASE).map((r) => r.id + 1),
       COOKIE_BASE,
-    );
-    nextCacheId = Math.max(
-      CACHE_BASE,
-      ...existing.filter((r) => r.id >= CACHE_BASE).map((r) => r.id + 1),
-      CACHE_BASE,
     );
 
     installed.clear();
     for (const [tabId, info] of persisted) {
       await this.applyBinding(info.host, tabId, info.token ?? null);
     }
+    void diag(`tabRules.restore persisted=${persisted.size}`);
+  },
+
+  /** 诊断用内部状态快照（经 ql.diag 消息暴露给台架） */
+  debugState(): Record<string, unknown> {
+    return {
+      installed: Array.from(installed.entries()).map(([t, m]) => ({
+        t,
+        authId: m.authId ?? null,
+        cookieId: m.cookieId ?? null,
+        token: m.token ? '有' : '无',
+      })),
+      nextAuthId,
+      nextCookieId,
+    };
   },
 };

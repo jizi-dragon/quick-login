@@ -17,6 +17,7 @@ export type RuntimeRequest =
   | { kind: 'par.delete'; id: string }
   | { kind: 'par.open'; id: string; forceNewTab?: boolean }
   | { kind: 'par.grantChanged' }
+  | { kind: 'ql.diag' }
   | { kind: 'wheel.toggle' };
 
 export type RuntimeResponse =
@@ -33,6 +34,7 @@ export type RuntimeResponse =
   | { kind: 'par.delete'; result: Result<void> }
   | { kind: 'par.open'; result: Result<{ tabId: number; reused: boolean }> }
   | { kind: 'par.grantChanged'; result: Result<boolean> }
+  | { kind: 'ql.diag'; result: Result<Record<string, unknown>> }
   | { kind: 'wheel.toggle'; result: Result<{ opened: boolean }> };
 
 export type { Result };

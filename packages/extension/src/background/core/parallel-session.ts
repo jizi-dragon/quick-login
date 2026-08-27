@@ -30,6 +30,18 @@ const tokens = new Map<string, TokenSnapshot>();
 /** 授权健康缓存：host → 是否可执行（已授权且未被手动停用） */
 const enforcement = new Map<string, boolean>();
 
+/** 诊断埋点：写入 storage.local['ql:diag']（环形 60 条），供 E2E 台架经扩展页读取 */
+async function diag(msg: string): Promise<void> {
+  try {
+    const key = 'ql:diag';
+    const cur = (await chrome.storage.local.get(key))[key] as string[] | undefined;
+    const next = [...(cur ?? []).slice(-59), `${new Date().toISOString().slice(11, 23)} ${msg}`];
+    await chrome.storage.local.set({ [key]: next });
+  } catch {
+    // 埋点失败不影响业务
+  }
+}
+
 async function readBlockedHosts(): Promise<Set<string>> {
   const stored = await chrome.storage.local.get(LOCAL_KEYS.blockedHosts);
   return new Set((stored[LOCAL_KEYS.blockedHosts] as string[] | undefined) ?? []);
@@ -39,11 +51,13 @@ async function readBlockedHosts(): Promise<Set<string>> {
 async function isEnforceable(host: string): Promise<boolean> {
   const cached = enforcement.get(host);
   if (cached !== undefined) {
+    void diag(`isEnforceable(${host}) → 缓存 ${cached}`);
     return cached;
   }
   const blocked = await readBlockedHosts();
   if (blocked.has(host)) {
     enforcement.set(host, false);
+    void diag(`isEnforceable(${host}) → false（本地停用名单）`);
     return false;
   }
   let granted = false;
@@ -61,6 +75,7 @@ async function isEnforceable(host: string): Promise<boolean> {
     }
   }
   enforcement.set(host, granted);
+  void diag(`isEnforceable(${host}) → ${granted}（permissions.contains 实查）`);
   return granted;
 }
 
@@ -153,11 +168,20 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
 
 /** 把某账号当前 token 同步到其全部绑定标签页的规则（受授权健康门控） */
 async function syncAccountRules(accountId: string, host: string): Promise<void> {
+  const bound = boundTabsOf(accountId);
+  void diag(`syncAccountRules(${accountId}) 绑定标签=${bound.join(',') || '无'}`);
   if (!(await isEnforceable(host))) {
+    void diag(`syncAccountRules(${accountId}) 跳过：授权不可执行`);
     return; // 授权缺失/停用：不装规则，UI 通过 enforcementOff 提示
   }
   const token = tokens.get(accountId)?.token ?? null;
-  await Promise.all(boundTabsOf(accountId).map((tabId) => tabRules.applyBinding(host, tabId, token)));
+  try {
+    await Promise.all(bound.map((tabId) => tabRules.applyBinding(host, tabId, token)));
+    void diag(`syncAccountRules(${accountId}) 完成：applyBinding ×${bound.length}（token=${token ? '有' : '无'}）`);
+  } catch (e) {
+    void diag(`syncAccountRules(${accountId}) 异常：${e instanceof Error ? e.message : String(e)}`);
+    throw e;
+  }
 }
 
 /* ---------------- 绑定生命周期 ---------------- */
@@ -165,6 +189,7 @@ async function syncAccountRules(accountId: string, host: string): Promise<void> 
 export const parallelSession = {
   /** 打开（或新建）账号标签页并完成绑定 */
   async open(accountId: string, forceNewTab = false): Promise<{ tabId: number; reused: boolean }> {
+    void diag(`open(${accountId}) 入口`);
     const account = await parallelStore.get(accountId);
     let tabId: number | null = null;
 
@@ -181,22 +206,35 @@ export const parallelSession = {
       const url = `https://${account.siteHost}${hasToken ? '/' : '/login'}`;
       const tab = await chrome.tabs.create({ url });
       tabId = tab.id!;
+      void diag(`open(${accountId}) 新建 tab=${tabId} url=${url}`);
     } else {
       await chrome.tabs.update(tabId, { active: true });
+      void diag(`open(${accountId}) 复用 tab=${tabId}`);
     }
 
     bindings.set(tabId, { accountId: account.id, host: account.siteHost });
     await persistBindings();
+    void diag(`open(${accountId}) 绑定已持久化`);
 
     if (account.credentials) {
-      const creds = await credentials.decryptCredentials(account.credentials);
-      await setPendingAutoLogin(tabId, creds.username, creds.password);
+      try {
+        const creds = await credentials.decryptCredentials(account.credentials);
+        await setPendingAutoLogin(tabId, creds.username, creds.password);
+        void diag(`open(${accountId}) 凭证解密并下发待登录`);
+      } catch (e) {
+        // 凭证损坏不应阻断网络平面安装（原实现会让 open() 在此中断）
+        void diag(`open(${accountId}) 凭证解密失败：${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else {
+      void diag(`open(${accountId}) 无凭证字段`);
     }
 
     // 推送绑定种子：桥转发给 MAIN 壳（壳在 committed 前后到达均可自举）
     await pushBind(tabId);
+    void diag(`open(${accountId}) pushBind 完成`);
     await applyTitle(tabId, account.tabName);
     await syncAccountRules(account.id, account.siteHost);
+    void diag(`open(${accountId}) 完成 tabId=${tabId}`);
     return { tabId, reused: false };
   },
 
@@ -233,7 +271,7 @@ export const parallelSession = {
       if (tabId !== undefined) {
         const binding = bindings.get(tabId);
         if (binding) {
-          return buildBindPayload(binding.accountId);
+          return buildBindPayload(binding.accountId, tabId);
         }
       }
       return { op: 'unbound' };
@@ -299,6 +337,15 @@ export const parallelSession = {
     await Promise.all(boundTabsOf(accountId).map((t) => applyTitle(t, account.tabName)));
   },
 
+  /** 诊断用内部状态快照（经 ql.diag 消息暴露给台架） */
+  debugState(): Record<string, unknown> {
+    return {
+      bindings: Array.from(bindings.entries()).map(([t, b]) => ({ t, accountId: b.accountId, host: b.host })),
+      tokenAccounts: Array.from(tokens.keys()),
+      enforcement: Array.from(enforcement.entries()).map(([h, ok]) => `${h}=${ok}`),
+    };
+  },
+
   /* ------- 导航事件钩子（由 registerParallelHandlers 驱动） ------- */
 
   /** 标签页导航开始：重新推绑定种子与标题（SPA/整页刷新都会重置） */
@@ -317,6 +364,7 @@ export const parallelSession = {
 
   /** SW 冷启动恢复：绑定表 + token 快照 → 重建内存态与双规则（授权健康门控） */
   async restore(): Promise<void> {
+    void diag('parallelSession.restore 开始');
     await readState();
     enforcement.clear();
     const persisted = new Map<number, { host: string; token: string | null }>();
@@ -326,6 +374,7 @@ export const parallelSession = {
       }
     }
     await tabRules.restore(persisted);
+    void diag(`parallelSession.restore 完成 persisted=${persisted.size}`);
   },
 
   async handleTabRemoved(tabId: number): Promise<void> {
@@ -345,7 +394,7 @@ async function tabStillAlive(tabId: number): Promise<boolean> {
 }
 
 /** 构造带种子快照的绑定载荷（hello 应答与主动推送共用） */
-function buildBindPayload(accountId: string): BridgeDownPayload {
+function buildBindPayload(accountId: string, tabId?: number): BridgeDownPayload {
   const snap = tokens.get(accountId);
   const seed: Record<string, string> = {};
   if (snap?.token) {
@@ -357,7 +406,7 @@ function buildBindPayload(accountId: string): BridgeDownPayload {
   if (snap?.deviceFp) {
     seed['__device_fp__'] = snap.deviceFp;
   }
-  return { op: 'bind', accountId, seed };
+  return { op: 'bind', accountId, tabId, seed };
 }
 
 async function pushBind(tabId: number): Promise<void> {
@@ -366,7 +415,7 @@ async function pushBind(tabId: number): Promise<void> {
     return;
   }
   // 携带账号快照作种子：壳激活瞬间即有正确 token/身份，杜绝跨账号读取窗口
-  await pushDown(tabId, buildBindPayload(binding.accountId));
+  await pushDown(tabId, buildBindPayload(binding.accountId, tabId));
 }
 
 async function pushDown(tabId: number, payload: BridgeDownPayload): Promise<void> {

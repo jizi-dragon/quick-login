@@ -67,6 +67,7 @@ export type BridgeUpPayload =
 
 /** background → ISOLATED 桥的下行载荷 */
 export type BridgeDownPayload =
-  /** 绑定账号并附带初始快照种子（token 等，用于壳激活瞬间同步灌入命名空间） */
-  | { op: 'bind'; accountId: string; seed?: Record<string, string> }
+  /** 绑定账号并附带初始快照种子（token 等，用于壳激活瞬间同步灌入命名空间）；
+   *  tabId 供壳做页面层缓存分区（_qlck=t<tabId>，DNR urlTransform Chrome 不支持） */
+  | { op: 'bind'; accountId: string; tabId?: number; seed?: Record<string, string> }
   | { op: 'unbound' };

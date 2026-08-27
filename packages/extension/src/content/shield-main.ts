@@ -9,7 +9,10 @@
  *    cookie 改存于命名空间内的「Cookie 袋」（__ql_cookies__ JSON），真实 jar 永不被读取；
  * 3. 种子直灌 —— bind 载荷携带后台保存的账号快照（token 等），激活瞬间同步灌入，
  *    杜绝「先跑的页面代码读到别人/空值」的启动竞态；
- * 4. 写入上报 —— 命名空间内 __auth_token__ 等键的变化经桥上报 background（token 捕获通道）。
+ * 4. 写入上报 —— 命名空间内 __auth_token__ 等键的变化经桥上报 background（token 捕获通道）；
+ * 5. SW/CacheStorage 封控 —— 绑定标签页内阻止站点注册 Service Worker、注销既有注册，
+ *    CacheStorage 按账号命名空间键控且 CacheStorage.match 一律 miss（封堵无视 DNR/_qlck
+ *    的站点自建缓存层，详见 installSwAndCacheShield）。
  */
 
 (() => {
@@ -31,6 +34,11 @@
   let mode: Mode = 'passthrough';
   let ns = '';
   let settled = false;
+
+  /** 缓存分区平面（页面层实现；Chrome DNR 无 urlTransform，见 tab-rules.ts 注释） */
+  const CACHE_PARTITION_ENABLED = true;
+  /** 当前标签页 id（bind 载荷携带），用于 _qlck=t<tabId> 缓存分区键 */
+  let tabIdForCache: number | null = null;
 
   /* ---- 原生方法引用（必须在任何补丁之前捕获） ---- */
   const proto = Storage.prototype;
@@ -135,7 +143,33 @@
     );
   }
 
-  /* ---- fetch / XHR 出站 Authorization 头嗅探（token 二级捕获通道，只观察不修改） ---- */
+  /* ---- fetch / XHR 出站 Authorization 头嗅探 + 页面层缓存分区 ---- */
+
+  /**
+   * 缓存分区：同源 GET 请求查询串追加 `_qlck=t<tabId>`。
+   * 浏览器 HTTP 缓存按 URL 且全 profile 共享，第一个登录账号的权限/菜单响应会被
+   * 后续账号直接命中（不出网，前三平面全部失明）。同标签键稳定、跨标签必然不同。
+   * 仅 GET（可缓存）、仅同源（站内接口）、已含 _qlck 则幂等跳过。
+   */
+  function cachePartitionUrl(rawUrl: string): string {
+    if (!CACHE_PARTITION_ENABLED || tabIdForCache === null) {
+      return rawUrl;
+    }
+    try {
+      const u = new URL(rawUrl, location.href);
+      if (u.host !== location.host) {
+        return rawUrl; // 仅站内接口；第三方/静态 CDN 不动
+      }
+      if (u.searchParams.has('_qlck')) {
+        return rawUrl;
+      }
+      u.searchParams.set('_qlck', `t${tabIdForCache}`);
+      return u.href;
+    } catch {
+      return rawUrl;
+    }
+  }
+
   function patchNetworkSniffers(): void {
     const nativeFetch = win.fetch;
     const sniffFetch = function (
@@ -144,6 +178,32 @@
       init?: RequestInit,
     ): Promise<Response> {
       try {
+        let method = 'GET';
+        let urlStr: string;
+        if (input instanceof Request) {
+          method = input.method;
+          urlStr = input.url;
+        } else if (typeof input === 'string') {
+          urlStr = input;
+        } else if (input instanceof URL) {
+          urlStr = input.href;
+        } else {
+          urlStr = String(input);
+        }
+        if (typeof init?.method === 'string') {
+          method = init.method;
+        }
+        if (method.toUpperCase() === 'GET') {
+          const partitioned = cachePartitionUrl(urlStr);
+          if (partitioned !== urlStr) {
+            if (input instanceof Request) {
+              input = new Request(partitioned, input);
+            } else {
+              input = partitioned;
+            }
+          }
+        }
+        // 嗅探（只观察不修改）
         let headers: Headers | undefined;
         if (init && init.headers) {
           headers = new Headers(init.headers as HeadersInit);
@@ -162,9 +222,20 @@
     win.fetch = sniffFetch as typeof win.fetch;
 
     const xhrProto = XMLHttpRequest.prototype as unknown as Record<string, unknown>;
+    const nativeOpen = xhrProto.open as (m: string, u: string | URL, ...rest: unknown[]) => void;
     const nativeSetHeader = xhrProto.setRequestHeader as (n: string, v: string) => void;
     const nativeSend = xhrProto.send as (...args: unknown[]) => void;
     const AUTH_SLOT = Symbol('__ql_auth__');
+    xhrProto.open = function (this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]): void {
+      let u = String(url);
+      if (String(method).toUpperCase() === 'GET') {
+        const partitioned = cachePartitionUrl(u);
+        if (partitioned !== u) {
+          u = partitioned;
+        }
+      }
+      nativeOpen.call(this, method, u, ...rest);
+    } as typeof XMLHttpRequest.prototype.open;
     xhrProto.setRequestHeader = function (this: XMLHttpRequest, name: string, value: string): void {
       if (name.toLowerCase() === 'authorization') {
         (this as unknown as Record<symbol, string>)[AUTH_SLOT] = value;
@@ -277,6 +348,96 @@
     patchNetworkSniffers();
   }
 
+  /* ================= 第五平面：站点 Service Worker / CacheStorage 封控 ================= */
+
+  /** SW/CacheStorage 封控开关（若目标站功能依赖其自有 SW 可置 false 快速回退） */
+  const SW_SHIELD_ENABLED = true;
+
+  /**
+   * 站点自有 Service Worker 与其 Cache Storage 是全 profile / 全 origin 共享的缓存层，
+   * 完全无视 DNR 改头与 `_qlck` 分区（请求根本不发网）。四象限泄漏若走此层，
+   * 前三平面全部失明。对策：
+   * 1. 阻止新注册（register → reject）+ 注销既有注册（清除历史受控关系）；
+   * 2. CacheStorage 按账号命名空间键控（open/keys/has/delete 前缀 ns）；
+   * 3. CacheStorage.match 一律 miss —— 页面自建缓存的读命中被屏蔽，回落网络
+   *    （那里才有按标签的 DNR 改头与缓存分区；同命名空间内 Cache 实例的 match 不受影响）。
+   * 仅 active（已绑定）模式安装；passthrough 模式不改变站点行为。
+   */
+  function installSwAndCacheShield(): void {
+    try {
+      const swProto = window.ServiceWorkerContainer?.prototype as
+        | (ServiceWorkerContainer & { register?: unknown })
+        | undefined;
+      const swCtl = navigator.serviceWorker;
+      if (SW_SHIELD_ENABLED && swProto && swCtl && typeof swProto.register === 'function') {
+        const desc = Object.getOwnPropertyDescriptor(swProto, 'register');
+        if (!desc || desc.configurable) {
+          Object.defineProperty(swProto, 'register', {
+            configurable: true,
+            writable: true,
+            // 阻断注册：站点回调 .catch 分支即可，不中断业务代码
+            value: () => Promise.reject(new Error('QuickLogin: site Service Worker disabled for bound tab')),
+          });
+        }
+        // 注销既有注册（SW 按 origin 共享：对全部标签页一致生效，消除共享缓存层）
+        if (typeof swCtl.getRegistrations === 'function') {
+          void Promise.resolve(swCtl.getRegistrations())
+            .then((regs) => {
+              for (const r of regs ?? []) {
+                try {
+                  void r.unregister();
+                } catch {
+                  // 单个注销失败不影响其余
+                }
+              }
+            })
+            .catch(() => undefined);
+        }
+      }
+
+      const CacheStorageProto = window.CacheStorage?.prototype as
+        | (CacheStorage & { open?: unknown })
+        | undefined;
+      if (SW_SHIELD_ENABLED && CacheStorageProto && typeof CacheStorageProto.open === 'function') {
+        const oOpen = CacheStorageProto.open as typeof CacheStorageProto.open;
+        const oKeys = CacheStorageProto.keys as typeof CacheStorageProto.keys;
+        const oHas = CacheStorageProto.has as typeof CacheStorageProto.has;
+        const oDelete = CacheStorageProto.delete as typeof CacheStorageProto.delete;
+        const oMatch = CacheStorageProto.match as typeof CacheStorageProto.match;
+        const patch = (
+          proto: object,
+          key: string,
+          value: (...args: any[]) => any,
+        ): void => {
+          const d = Object.getOwnPropertyDescriptor(proto, key);
+          if (!d || d.configurable) {
+            Object.defineProperty(proto, key, { configurable: true, writable: true, value });
+          }
+        };
+        patch(CacheStorageProto, 'open', function (this: CacheStorage, name: string) {
+          return oOpen.call(this, ns + String(name));
+        });
+        patch(CacheStorageProto, 'keys', function (this: CacheStorage) {
+          return Promise.resolve(oKeys.call(this)).then((arr) =>
+            (arr as string[]).filter((k) => k.startsWith(ns)).map((k) => k.slice(ns.length)),
+          );
+        });
+        patch(CacheStorageProto, 'has', function (this: CacheStorage, name: string) {
+          return oHas.call(this, ns + String(name));
+        });
+        patch(CacheStorageProto, 'delete', function (this: CacheStorage, name: string) {
+          return oDelete.call(this, ns + String(name));
+        });
+        patch(CacheStorageProto, 'match', function () {
+          // 跨命名空间搜索必读他人缓存：直接 miss，回落网络（受 DNR/_qlck 管辖）
+          return Promise.resolve(undefined);
+        });
+      }
+    } catch {
+      // 封控失败不阻断其余隔离平面
+    }
+  }
+
   /* ================= 绑定处理 ================= */
 
   function activate(accountId: string, seed?: Record<string, string>): void {
@@ -286,6 +447,7 @@
     mode = 'active';
     ns = `${NS_TAG}${accountId}__`;
     installStoragePatch();
+    installSwAndCacheShield();
     applySeed(seed);
   }
 
@@ -309,7 +471,10 @@
     }
   }
 
-  function handleBind(accountId: string, seed?: Record<string, string>): void {
+  function handleBind(accountId: string, seed?: Record<string, string>, tabId?: number): void {
+    if (typeof tabId === 'number') {
+      tabIdForCache = tabId;
+    }
     if (settled) {
       // 已绑定其它路径：仍允许把种子补进当前命名空间（幂等）
       applySeed(seed);
@@ -337,13 +502,16 @@
     if (event.source !== window) {
       return;
     }
-    const data = event.data as { src?: string; payload?: { op?: string; accountId?: string; seed?: Record<string, string> } } | null;
+    const data = event.data as {
+      src?: string;
+      payload?: { op?: string; accountId?: string; tabId?: number; seed?: Record<string, string> };
+    } | null;
     if (!data || data.src !== SRC_BRIDGE_TO_PAGE) {
       return;
     }
     const payload = data.payload;
     if (payload && payload.op === 'bind' && typeof payload.accountId === 'string') {
-      handleBind(payload.accountId, payload.seed);
+      handleBind(payload.accountId, payload.seed, typeof payload.tabId === 'number' ? payload.tabId : undefined);
     } else if (payload && payload.op === 'unbound') {
       settled = true; // 显式未绑定：保持直通，不再等待
     }

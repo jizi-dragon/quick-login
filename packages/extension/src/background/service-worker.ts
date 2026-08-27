@@ -11,6 +11,7 @@ import {
 } from './core/parallel-session';
 import { parallelStore } from './core/parallel-store';
 import { sessionManager } from './core/session-manager';
+import { tabRules } from './core/tab-rules';
 
 function ok<T>(data: T): Result<T> {
   return { ok: true, data };
@@ -104,6 +105,58 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       // 授权增撤后由 UI 通知：刷新授权健康缓存（下轮 par.list 生效）
       invalidateEnforcementCache();
       return { kind: 'par.grantChanged', result: ok(true) };
+    }
+    case 'ql.diag': {
+      // SW 上下文原地诊断（台架取证用）：storage.local 读写 / DNR 安装 / 模块内部状态
+      const r = await tryRun(async (): Promise<Record<string, unknown>> => {
+        const out: Record<string, unknown> = {};
+        try {
+          await chrome.storage.local.set({ __qt: Date.now() });
+          const v = await chrome.storage.local.get('__qt');
+          out.storageWrite = 'OK';
+          out.storageRead = Boolean(v['__qt']);
+        } catch (e) {
+          out.storageErr = e instanceof Error ? e.message : String(e);
+        }
+        try {
+          out.manifestVersion = chrome.runtime.getManifest().version;
+        } catch (e) {
+          out.manifestErr = e instanceof Error ? e.message : String(e);
+        }
+        try {
+          const rules = await chrome.declarativeNetRequest.getSessionRules();
+          out.sessionRuleCount = rules.length;
+        } catch (e) {
+          out.rulesErr = e instanceof Error ? e.message : String(e);
+        }
+        try {
+          await chrome.declarativeNetRequest.updateSessionRules({
+            addRules: [
+              {
+                id: 777001,
+                priority: 1,
+                action: {
+                  type: 'modifyHeaders',
+                  requestHeaders: [{ header: 'Cookie', operation: 'remove' }],
+                },
+                condition: {
+                  resourceTypes: ['main_frame'],
+                  requestDomains: ['tonbridge-config.aksoegmp.com'],
+                  tabIds: [999999],
+                },
+              } as chrome.declarativeNetRequest.Rule,
+            ],
+          });
+          await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [777001] });
+          out.dnrInSw = 'OK';
+        } catch (e) {
+          out.dnrInSwErr = e instanceof Error ? e.message : String(e);
+        }
+        out.parallel = parallelSession.debugState();
+        out.tabRules = tabRules.debugState();
+        return out;
+      });
+      return { kind: 'ql.diag', result: r };
     }
 
     /* ---------------- 浏览器并行账号（纯扩展模式） ---------------- */
