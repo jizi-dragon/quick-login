@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../theme.css" />
+    <link rel="stylesheet" href="parallel.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="head">
+        <h1>QuickLogin · 并行多开</h1>
+        <span id="engine-status" class="status-chip status-unknown">引擎连接中…</span>
+      </header>
+
+      <section class="card block">
+        <h2>新增账号</h2>
+        <p class="desc">每个账号对应一个独立的 Chrome 实例，登录态互不干扰；首次启动自动填表登录。</p>
+        <form id="create-form" class="grid">
+          <input id="f-host" placeholder="站点 host，例如 example.com" autocomplete="off" />
+          <input id="f-username" placeholder="用户名（登录账号）" autocomplete="off" />
+          <input id="f-alias" placeholder="账号名（标签标题，可省）" autocomplete="off" />
+          <input id="f-password" type="password" placeholder="密码" autocomplete="off" />
+          <button class="btn-primary" type="submit">添加并启动</button>
+        </form>
+      </section>
+
+      <section class="card block">
+        <h2>账号列表</h2>
+        <ul id="account-list" class="plain"></ul>
+      </section>
+
+      <section class="card block">
+        <h2>事件日志</h2>
+        <ul id="log-list" class="log"></ul>
+      </section>
+    </main>
+
+    <script src="parallel.js"></script>
+  </body>
+</html>

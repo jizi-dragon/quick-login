@@ -60,6 +60,7 @@ const extensionOptions = {
     'content/auto-login': path.join(extDir, 'src', 'content', 'auto-login.ts'),
     'ui/popup/popup': path.join(extDir, 'src', 'ui', 'popup', 'popup.ts'),
     'ui/options/options': path.join(extDir, 'src', 'ui', 'options', 'options.ts'),
+    'ui/parallel/parallel': path.join(extDir, 'src', 'ui', 'parallel', 'parallel.ts'),
   },
 };
 

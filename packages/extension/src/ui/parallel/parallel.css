@@ -1,0 +1,134 @@
+body {
+  background: var(--sb-bg);
+  padding: 32px 16px;
+}
+
+.wrap {
+  max-width: 860px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.head h1 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.status-chip {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--sb-border);
+  background: var(--sb-surface);
+  color: var(--sb-text-secondary);
+}
+.status-chip.status-connected {
+  color: #fff;
+  background: var(--sb-success);
+  border-color: var(--sb-success);
+}
+.status-chip.status-disconnected {
+  color: #fff;
+  background: var(--sb-danger);
+  border-color: var(--sb-danger);
+}
+
+.block {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.block h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--sb-text-secondary);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.plain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.account-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.account-item .meta {
+  flex: 1;
+  min-width: 0;
+}
+.account-item .alias {
+  font-weight: 600;
+  font-size: 14px;
+}
+.account-item .sub {
+  font-size: 12px;
+  color: var(--sb-text-secondary);
+}
+
+.badge {
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.badge.starting { background: var(--sb-warning); color: #fff; }
+.badge.online { background: var(--sb-success); color: #fff; }
+.badge.login_failed { background: var(--sb-danger); color: #fff; }
+.badge.offline { background: var(--sb-disabled); color: var(--sb-text-secondary); }
+
+.log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.log li {
+  font-size: 12px;
+  color: var(--sb-text-secondary);
+  border-bottom: 1px dashed var(--sb-border);
+  padding: 4px 0;
+}
+
+.btn-danger {
+  background: transparent;
+  color: var(--sb-danger);
+  padding: 6px 10px;
+}
+.btn-danger:hover {
+  background: var(--sb-danger);
+  color: #fff;
+}

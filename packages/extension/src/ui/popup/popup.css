@@ -19,6 +19,17 @@ body {
   font-weight: 700;
 }
 
+.head-nav {
+  display: flex;
+  gap: 4px;
+}
+.head-nav .btn-ghost {
+  padding: 5px 8px;
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 .control {
   padding: 12px;
   display: flex;

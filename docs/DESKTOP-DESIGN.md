@@ -203,12 +203,12 @@ quick-login/                       # 现仓库升级为 monorepo
 |---|---|---|---|
 | P1 引擎骨架 | monorepo 平移 + NM host + SQLite + spawn Launcher | 扩展按钮启动两个账号，并行在线不互踢 | ✅ 完成（命令行 NM 帧协议实测：2 账号并行在线） |
 | P2 自动登录 | selectors.yaml + CDP autologin（移植扩展逻辑） | 删 profile 目录后一键自动重登 | ✅ 完成（CDP 填表实测：根地址→/login 自动登录→/web） |
-| P3 扩展 UI | 独立扩展页 parallel.html（账号列表+徽标+日志）+ 弹窗入口按钮 + 断线重连 | 全程浏览器内操作，并行状态常驻可视 | ⏳ |
+| P3 扩展 UI | 独立扩展页 parallel.html（账号列表+徽标+日志）+ 弹窗入口按钮 + 断线重连 | 全程浏览器内操作，并行状态常驻可视 | ✅ 完成（NM host 注册 + engine-host.bat 实测连通） |
 | P4 分发容错 | 目录版打包（node.exe 随包）+ 状态恢复（端口探测）+ install.ps1 | 全新机器：解压→运行 install.ps1→可用，无 Node/Python | ⏳ |
 
 P1 落地备注：
 - DPAPI 依赖最终选 `@primno/dpapi`（预编译 N-API 免本地编译；`win-dpapi` 在 VS2026 下源码编译失败弃用）。
-- 引擎 bundle 输出 `.cjs` + `engine-host.cmd` 包装（目录版分发入口），规避 packages/engine 的 `"type":"module"` 声明冲突。
+- 引擎 bundle 输出 `.cjs`（规避 packages/engine 的 `"type":"module"` 声明冲突），NM host 入口由 `install.ps1` 生成 `engine-host.bat`。
 - 扩展端已接 NM：manifest 加 `nativeMessaging`，background 含 port 管理器（懒连接/指数退避重连）与事件桥（P3 的 parallel 页消费）。
 
 P2 落地备注（自动登录踩坑记录）：
@@ -216,6 +216,12 @@ P2 落地备注（自动登录踩坑记录）：
 - **`--user-data-dir` 必须绝对路径**：相对路径下 Chrome 无法隔离，新实例被委托给已运行的默认实例（报「已经运行的实例会在当前会话中打开」）立即退出。
 - **登录按钮 disabled 竞态**：React 受控组件登录按钮初始 disabled，填值触发 onChange 后才可点。原「一次性提交锁」导致点击发生在按钮 disabled 时且不再重试。改为「幂等填值 + 节流重试点击（2s）+ disabled 检查」。
 - **登录态判定**：三态分类——`/login`=登录页、根地址空路径=跳转中、其它=已登录业务页。避免把「根地址重定向前」误判为已登录。
+
+P3 落地备注（扩展 UI）：
+- 新增 `ui/parallel/`（parallel.html/css/ts）：账号列表 + 状态徽标 + 启动/停止/删除 + 事件日志；popup 头部加「并行多开 →」入口。
+- **修复多 onMessage listener 冲突**：原 background 有两个 onMessage listener，第一个对所有消息 `return true` 会把 NM 桥命令吞进 dispatch 返回 undefined。合并为单一 listener（autoLoginRequest / NM 桥命令 / 普通请求三段分流）。
+- NM host 注册：扩展 manifest 加固定 `key`（固定 ID `bingdkdlocnmdheghbmpnjilamcbciek`），`allowed_origins` 绑定该 ID；`install.ps1` 生成 engine-host.bat + NM manifest + 写注册表 HKCU。
+- Chrome Native Messaging host `path` 可用 `.bat`（官方示例与多方实践验证）；engine-host.bat 用绝对 node 路径不依赖 PATH。
 
 ## 10. 风险与对策
 

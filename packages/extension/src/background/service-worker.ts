@@ -98,8 +98,8 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
   }
 }
 
-chrome.runtime.onMessage.addListener((req: RuntimeRequest, sender, sendResponse) => {
-  // 内部消息：auto-login 内容脚本就绪后主动索取自动登录凭证
+chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
+  // 1. auto-login 内容脚本就绪后主动索取自动登录凭证
   if (
     req &&
     typeof req === 'object' &&
@@ -113,22 +113,21 @@ chrome.runtime.onMessage.addListener((req: RuntimeRequest, sender, sendResponse)
     void navigation.getPendingAutoLogin(tabId).then((creds) => sendResponse(creds));
     return true;
   }
-  void dispatch(req).then(sendResponse);
-  return true;
-});
 
-// 引擎（NM）事件桥：parallel 页通过 runtime 消息收发引擎指令与事件
-chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
-  if (msg && typeof msg === 'object' && (msg as { nmBridge?: boolean }).nmBridge) {
-    const payload = msg as { direction: 'command'; cmd: EngineCommand } | { direction: 'subscribe' };
+  // 2. NM 桥：parallel 页通过 runtime 消息向引擎转发指令
+  if (req && typeof req === 'object' && (req as { nmBridge?: boolean }).nmBridge) {
+    const payload = req as { direction?: string; cmd?: EngineCommand };
     if (payload.direction === 'command') {
-      sendResponse({ ok: sendCommand(payload.cmd) });
+      sendResponse({ ok: sendCommand(payload.cmd!) });
       return true;
     }
     sendResponse({ ok: true });
     return true;
   }
-  return false;
+
+  // 3. 普通扩展内部请求
+  void dispatch(req as RuntimeRequest).then(sendResponse);
+  return true;
 });
 
 onEngineEvent((event) => {
