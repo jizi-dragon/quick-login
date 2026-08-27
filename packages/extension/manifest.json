@@ -23,7 +23,7 @@
     }
   },
   "options_page": "ui/options/options.html",
-  "permissions": ["tabs", "scripting", "cookies", "storage", "contextMenus"],
+  "permissions": ["tabs", "scripting", "cookies", "storage", "contextMenus", "nativeMessaging"],
   "host_permissions": [],
   "optional_host_permissions": ["*://*/*"],
   "commands": {

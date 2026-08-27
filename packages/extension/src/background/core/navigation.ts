@@ -11,18 +11,6 @@ export interface TabBinding {
 /** 内存 + session 持久化的 tabId ↔ sessionId 绑定表（仅用于复用标签页） */
 const bindings = new Map<number, TabBinding>();
 
-export function extractHost(url: string | undefined): string | null {
-  if (!url) {
-    return null;
-  }
-  try {
-    const u = new URL(url);
-    return u.protocol === 'http:' || u.protocol === 'https:' ? u.host : null;
-  } catch {
-    return null;
-  }
-}
-
 async function readState(): Promise<void> {
   const stored = await chrome.storage.session.get([SESSION_KEYS.sessionTabBindings]);
   const map = stored[SESSION_KEYS.sessionTabBindings] as Record<string, TabBinding> | undefined;

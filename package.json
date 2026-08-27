@@ -1,16 +1,21 @@
 {
-  "name": "sessionbox-reborn",
-  "version": "2.0.0",
+  "name": "quick-login",
+  "version": "2.2.0",
   "private": true,
-  "description": "SessionBox 重构项目：单浏览器多账号登录 + 标签页标题改写为账号名",
+  "description": "QuickLogin：扩展（单账号免密切换）+ 本地引擎（多账号并行在线）",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/chrome": "^0.0.280",
+    "@types/node": "^22.0.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"
   },

@@ -1,0 +1,10 @@
+{
+  "name": "@quicklogin/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@primno/dpapi": "^2.0.1",
+    "better-sqlite3": "^11.0.0"
+  }
+}

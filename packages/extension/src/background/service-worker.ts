@@ -5,6 +5,8 @@ import { credentials } from './core/credentials';
 import { navigation, registerNavigationHandlers } from './core/navigation';
 import { sessionManager } from './core/session-manager';
 import { registerAuthHandlers, siteAuth } from './core/site-auth';
+import { onEngineEvent, sendCommand } from './nm-client';
+import type { EngineCommand } from '../../../shared/nm-protocol';
 
 function ok<T>(data: T): Result<T> {
   return { ok: true, data };
@@ -26,12 +28,6 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
   switch (req.kind) {
     case 'session.list':
       return { kind: 'session.list', result: await tryRun(() => sessionManager.list()) };
-    case 'session.get':
-      return { kind: 'session.get', result: await tryRun(() => sessionManager.getOrThrow(req.id)) };
-    case 'session.create': {
-      const r = await tryRun(() => sessionManager.create(req.input));
-      return { kind: 'session.create', result: r };
-    }
     case 'session.update': {
       const r = await tryRun(() => sessionManager.update(req.id, req.patch));
       if (r.ok) {
@@ -95,13 +91,6 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       });
       return { kind: 'session.openOrCreate', result: r };
     }
-    case 'session.updateCredentials': {
-      const r = await tryRun(async () => {
-        const enc = await credentials.encryptCredentials(req.username, req.password);
-        await sessionManager.updateCredentials(req.id, enc);
-      });
-      return { kind: 'session.updateCredentials', result: r };
-    }
     case 'site.grants.list':
       return { kind: 'site.grants.list', result: await tryRun(() => siteAuth.list()) };
     case 'site.grant.add':
@@ -126,6 +115,25 @@ chrome.runtime.onMessage.addListener((req: RuntimeRequest, sender, sendResponse)
   }
   void dispatch(req).then(sendResponse);
   return true;
+});
+
+// 引擎（NM）事件桥：parallel 页通过 runtime 消息收发引擎指令与事件
+chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
+  if (msg && typeof msg === 'object' && (msg as { nmBridge?: boolean }).nmBridge) {
+    const payload = msg as { direction: 'command'; cmd: EngineCommand } | { direction: 'subscribe' };
+    if (payload.direction === 'command') {
+      sendResponse({ ok: sendCommand(payload.cmd) });
+      return true;
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+  return false;
+});
+
+onEngineEvent((event) => {
+  // 广播给所有监听页（P3 的 parallel.html）
+  void chrome.runtime.sendMessage({ nmBridge: true, event }).catch(() => undefined);
 });
 
 registerNavigationHandlers();
