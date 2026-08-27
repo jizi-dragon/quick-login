@@ -12,6 +12,11 @@ export interface LaunchResult {
   message?: string;
 }
 
+export interface StartCredentials {
+  username: string;
+  password: string;
+}
+
 /**
  * 账号浏览器实例编排：每账号一个独立 user-data-dir 的 Chrome 实例。
  * spawn 出的进程独立于引擎生命周期（引擎退出不连坐）；实例状态经调试端口探测。
@@ -36,7 +41,7 @@ export class Launcher {
     return BASE_PORT + index;
   }
 
-  async start(account: AccountRow, index: number): Promise<LaunchResult> {
+  async start(account: AccountRow, index: number, credentials?: StartCredentials): Promise<LaunchResult> {
     const existing = this.running.get(account.id);
     if (existing && !existing.proc.killed) {
       return { port: existing.port, state: 'online' };
@@ -78,8 +83,24 @@ export class Launcher {
     }
 
     this.running.set(account.id, { proc, port });
-    // P1 阶段：端口就绪即视为在线（自动登录在 P2 接入 CDP 后实现）
     this.onState(account.id, 'online');
+
+    // 自动登录：实例已带持久 profile，若已登录则 autoLogin 会立即判定 already_authed；
+    // 首次（无登录态）则 CDP 填表提交。失败不阻塞在线状态，仅回传 login_failed 提示。
+    if (credentials) {
+      void (async () => {
+        try {
+          const { autoLogin } = await import('./autologin');
+          const result = await autoLogin(port, credentials);
+          if (!result.success) {
+            this.onState(account.id, 'login_failed', result.reason);
+          }
+        } catch (e) {
+          this.onState(account.id, 'login_failed', e instanceof Error ? e.message : String(e));
+        }
+      })();
+    }
+
     return { port, state: 'online' };
   }
 

@@ -43,7 +43,7 @@ const engineOptions = {
   outExtension: { '.js': '.cjs' },
   logLevel: 'info',
   entryPoints: { engine: path.join(engineDir, 'src', 'main.ts') },
-  external: ['better-sqlite3', '@primno/dpapi'],
+  external: ['better-sqlite3', '@primno/dpapi', 'chrome-remote-interface'],
 };
 
 const extensionOptions = {

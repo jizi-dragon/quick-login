@@ -15,6 +15,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/chrome": "^0.0.280",
+    "@types/chrome-remote-interface": "^0.34.0",
     "@types/node": "^22.0.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"

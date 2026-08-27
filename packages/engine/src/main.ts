@@ -41,6 +41,11 @@ const channel = new NmChannel(
   },
 );
 
+/** 账号在列表中的序号（按创建顺序），用于分配调试端口 */
+function indexOfAccount(id: string): number {
+  return store.list().findIndex((a) => a.id === id);
+}
+
 function emitAccounts(): void {
   channel.send({ event: 'accounts', accounts: store.list().map(toEngineAccount) });
 }
@@ -65,7 +70,10 @@ async function handle(cmd: EngineCommand): Promise<void> {
         });
         emitAccounts();
         if (cmd.start !== false) {
-          await launcher.start(row, store.list().indexOf(row));
+          await launcher.start(row, indexOfAccount(row.id), {
+            username: row.username,
+            password: cmd.password,
+          });
         }
         return;
       }
@@ -75,7 +83,8 @@ async function handle(cmd: EngineCommand): Promise<void> {
           channel.send({ event: 'error', message: `账号不存在: ${cmd.accountId}` });
           return;
         }
-        await launcher.start(row, store.list().indexOf(row));
+        const credentials = { username: row.username, password: store.password(row) };
+        await launcher.start(row, indexOfAccount(row.id), credentials);
         return;
       }
       case 'stop':
