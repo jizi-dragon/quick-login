@@ -7,31 +7,17 @@
   </head>
   <body>
     <header class="card head">
-      <h1>SessionBox · 多账号</h1>
-      <nav class="head-nav">
-        <a class="btn-ghost" href="../parallel/parallel.html" target="_blank">并行多开</a>
-        <a class="btn-ghost" href="../options/options.html" target="_blank">站点管理</a>
-      </nav>
+      <h1>QuickLogin · 多账号并行</h1>
     </header>
 
     <section class="card control">
-      <label class="field">
-        <span>站点</span>
-        <select id="site"></select>
-      </label>
-      <form id="create" class="field">
-        <span>会话信息</span>
-        <input id="username" placeholder="用户名（登录账号）" autocomplete="off" />
-        <input id="alias" placeholder="账号名（用作标签标题）" autocomplete="off" />
-        <input id="password" type="password" placeholder="密码（可选，用于自动登录）" autocomplete="off" />
-        <button class="btn-primary" type="submit">添加并打开</button>
-      </form>
+      <button id="open-parallel" class="btn-primary launch">打开并行管理页</button>
+      <button id="open-wheel" class="btn-ghost launch">账号选择轮盘（Alt+Q）</button>
+      <button id="grant-site" class="btn-ghost launch">授权当前站点</button>
+      <p class="hint" id="grant-hint">在目标站点标签页上点击「授权当前站点」，该站点的请求头改写才会生效。</p>
     </section>
 
-    <p class="hint">未看到目标站点？请先在“站点管理”中添加站点并授权。</p>
-
-    <ul id="list" class="list"></ul>
-    <p class="empty" id="empty">暂无会话</p>
+    <p class="hint" id="ext-version"></p>
 
     <script src="popup.js"></script>
   </body>

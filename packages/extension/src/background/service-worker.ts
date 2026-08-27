@@ -1,12 +1,16 @@
-import type { Result, RuntimeRequest, RuntimeResponse } from '../shared/messages';
-import { CONTENT_MESSAGE } from '../shared/constants';
+import type { RuntimeRequest, RuntimeResponse, Result } from '../shared/messages';
+import type { BridgeUpPayload } from '../shared/types';
+import { CONTENT_MESSAGE, EXT_VERSION } from '../shared/constants';
 import { accountRegistry } from './core/account-registry';
 import { credentials } from './core/credentials';
 import { navigation, registerNavigationHandlers } from './core/navigation';
+import {
+  invalidateEnforcementCache,
+  parallelSession,
+  registerParallelHandlers,
+} from './core/parallel-session';
+import { parallelStore } from './core/parallel-store';
 import { sessionManager } from './core/session-manager';
-import { registerAuthHandlers, siteAuth } from './core/site-auth';
-import { onEngineEvent, sendCommand } from './nm-client';
-import type { EngineCommand } from '../../../shared/nm-protocol';
 
 function ok<T>(data: T): Result<T> {
   return { ok: true, data };
@@ -92,13 +96,82 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       return { kind: 'session.openOrCreate', result: r };
     }
     case 'site.grants.list':
-      return { kind: 'site.grants.list', result: await tryRun(() => siteAuth.list()) };
+      // v2.4：旧站点清单入口已移除；保留空实现避免旧调用报 unhandled
+      return { kind: 'site.grants.list', result: { ok: true, data: [] } };
     case 'site.grant.add':
-      return { kind: 'site.grant.add', result: await tryRun(() => siteAuth.grant(req.host)) };
+      return { kind: 'site.grant.add', result: fail('v2.4 起改为在弹窗/并行页直接授权') };
+    case 'par.grantChanged': {
+      // 授权增撤后由 UI 通知：刷新授权健康缓存（下轮 par.list 生效）
+      invalidateEnforcementCache();
+      return { kind: 'par.grantChanged', result: ok(true) };
+    }
+
+    /* ---------------- 浏览器并行账号（纯扩展模式） ---------------- */
+    case 'par.list': {
+      const r = await tryRun(async () =>
+        (await parallelStore.list()).map((a) => ({
+          ...a,
+          ...parallelSession.statusOf(a.id),
+          password: Boolean(a.credentials),
+        })),
+      );
+      return { kind: 'par.list', result: r };
+    }
+    case 'par.create': {
+      const r = await tryRun(async () => {
+        const account = await parallelStore.create({
+          siteHost: req.siteHost,
+          tabName: req.tabName,
+          username: req.username,
+          password: req.password,
+        });
+        if (req.open) {
+          await parallelSession.open(account.id, false);
+        }
+        return account;
+      });
+      return { kind: 'par.create', result: r };
+    }
+    case 'par.update': {
+      const r = await tryRun(async () => {
+        const account = await parallelStore.updateTabName(req.id, req.patch.tabName ?? '');
+        await parallelSession.refreshTitle(req.id);
+        return account;
+      });
+      return { kind: 'par.update', result: r };
+    }
+    case 'par.delete': {
+      const r = await tryRun(() => parallelSession.deleteAccount(req.id));
+      return { kind: 'par.delete', result: r };
+    }
+    case 'par.open': {
+      const r = await tryRun(() => parallelSession.open(req.id, req.forceNewTab === true));
+      return { kind: 'par.open', result: r };
+    }
+    case 'wheel.toggle': {
+      const r = await tryRun(async () => {
+        await toggleAccountWheel();
+        return { opened: wheelWinId !== null };
+      });
+      return { kind: 'wheel.toggle', result: r };
+    }
   }
 }
 
 chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
+  // 0. shield 桥上行：绑定查询 / token 捕获上报（先于通用分流）
+  if (
+    req &&
+    typeof req === 'object' &&
+    (req as { type?: string }).type === CONTENT_MESSAGE.bridgeUp
+  ) {
+    const payload = (req as { payload?: BridgeUpPayload }).payload;
+    void parallelSession
+      .handleBridge(payload as BridgeUpPayload, sender.tab?.id)
+      .then(sendResponse);
+    return true;
+  }
+
   // 1. auto-login 内容脚本就绪后主动索取自动登录凭证
   if (
     req &&
@@ -114,26 +187,123 @@ chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
     return true;
   }
 
-  // 2. NM 桥：parallel 页通过 runtime 消息向引擎转发指令
-  if (req && typeof req === 'object' && (req as { nmBridge?: boolean }).nmBridge) {
-    const payload = req as { direction?: string; cmd?: EngineCommand };
-    if (payload.direction === 'command') {
-      sendResponse({ ok: sendCommand(payload.cmd!) });
-      return true;
-    }
-    sendResponse({ ok: true });
-    return true;
-  }
+  // 2. （已移除）旧版本地引擎 NM 桥 —— v2.4 起纯浏览器模式，不再转发引擎指令
 
   // 3. 普通扩展内部请求
   void dispatch(req as RuntimeRequest).then(sendResponse);
   return true;
 });
 
-onEngineEvent((event) => {
-  // 广播给所有监听页（P3 的 parallel.html）
-  void chrome.runtime.sendMessage({ nmBridge: true, event }).catch(() => undefined);
+/* ---------------- 快捷键：账号选择轮盘（v3.2：页面内无框浮层优先） ---------------- */
+
+const WHEEL_PAGE = 'ui/wheel/wheel.html';
+const WHEEL_W = 420;
+const WHEEL_H = 480;
+/** 兜底浮层脚本（ISOLATED world，幂等开关）：普通网页上直接铺开无框轮盘 */
+const WHEEL_OVERLAY_FILE = 'content/wheel-overlay.js';
+
+/** 会话内记忆轮盘窗口 id；再次触发快捷键 = 关闭（幂等开关，仅对独立小窗模式有效） */
+let wheelWinId: number | null = null;
+/** 触发去抖：命令重放/系统连击不会开后又立刻关 */
+let lastToggleAt = 0;
+
+chrome.windows.onRemoved.addListener((winId) => {
+  if (winId === wheelWinId) {
+    wheelWinId = null;
+  }
 });
 
+async function toggleAccountWheel(): Promise<void> {
+  const now = Date.now();
+  if (now - lastToggleAt < 300) {
+    return;
+  }
+  lastToggleAt = now;
+
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+
+  // 机制一（主）：普通网页 → 页面内无框浮层（再次触发 = 脚本自关闭）
+  try {
+    if (tab?.id && tab.url && /^https?:/i.test(tab.url)) {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: [WHEEL_OVERLAY_FILE],
+        world: 'ISOLATED',
+      });
+      return;
+    }
+  } catch {
+    // 注入失败（受限页/权限收回等）→ 继续降级
+  }
+
+  // 机制二：独立弹窗小窗（Chrome 对 chrome:// 等页注入不了时仍可用）
+  if (wheelWinId !== null) {
+    try {
+      await chrome.windows.get(wheelWinId);
+    } catch {
+      wheelWinId = null;
+    }
+    if (wheelWinId !== null) {
+      await chrome.windows.remove(wheelWinId).catch(() => undefined);
+      wheelWinId = null;
+      return;
+    }
+  }
+
+  const current = tab ? await chrome.windows.get(tab.windowId).catch(() => undefined) : undefined;
+  const left =
+    current && typeof current.left === 'number'
+      ? Math.max(0, current.left + Math.max(0, ((current.width ?? 900) - WHEEL_W) >> 1))
+      : undefined;
+  const top =
+    current && typeof current.top === 'number'
+      ? Math.max(0, current.top + Math.max(0, ((current.height ?? 700) - WHEEL_H) >> 1))
+      : undefined;
+
+  try {
+    const win = await chrome.windows.create({
+      url: chrome.runtime.getURL(WHEEL_PAGE),
+      type: 'popup',
+      width: WHEEL_W,
+      height: WHEEL_H,
+      left,
+      top,
+    });
+    wheelWinId = win.id ?? null;
+    return;
+  } catch {
+    // 继续走最终兜底
+  }
+
+  // 机制三（最终）：普通标签页打开轮盘
+  await chrome.tabs.create({ url: chrome.runtime.getURL(WHEEL_PAGE) });
+}
+
+chrome.commands.onCommand.addListener((command) => {
+  if (command === 'quick-wheel') {
+    // 角标闪标：证明命令确实到达了当前版本的后台（现场诊断手段）
+    void flashBadge('→');
+    void toggleAccountWheel();
+  }
+});
+
+/** 角标临时显示文本后恢复 */
+async function flashBadge(text: string): Promise<void> {
+  try {
+    await chrome.action.setBadgeBackgroundColor({ color: '#1E6FFF' });
+    await chrome.action.setBadgeText({ text });
+    window.setTimeout(() => {
+      void chrome.action.setBadgeText({ text: '' });
+    }, 1200);
+  } catch {
+    // 角标不可用忽略
+  }
+}
+
 registerNavigationHandlers();
-registerAuthHandlers();
+registerParallelHandlers();
+
+/* 启动即短显版本号：重新加载扩展后，无需打开任何界面即可确认新代码已生效 */
+void flashBadge(`v${EXT_VERSION.split('.').slice(0, 2).join('.')}`).finally(() => {
+  // flashBadge 自身 1.2s 后清空；这里把启动展示延长为额外一次，共约 2.4s 可见窗口
+});

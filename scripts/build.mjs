@@ -56,11 +56,14 @@ const extensionOptions = {
   logLevel: 'info',
   entryPoints: {
     'background': path.join(extDir, 'src', 'background', 'service-worker.ts'),
+    'content/shield-bridge': path.join(extDir, 'src', 'content', 'shield-bridge.ts'),
+    'content/shield-main': path.join(extDir, 'src', 'content', 'shield-main.ts'),
     'content/title-hook': path.join(extDir, 'src', 'content', 'title-hook.ts'),
     'content/auto-login': path.join(extDir, 'src', 'content', 'auto-login.ts'),
+    'content/wheel-overlay': path.join(extDir, 'src', 'content', 'wheel-overlay.ts'),
     'ui/popup/popup': path.join(extDir, 'src', 'ui', 'popup', 'popup.ts'),
-    'ui/options/options': path.join(extDir, 'src', 'ui', 'options', 'options.ts'),
     'ui/parallel/parallel': path.join(extDir, 'src', 'ui', 'parallel', 'parallel.ts'),
+    'ui/wheel/wheel': path.join(extDir, 'src', 'ui', 'wheel', 'wheel.ts'),
   },
 };
 

@@ -1,6 +1,6 @@
 {
   "name": "quick-login",
-  "version": "2.2.0",
+  "version": "3.4.0",
   "private": true,
   "description": "QuickLogin：扩展（单账号免密切换）+ 本地引擎（多账号并行在线）",
   "type": "module",
@@ -10,7 +10,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "e2e": "node tools/e2e/harness.mjs"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
@@ -18,6 +19,7 @@
     "@types/chrome-remote-interface": "^0.34.0",
     "@types/node": "^22.0.0",
     "esbuild": "^0.24.0",
+    "playwright-core": "^1.62.1",
     "typescript": "^5.6.0"
   },
   "allowScripts": {

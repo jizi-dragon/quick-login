@@ -1,0 +1,410 @@
+import { CONTENT_MESSAGE, LOCAL_KEYS, SESSION_KEYS } from '../../shared/constants';
+import type { BridgeDownPayload, BridgeUpPayload } from '../../shared/types';
+import { credentials } from './credentials';
+import { setTabTitle } from '../tabs/tab-title';
+import { parallelStore } from './parallel-store';
+import { tabRules } from './tab-rules';
+
+/**
+ * 「多平面隔离」运行时编排（纯扩展多账号并行，见 docs/BROWSER-ONLY-MULTILOGIN-RESEARCH.md §4）：
+ * - 存储平面：MAIN 壳把绑定标签页的 localStorage / document.cookie 重定向到账号命名空间；
+ *   桥接脚本上报 `__auth_token__` 等键的写入 → 本模块捕获 token 快照。
+ * - 网络平面：每绑定标签两条 DNR 规则——Authorization 改写 + 出站 Cookie 头剥离（v3 新增，
+ *   封堵「真实 jar = 最后登录者」的串号通道）。
+ * - 授权健康：host 缺少浏览器授权或被手动停用时，网络平面整体关闭并在 UI 显著提示。
+ */
+
+interface ParBinding {
+  accountId: string;
+  host: string;
+}
+
+interface TokenSnapshot {
+  token?: string;
+  authUser?: string;
+  deviceFp?: string;
+}
+
+const bindings = new Map<number, ParBinding>();
+const tokens = new Map<string, TokenSnapshot>();
+/** 授权健康缓存：host → 是否可执行（已授权且未被手动停用） */
+const enforcement = new Map<string, boolean>();
+
+async function readBlockedHosts(): Promise<Set<string>> {
+  const stored = await chrome.storage.local.get(LOCAL_KEYS.blockedHosts);
+  return new Set((stored[LOCAL_KEYS.blockedHosts] as string[] | undefined) ?? []);
+}
+
+/** 检查某 host 的网络平面是否可执行（带缓存的授权 + 封锁名单判定） */
+async function isEnforceable(host: string): Promise<boolean> {
+  const cached = enforcement.get(host);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const blocked = await readBlockedHosts();
+  if (blocked.has(host)) {
+    enforcement.set(host, false);
+    return false;
+  }
+  let granted = false;
+  try {
+    granted = await chrome.permissions.contains({ origins: [`*://${host}/*`] });
+  } catch {
+    granted = false;
+  }
+  // 更宽泛的通配授权也算可用
+  if (!granted) {
+    try {
+      granted = await chrome.permissions.contains({ origins: ['*://*/*'] });
+    } catch {
+      granted = false;
+    }
+  }
+  enforcement.set(host, granted);
+  return granted;
+}
+
+/** 强制刷新授权缓存（授权增撤后调用） */
+export function invalidateEnforcementCache(): void {
+  enforcement.clear();
+}
+
+async function readState(): Promise<void> {
+  const [bindStored, tokenStored] = await Promise.all([
+    chrome.storage.session.get(SESSION_KEYS.parTabBindings),
+    chrome.storage.session.get(SESSION_KEYS.parTokens),
+  ]);
+  bindings.clear();
+  const bindMap = bindStored[SESSION_KEYS.parTabBindings] as Record<string, ParBinding> | undefined;
+  if (bindMap) {
+    for (const [tabId, b] of Object.entries(bindMap)) {
+      bindings.set(Number(tabId), b);
+    }
+  }
+  tokens.clear();
+  const tokenMap = tokenStored[SESSION_KEYS.parTokens] as Record<string, TokenSnapshot> | undefined;
+  if (tokenMap) {
+    for (const [id, t] of Object.entries(tokenMap)) {
+      tokens.set(id, t);
+    }
+  }
+}
+
+async function persistBindings(): Promise<void> {
+  const map: Record<string, ParBinding> = {};
+  for (const [tabId, b] of bindings) {
+    map[String(tabId)] = b;
+  }
+  await chrome.storage.session.set({ [SESSION_KEYS.parTabBindings]: map });
+}
+
+async function persistTokens(): Promise<void> {
+  const map: Record<string, TokenSnapshot> = {};
+  for (const [id, t] of tokens) {
+    map[id] = t;
+  }
+  await chrome.storage.session.set({ [SESSION_KEYS.parTokens]: map });
+}
+
+/* ---------------- 标题与待登录凭证（复用既有内容脚本协议） ---------------- */
+
+async function applyTitle(tabId: number, tabName: string): Promise<void> {
+  await setTabTitle(tabId, tabName);
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: CONTENT_MESSAGE.setTitle, alias: tabName });
+  } catch {
+    // 内容脚本未就绪：标题已权威写入；后续 onUpdated 会再推
+  }
+}
+
+/** 与 navigation.ts 相同约定的待登录凭证缓存（auto-login 内容脚本按 tabId 拉取） */
+async function setPendingAutoLogin(tabId: number, username: string, password: string): Promise<void> {
+  await chrome.storage.session.set({
+    [`${SESSION_KEYS.pendingAutoLogins}:${tabId}`]: { username, password, at: Date.now() },
+  });
+}
+
+function boundTabsOf(accountId: string): number[] {
+  const out: number[] = [];
+  for (const [tabId, b] of bindings) {
+    if (b.accountId === accountId) {
+      out.push(tabId);
+    }
+  }
+  return out;
+}
+
+/* ---------------- token 捕获 → DNR 规则同步（网络平面写入点） ---------------- */
+
+async function captureToken(accountId: string, host: string, rawToken: string): Promise<void> {
+  const token = rawToken.startsWith('Bearer ') ? rawToken.slice(7).trim() : rawToken.trim();
+  if (!token || !/^[\w-]+\.[\w-]+\.[\w-]*$/.test(token)) {
+    return; // 仅接受形如 JWT 的值，避免把页面噪声写进规则
+  }
+  const snap = tokens.get(accountId) ?? {};
+  if (snap.token === token) {
+    return; // 去重
+  }
+  snap.token = token;
+  tokens.set(accountId, snap);
+  await persistTokens();
+  await syncAccountRules(accountId, host);
+}
+
+/** 把某账号当前 token 同步到其全部绑定标签页的规则（受授权健康门控） */
+async function syncAccountRules(accountId: string, host: string): Promise<void> {
+  if (!(await isEnforceable(host))) {
+    return; // 授权缺失/停用：不装规则，UI 通过 enforcementOff 提示
+  }
+  const token = tokens.get(accountId)?.token ?? null;
+  await Promise.all(boundTabsOf(accountId).map((tabId) => tabRules.applyBinding(host, tabId, token)));
+}
+
+/* ---------------- 绑定生命周期 ---------------- */
+
+export const parallelSession = {
+  /** 打开（或新建）账号标签页并完成绑定 */
+  async open(accountId: string, forceNewTab = false): Promise<{ tabId: number; reused: boolean }> {
+    const account = await parallelStore.get(accountId);
+    let tabId: number | null = null;
+
+    if (!forceNewTab) {
+      const existing = boundTabsOf(accountId)[0];
+      if (existing !== undefined && (await tabStillAlive(existing))) {
+        tabId = existing;
+      }
+    }
+
+    if (tabId === null) {
+      const hasToken = Boolean(tokens.get(accountId)?.token);
+      // 已有登录态直达站点根路径；否则进登录页自动填表
+      const url = `https://${account.siteHost}${hasToken ? '/' : '/login'}`;
+      const tab = await chrome.tabs.create({ url });
+      tabId = tab.id!;
+    } else {
+      await chrome.tabs.update(tabId, { active: true });
+    }
+
+    bindings.set(tabId, { accountId: account.id, host: account.siteHost });
+    await persistBindings();
+
+    if (account.credentials) {
+      const creds = await credentials.decryptCredentials(account.credentials);
+      await setPendingAutoLogin(tabId, creds.username, creds.password);
+    }
+
+    // 推送绑定种子：桥转发给 MAIN 壳（壳在 committed 前后到达均可自举）
+    await pushBind(tabId);
+    await applyTitle(tabId, account.tabName);
+    await syncAccountRules(account.id, account.siteHost);
+    return { tabId, reused: false };
+  },
+
+  /** 解绑单个标签页（不动账号数据） */
+  async unbindTab(tabId: number): Promise<void> {
+    if (bindings.delete(tabId)) {
+      await persistBindings();
+    }
+    await tabRules.clearTab(tabId);
+    try {
+      await pushDown(tabId, { op: 'unbound' });
+    } catch {
+      // 页面可能已关闭
+    }
+  },
+
+  /** 删除账号：关闭其全部绑定标签页、摘除规则、清 token */
+  async deleteAccount(accountId: string): Promise<void> {
+    const tabs = boundTabsOf(accountId);
+    for (const tabId of tabs) {
+      await this.unbindTab(tabId);
+    }
+    if (tabs.length) {
+      await chrome.tabs.remove(tabs).catch(() => undefined);
+    }
+    tokens.delete(accountId);
+    await persistTokens();
+    await parallelStore.delete(accountId);
+  },
+
+  /** ISOLATED 桥上行消息入口 */
+  async handleBridge(payload: BridgeUpPayload, tabId: number | undefined): Promise<BridgeDownPayload | undefined> {
+    if (payload.op === 'hello') {
+      if (tabId !== undefined) {
+        const binding = bindings.get(tabId);
+        if (binding) {
+          return buildBindPayload(binding.accountId);
+        }
+      }
+      return { op: 'unbound' };
+    }
+    if (tabId === undefined) {
+      return undefined;
+    }
+    const binding = bindings.get(tabId);
+    if (!binding) {
+      return undefined;
+    }
+    if (payload.op === 'storageWrite') {
+      const snap = tokens.get(binding.accountId) ?? {};
+      if (payload.key === '__auth_token__') {
+        if (payload.value === null) {
+          // 页面内登出：清 token + 摘规则
+          delete snap.token;
+          tokens.set(binding.accountId, snap);
+          await persistTokens();
+          await syncAccountRules(binding.accountId, binding.host);
+        } else {
+          await captureToken(binding.accountId, binding.host, payload.value);
+        }
+      } else if (payload.key === '__auth_user__') {
+        snap.authUser = payload.value ?? undefined;
+        tokens.set(binding.accountId, snap);
+        await persistTokens();
+      } else if (payload.key === '__device_fp__') {
+        snap.deviceFp = payload.value ?? undefined;
+        tokens.set(binding.accountId, snap);
+        await persistTokens();
+      }
+      return undefined;
+    }
+    if (payload.op === 'authHeader') {
+      // 二级捕获通道：fetch/XHR 出站 Authorization 头嗅探
+      await captureToken(binding.accountId, binding.host, payload.value);
+      return undefined;
+    }
+    return undefined;
+  },
+
+  /** UI 列表：返回实时状态（绑定标签页 / token / 网络平面健康） */
+  statusOf(accountId: string): { tabIds: number[]; hasToken: boolean; enforcementOff: boolean } {
+    const tabs = boundTabsOf(accountId);
+    const host = tabs.length ? bindings.get(tabs[0])?.host : undefined;
+    let enforcementOff = false;
+    if (host) {
+      enforcementOff = !enforcement.get(host);
+    } else {
+      // 无绑定标签时以账号自身 host 判定
+      void parallelStore
+        .get(accountId)
+        .then((a) => isEnforceable(a.siteHost))
+        .catch(() => false);
+    }
+    return { tabIds: tabs, hasToken: Boolean(tokens.get(accountId)?.token), enforcementOff };
+  },
+
+  /** 账号改名后刷新所有绑定标签页标题 */
+  async refreshTitle(accountId: string): Promise<void> {
+    const account = await parallelStore.get(accountId);
+    await Promise.all(boundTabsOf(accountId).map((t) => applyTitle(t, account.tabName)));
+  },
+
+  /* ------- 导航事件钩子（由 registerParallelHandlers 驱动） ------- */
+
+  /** 标签页导航开始：重新推绑定种子与标题（SPA/整页刷新都会重置） */
+  async onNavigation(tabId: number): Promise<void> {
+    const binding = bindings.get(tabId);
+    if (!binding) {
+      return;
+    }
+    const account = await parallelStore.get(binding.accountId).catch(() => undefined);
+    if (!account) {
+      return;
+    }
+    await pushBind(tabId);
+    await applyTitle(tabId, account.tabName);
+  },
+
+  /** SW 冷启动恢复：绑定表 + token 快照 → 重建内存态与双规则（授权健康门控） */
+  async restore(): Promise<void> {
+    await readState();
+    enforcement.clear();
+    const persisted = new Map<number, { host: string; token: string | null }>();
+    for (const [tabId, b] of bindings) {
+      if (await isEnforceable(b.host)) {
+        persisted.set(tabId, { host: b.host, token: tokens.get(b.accountId)?.token ?? null });
+      }
+    }
+    await tabRules.restore(persisted);
+  },
+
+  async handleTabRemoved(tabId: number): Promise<void> {
+    if (bindings.has(tabId)) {
+      await this.unbindTab(tabId);
+    }
+  },
+};
+
+async function tabStillAlive(tabId: number): Promise<boolean> {
+  try {
+    await chrome.tabs.get(tabId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 构造带种子快照的绑定载荷（hello 应答与主动推送共用） */
+function buildBindPayload(accountId: string): BridgeDownPayload {
+  const snap = tokens.get(accountId);
+  const seed: Record<string, string> = {};
+  if (snap?.token) {
+    seed['__auth_token__'] = snap.token;
+  }
+  if (snap?.authUser) {
+    seed['__auth_user__'] = snap.authUser;
+  }
+  if (snap?.deviceFp) {
+    seed['__device_fp__'] = snap.deviceFp;
+  }
+  return { op: 'bind', accountId, seed };
+}
+
+async function pushBind(tabId: number): Promise<void> {
+  const binding = bindings.get(tabId);
+  if (!binding) {
+    return;
+  }
+  // 携带账号快照作种子：壳激活瞬间即有正确 token/身份，杜绝跨账号读取窗口
+  await pushDown(tabId, buildBindPayload(binding.accountId));
+}
+
+async function pushDown(tabId: number, payload: BridgeDownPayload): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: CONTENT_MESSAGE.bridgeDown, payload });
+  } catch {
+    // 内容脚本未就绪或页面已关闭：onNavigation/loading 事件会再次推送
+  }
+}
+
+/** 装载事件监听；由 service-worker 调用一次 */
+export function registerParallelHandlers(): void {
+  void parallelSession.restore();
+
+  chrome.runtime.onStartup?.addListener(() => {
+    void parallelSession.restore();
+  });
+
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    void parallelSession.handleTabRemoved(tabId);
+  });
+
+  // 导航提交近似信号：status=loading 时重推种子/标题（不引入 webNavigation 权限）
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'loading') {
+      void parallelSession.onNavigation(tabId);
+    }
+  });
+
+  void cleanupStaleBindings();
+}
+
+/** 恢复时清理指向已不存在标签页的陈旧绑定 */
+async function cleanupStaleBindings(): Promise<void> {
+  for (const tabId of Array.from(bindings.keys())) {
+    const alive = await tabStillAlive(tabId);
+    if (!alive) {
+      await parallelSession.handleTabRemoved(tabId);
+    }
+  }
+}

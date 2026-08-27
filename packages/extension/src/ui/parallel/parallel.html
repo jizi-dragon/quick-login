@@ -8,30 +8,42 @@
   <body>
     <main class="wrap">
       <header class="head">
-        <h1>QuickLogin · 并行多开</h1>
-        <span id="engine-status" class="status-chip status-unknown">引擎连接中…</span>
+        <h1>QuickLogin · 多账号并行</h1>
+        <div class="head-chips">
+          <span id="ver-chip" class="status-chip">v—</span>
+        </div>
       </header>
 
+      <!-- ============ 浏览器并行账号（纯扩展模式，唯一模式） ============ -->
       <section class="card block">
-        <h2>新增账号</h2>
-        <p class="desc">每个账号对应一个独立的 Chrome 实例，登录态互不干扰；首次启动自动填表登录。</p>
-        <form id="create-form" class="grid">
-          <input id="f-host" placeholder="站点 host，例如 example.com" autocomplete="off" />
-          <input id="f-username" placeholder="用户名（登录账号）" autocomplete="off" />
-          <input id="f-alias" placeholder="账号名（标签标题，可省）" autocomplete="off" />
-          <input id="f-password" type="password" placeholder="密码" autocomplete="off" />
-          <button class="btn-primary" type="submit">添加并启动</button>
+        <h2>新增并行账号</h2>
+        <p class="desc">每个账号在本浏览器中独占自己的标签页与存储命名空间，互不登出；首次添加自动填表登录。页签名即该账号所有标签页的标题。</p>
+        <form id="par-form" class="grid">
+          <select id="p-host" title="站点来源：站点管理中已授权的站点"></select>
+          <input id="p-tabname" placeholder="页签名（自定义标签标题，可省）" autocomplete="off" />
+          <input id="p-username" placeholder="账号名（登录用户名）" autocomplete="off" />
+          <input id="p-password" type="password" placeholder="密码" autocomplete="off" />
+          <span class="btn-group">
+            <button id="add-only" class="btn-ghost" type="button">添加</button>
+            <button class="btn-primary" type="submit">添加并打开</button>
+          </span>
         </form>
       </section>
 
       <section class="card block">
         <h2>账号列表</h2>
-        <ul id="account-list" class="plain"></ul>
+        <ul id="browser-list" class="plain"></ul>
       </section>
 
+      <!-- ============ 站点管理（真实授权清单，可增可撤） ============ -->
       <section class="card block">
-        <h2>事件日志</h2>
-        <ul id="log-list" class="log"></ul>
+        <h2>站点管理</h2>
+        <p class="desc">扩展已获得授权的站点（即浏览器「站点访问权限」的实际清单）。只有授权过的站点才会改写鉴权头与隔离存储；移除后新导航不再生效。</p>
+        <form id="site-form" class="site-grid">
+          <input id="s-host" placeholder="host，例如 tonbridge-config.aksoegmp.com" autocomplete="off" />
+          <button class="btn-ghost" type="submit">添加并授权</button>
+        </form>
+        <ul id="site-list" class="plain site-list"></ul>
       </section>
     </main>
 

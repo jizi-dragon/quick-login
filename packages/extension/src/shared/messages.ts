@@ -1,4 +1,4 @@
-import type { Session, SiteGrant } from './types';
+import type { ParallelAccount, ParallelAccountStatus, Session, SiteGrant } from './types';
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -10,7 +10,14 @@ export type RuntimeRequest =
   | { kind: 'session.open'; id: string; host: string }
   | { kind: 'session.openOrCreate'; host: string; username?: string; password?: string; accountAlias?: string }
   | { kind: 'site.grants.list' }
-  | { kind: 'site.grant.add'; host: string };
+  | { kind: 'site.grant.add'; host: string }
+  | { kind: 'par.list' }
+  | { kind: 'par.create'; siteHost: string; tabName: string; username: string; password: string; open: boolean }
+  | { kind: 'par.update'; id: string; patch: Partial<Pick<ParallelAccount, 'tabName'>> }
+  | { kind: 'par.delete'; id: string }
+  | { kind: 'par.open'; id: string; forceNewTab?: boolean }
+  | { kind: 'par.grantChanged' }
+  | { kind: 'wheel.toggle' };
 
 export type RuntimeResponse =
   | { kind: 'session.list'; result: Result<Session[]> }
@@ -19,6 +26,13 @@ export type RuntimeResponse =
   | { kind: 'session.open'; result: Result<{ tabId: number }> }
   | { kind: 'session.openOrCreate'; result: Result<{ tabId: number; sessionId: string; reused: boolean }> }
   | { kind: 'site.grants.list'; result: Result<SiteGrant[]> }
-  | { kind: 'site.grant.add'; result: Result<SiteGrant> };
+  | { kind: 'site.grant.add'; result: Result<SiteGrant> }
+  | { kind: 'par.list'; result: Result<Array<ParallelAccount & ParallelAccountStatus & { password: boolean }>> }
+  | { kind: 'par.create'; result: Result<ParallelAccount> }
+  | { kind: 'par.update'; result: Result<ParallelAccount> }
+  | { kind: 'par.delete'; result: Result<void> }
+  | { kind: 'par.open'; result: Result<{ tabId: number; reused: boolean }> }
+  | { kind: 'par.grantChanged'; result: Result<boolean> }
+  | { kind: 'wheel.toggle'; result: Result<{ opened: boolean }> };
 
 export type { Result };

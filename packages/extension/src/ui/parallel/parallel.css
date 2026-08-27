@@ -132,3 +132,34 @@ body {
   background: var(--sb-danger);
   color: #fff;
 }
+
+/* 引擎（可选功能区）：引擎未安装时整体隐藏，纯扩展模式不受影响 */
+.hidden {
+  display: none !important;
+}
+
+.btn-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.btn-group button {
+  white-space: nowrap;
+}
+
+.site-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.site-list .account-item .alias {
+  font-size: 13px;
+}
+
+.head-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

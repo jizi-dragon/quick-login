@@ -2,6 +2,7 @@ node_modules/
 dist/
 *.log
 probe/
+tmp/
 packages/engine/dist/
 packages/engine/data/
 packages/engine/profiles/

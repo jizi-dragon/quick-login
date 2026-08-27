@@ -1,116 +1,71 @@
-import { okOf, send } from '../send';
-import type { Session, SiteGrant } from '../../shared/types';
+import { EXT_VERSION } from '../../shared/constants';
 
-const siteEl = document.getElementById('site') as HTMLSelectElement;
-const createForm = document.getElementById('create') as HTMLFormElement;
-const usernameEl = document.getElementById('username') as HTMLInputElement;
-const aliasEl = document.getElementById('alias') as HTMLInputElement;
-const passwordEl = document.getElementById('password') as HTMLInputElement;
-const listEl = document.getElementById('list') as HTMLUListElement;
-const emptyEl = document.getElementById('empty') as HTMLParagraphElement;
+/**
+ * 弹窗 = 轻量启动器（v2.4 起）。
+ * 账号管理全部收敛到并行管理页；旧「免密切换会话」UI 已移除。
+ */
 
-let sessions: Session[] = [];
-let sites: SiteGrant[] = [];
+document.getElementById('ext-version')!.textContent = `QuickLogin v${EXT_VERSION}`;
 
-function selectedHost(): string {
-  const v = siteEl.value;
-  if (!v) {
-    return '';
-  }
-  // siteEl.value 为已规范化的 host，直接返回；兼容用户误粘贴含协议的完整 URL
-  const u = new URL(v.includes('://') ? v : `https://${v}`);
-  return u.hostname;
+const grantBtn = document.getElementById('grant-site') as HTMLButtonElement;
+const grantHint = document.getElementById('grant-hint') as HTMLParagraphElement;
+
+function openParallelPage(): void {
+  chrome.tabs.create({ url: chrome.runtime.getURL('ui/parallel/parallel.html') });
+  window.close();
 }
 
-function render(): void {
-  const host = selectedHost();
-  const list = sessions.filter((s) => s.siteHost === host);
-  listEl.innerHTML = '';
-  emptyEl.style.display = list.length ? 'none' : 'block';
-  for (const s of list) {
-    const li = document.createElement('li');
-    li.className = 'card item';
-
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    dot.style.background = s.color;
-
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    const alias = document.createElement('div');
-    alias.className = 'alias';
-    alias.textContent = s.accountAlias || s.name;
-    const sub = document.createElement('div');
-    sub.className = 'sub';
-    sub.textContent = `${s.name || s.accountAlias} · ${s.siteHost}`;
-    meta.append(alias, sub);
-
-    const open = document.createElement('button');
-    open.className = 'icon-btn';
-    open.textContent = '切换';
-    open.addEventListener('click', () => void openSession(s));
-
-    li.append(dot, meta, open);
-    listEl.appendChild(li);
+async function currentTabHost(): Promise<string | null> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.url) {
+    return null;
+  }
+  try {
+    const u = new URL(tab.url);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.host : null;
+  } catch {
+    return null;
   }
 }
 
-async function openSession(s: Session): Promise<void> {
-  const res = await send({ kind: 'session.open', id: s.id, host: s.siteHost });
-  if (res.kind === 'session.open' && res.result.ok) {
-    window.close();
-  }
-}
-
-async function refreshSites(): Promise<void> {
-  const res = await send({ kind: 'site.grants.list' });
-  if (res.kind !== 'site.grants.list') {
+async function refreshGrantState(): Promise<void> {
+  const host = await currentTabHost();
+  if (!host) {
+    grantBtn.disabled = true;
+    grantHint.textContent = '当前标签页不是 http/https 站点。';
     return;
   }
-  sites = okOf(res.result, []);
-  siteEl.innerHTML = '';
-  for (const g of sites) {
-    const opt = document.createElement('option');
-    opt.value = g.host;
-    opt.textContent = g.host;
-    siteEl.appendChild(opt);
-  }
+  const granted = await chrome.permissions.contains({ origins: [`*://${host}/*`] });
+  grantBtn.textContent = granted ? `已授权 ${host}` : `授权当前站点（${host}）`;
+  grantBtn.classList.toggle('granted', granted);
+  grantHint.textContent = granted
+    ? '该站点已可并行多开。去并行管理页添加账号即可。'
+    : '授权后扩展才能为该站点改写鉴权头并隔离存储。';
 }
 
-async function refresh(): Promise<void> {
-  const res = await send({ kind: 'session.list' });
-  if (res.kind === 'session.list') {
-    sessions = okOf(res.result, []);
-  }
-  render();
-}
-
-siteEl.addEventListener('change', render);
-
-createForm.addEventListener('submit', (e) => {
-  e.preventDefault();
-  const host = selectedHost();
-  const username = usernameEl.value.trim();
-  const accountAlias = aliasEl.value.trim();
-  const password = passwordEl.value;
-  if (!host || !username || !accountAlias) {
-    return;
-  }
+grantBtn.addEventListener('click', () => {
   void (async () => {
-    const created = await send({
-      kind: 'session.openOrCreate',
-      host,
-      username,
-      password,
-      accountAlias,
-    });
-    if (created.kind === 'session.openOrCreate' && created.result.ok) {
-      window.close();
+    const host = await currentTabHost();
+    if (!host) {
+      return;
     }
-    usernameEl.value = '';
-    aliasEl.value = '';
-    passwordEl.value = '';
+    const ok = await chrome.permissions.request({ origins: [`*://${host}/*`] }).catch(() => false);
+    if (!ok) {
+      return;
+    }
+    await refreshGrantState();
+    openParallelPage();
   })();
 });
 
-void refreshSites().then(refresh);
+document.getElementById('open-parallel')!.addEventListener('click', openParallelPage);
+
+/** 轮盘兜底入口：即使快捷键被系统/其他软件占用，也保证能唤起 */
+document.getElementById('open-wheel')!.addEventListener('click', () => {
+  void chrome.runtime
+    .sendMessage({ kind: 'wheel.toggle' })
+    .then(() => window.close())
+    .catch(() => window.close());
+});
+
+void refreshGrantState();

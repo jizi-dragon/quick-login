@@ -1,5 +1,5 @@
-import { IDB_NAME, IDB_STORE_SESSIONS, IDB_VERSION } from '../shared/constants';
-import type { Session } from '../shared/types';
+import { IDB_NAME, IDB_STORE_ACCOUNTS, IDB_STORE_SESSIONS, IDB_VERSION } from '../shared/constants';
+import type { ParallelAccount, Session } from '../shared/types';
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -8,6 +8,10 @@ function openDb(): Promise<IDBDatabase> {
       const db = req.result;
       if (!db.objectStoreNames.contains(IDB_STORE_SESSIONS)) {
         db.createObjectStore(IDB_STORE_SESSIONS, { keyPath: 'id' });
+      }
+      // v2：并行账号存储（纯扩展多账号模式）
+      if (!db.objectStoreNames.contains(IDB_STORE_ACCOUNTS)) {
+        db.createObjectStore(IDB_STORE_ACCOUNTS, { keyPath: 'id' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -40,6 +44,20 @@ export const db = {
     },
     async delete(id: string): Promise<void> {
       await tx(IDB_STORE_SESSIONS, 'readwrite', (s) => s.delete(id));
+    },
+  },
+  accounts: {
+    async list(): Promise<ParallelAccount[]> {
+      return tx<ParallelAccount[]>(IDB_STORE_ACCOUNTS, 'readonly', (s) => s.getAll() as IDBRequest<ParallelAccount[]>);
+    },
+    async get(id: string): Promise<ParallelAccount | undefined> {
+      return tx<ParallelAccount | undefined>(IDB_STORE_ACCOUNTS, 'readonly', (s) => s.get(id) as IDBRequest<ParallelAccount | undefined>);
+    },
+    async put(account: ParallelAccount): Promise<void> {
+      await tx(IDB_STORE_ACCOUNTS, 'readwrite', (s) => s.put(account));
+    },
+    async delete(id: string): Promise<void> {
+      await tx(IDB_STORE_ACCOUNTS, 'readwrite', (s) => s.delete(id));
     },
   },
 };

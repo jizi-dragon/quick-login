@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="wheel.css" />
+  </head>
+  <body>
+    <div class="bg blob-a"></div>
+    <div class="bg blob-b"></div>
+
+    <header class="head">
+      <h1>选择账号</h1>
+      <p id="sub" class="sub">正在载入…</p>
+    </header>
+
+    <button id="close" class="close-btn" title="关闭（Esc）">
+      <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
+        <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+      </svg>
+    </button>
+
+    <main class="stage">
+      <div id="wheel" class="wheel"></div>
+    </main>
+
+    <footer class="hints">
+      <span><kbd>1-9</kbd> 快速选择</span>
+      <i></i>
+      <span>点击头像打开标签页</span>
+      <i></i>
+      <span><kbd>Esc</kbd> 关闭</span>
+    </footer>
+
+    <script src="wheel.js"></script>
+  </body>
+</html>

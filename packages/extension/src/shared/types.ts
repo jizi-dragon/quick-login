@@ -31,3 +31,42 @@ export interface SiteGrant {
   host: string;
   grantedAt: number;
 }
+
+/**
+ * 浏览器并行账号（纯扩展模式，不依赖本地引擎）。
+ * 每个账号可打开多个标签页并行在线；页签名用于标签标题展示，可自定义。
+ */
+export interface ParallelAccount {
+  id: string;
+  /** 绑定的站点 host */
+  siteHost: string;
+  /** 自定义页签名 —— 该账号标签页的标题 */
+  tabName: string;
+  /** 账号名（登录用户名） */
+  username: string;
+  /** 加密存储的密码等凭证 */
+  credentials?: EncryptedCredentials;
+  color: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 并行账号运行时状态（由 background 依据绑定表与 token 快照实时计算） */
+export interface ParallelAccountStatus {
+  tabIds: number[];
+  hasToken: boolean;
+  /** 站点授权缺失/被停用：DNR 改头与 Cookie 剥离不生效，功能暂停 */
+  enforcementOff?: boolean;
+}
+
+/** ISOLATED 桥 → background 的上行载荷 */
+export type BridgeUpPayload =
+  | { op: 'hello'; url: string }
+  | { op: 'storageWrite'; key: string; value: string | null }
+  | { op: 'authHeader'; value: string };
+
+/** background → ISOLATED 桥的下行载荷 */
+export type BridgeDownPayload =
+  /** 绑定账号并附带初始快照种子（token 等，用于壳激活瞬间同步灌入命名空间） */
+  | { op: 'bind'; accountId: string; seed?: Record<string, string> }
+  | { op: 'unbound' };
