@@ -18,8 +18,9 @@
 |---|---|---|---|
 | 存储 | MAIN 壳将 localStorage 重定向至 `__ql_ns_<accountId>__` 命名空间；`document.cookie` 虚拟化为命名空间「Cookie 袋」（`__ql_cookies__`）；bind 时后台携带 token/身份/指纹快照种子静默直灌 | 页面内存视图 | 2.6–2.7 |
 | AUTH | `Authorization → Bearer <token>` 强制改写 | xmlhttprequest / websocket / **sub_frame**（iframe 文档） | 2.5 / 3.4 扩展 |
-| COOKIE | 出站 `Cookie` 头全量移除（共享真实 jar 对绑定标签隐身） | 全部资源类型 | 3.0 |
-| CACHE | GET XHR 查询串追加 `_qlck=t<tabId>`，把全 profile 共享的 HTTP 缓存按标签硬分区 | xmlhttprequest GET | 3.3 |
+| COOKIE | 出站 `Cookie` 头 **set 本账号快照回放**（登录时点经 `chrome.cookies` 采集，含 HttpOnly；未登录/登出回退 remove）——对齐 SessionBox「会话独立罐回放」机制，真实 jar 从不参与 | 全部资源类型 | 3.0 剥离 → **3.6 回放** |
+| CACHE | GET XHR 查询串追加 `_qlck=t<tabId>`，把全 profile 共享的 HTTP 缓存按标签硬分区（v3.5 起由 MAIN 壳页面层实现；Chromium DNR 无 urlTransform） | xmlhttprequest GET | 3.3 / 3.5 修正 |
+| SW/Cache | `navigator.serviceWorker.register` 拦截 + 既有注册注销；`CacheStorage.prototype` 按账号命名空间键控、match 一律 miss | 站点级 SW 自建缓存 | 3.5 |
 
 配套机制：
 
@@ -28,7 +29,7 @@
 - 「移除授权」= 尽力调用 `permissions.remove` + 失败时写入**本地停用名单**（Chrome 的 required 权限无法经 API 回收，功能层必然生效）。
 - `main_frame` 导航刻意不改写（保护静态资源与 SSO 跳转语义）。
 
-## 三、版本里程碑速览（v2.5 → v3.4）
+## 三、版本里程碑速览（v2.5 → v3.6）
 
 | 版本 | 要点 |
 |---|---|
@@ -40,8 +41,10 @@
 | 3.0 | 出站 Cookie 头剥离（封堵共享 jar 泄漏）；角标诊断闪标；授权本地停用语义 |
 | 3.1 | 轮盘视觉重构（渐变环 Hub/SVG 连线/椭圆自适应/入场动画/新空态） |
 | 3.2 | 轮盘去壳：普通网页优先注入**页面内无框浮层**（同款视觉），受限页才退回小窗 |
-| 3.3 | 第四平面：HTTP 缓存按标签分区 `_qlck`（应对「泄露方向跟随第一个登录者」） |
+| 3.3 | 第四平面：HTTP 缓存按标签分区 `_qlck`（方案后经 3.5 修正为页面层实现） |
 | 3.4 | AUTH 改写扩展到 sub_frame；诊断脚本沉淀入 CHANGELOG |
+| 3.5 | 修正 DNR urlTransform 不受支持问题（缓存分区移页面层）；新增第五平面 SW/CacheStorage 封控 |
+| 3.6 | **Cookie 剥离升级为按账号回放**（登录时点全量快照含 HttpOnly；父域覆盖）；对齐 SessionBox 稳定核心 |
 
 ## 四、快捷键与轮盘形态
 
