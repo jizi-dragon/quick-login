@@ -2,6 +2,10 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.6.1（2026-08-28）
+
+**修复（E2E 台架实测发现）：3.6 的 Cookie 登录快照从未执行。** token 首次捕获可能经 authHeader 出站嗅探通道（早于 `__auth_token__` 写入事件），而快照触发只挂在 storageWrite 分支——首捕后同一 token 再写入被去重跳过，快照永远错过登录时点，所有绑定标签始终运行在 `cookie=剥离` 模式。现把快照触发内聚到 `captureToken`（首捕即触发，双通道覆盖）。诊断：`applyBinding` 应出现 `cookie=回放<N>B` 而非 `剥离`。
+
 ## 3.6.0（2026-08-28）
 
 **策略级修正（对齐 SessionBox 类产品的稳定核心）：Cookie 从「剥离」升级为「按账号回放」。**

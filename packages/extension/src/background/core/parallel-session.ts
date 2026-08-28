@@ -167,9 +167,15 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
   if (snap.token === token) {
     return; // 去重
   }
+  const isFirstCapture = !snap.token; // 首次捕获 = 登录刚完成：此刻真实 jar 即该账号会话
   snap.token = token;
   tokens.set(accountId, snap);
   await persistTokens();
+  // 快照触发必须在 captureToken 内部：token 首捕可能来自 authHeader 嗅探（早于
+  // storageWrite 事件），两条通道都必须覆盖，否则错过登录时点（v3.6.1 修复）
+  if (isFirstCapture) {
+    await snapshotLoginCookies(accountId, host);
+  }
   await syncAccountRules(accountId, host);
 }
 
@@ -329,13 +335,8 @@ export const parallelSession = {
           await persistTokens();
           await syncAccountRules(binding.accountId, binding.host);
         } else {
-          const hadTokenBefore = Boolean(snap.token);
           await captureToken(binding.accountId, binding.host, payload.value);
-          // 首次捕获 = 登录刚完成：此刻真实 jar 即该账号的会话，快照全量 Cookie（含 HttpOnly）
-          if (!hadTokenBefore) {
-            await snapshotLoginCookies(binding.accountId, binding.host);
-            await syncAccountRules(binding.accountId, binding.host);
-          }
+          // 快照触发已内聚到 captureToken（首捕可能来自 authHeader 嗅探通道）
         }
       } else if (payload.key === '__auth_user__') {
         snap.authUser = payload.value ?? undefined;

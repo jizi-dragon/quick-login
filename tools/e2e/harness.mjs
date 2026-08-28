@@ -531,7 +531,7 @@ async function watchPage(page) {
     journal.push({ t: Date.now(), type: 'req', tab: idx, url: url.slice(0, 300), method: e.request.method, qlck: hasQlck });
   });
 
-  // 线上最终请求头（含 DNR 改写后的 Authorization）
+  // 线上最终请求头（含 DNR 改写后的 Authorization）——存完整解码载荷（不截断，whoOf 判读用）
   cdp.on('Network.requestWillBeSentExtraInfo', (e) => {
     const infl = inflight.get(e.requestId);
     const auth = e.headers['Authorization'] ?? e.headers['authorization'];
@@ -539,7 +539,8 @@ async function watchPage(page) {
       return;
     }
     const st = indexUrl(infl.url.split('#')[0]);
-    const sub = auth.startsWith('Bearer ') ? short(decodeToken(auth.slice(7)) ?? auth.slice(7)) : '(非Bearer)';
+    const payload = auth.startsWith('Bearer ') ? decodeToken(auth.slice(7)) : null;
+    const sub = payload ?? (auth.startsWith('Bearer ') ? auth.slice(7) : '(非Bearer)');
     if (!st.authSubs.has(sub)) {
       st.authSubs.set(sub, new Set());
     }
@@ -555,6 +556,51 @@ async function watchPage(page) {
 
   cdp.on('Network.requestServedFromCache', (e) => {
     cacheSet.add(e.requestId);
+  });
+
+  // ---- v3.6 监控补充 1：Set-Cookie 观测（服务端「签发了什么身份材料」给哪个标签页）----
+  // responseReceivedExtraInfo.headers['set-cookie'] 含 HttpOnly 全量；requestId→url 由
+  // responseReceived 常规事件登记。
+  const respUrlById = new Map();
+  cdp.on('Network.responseReceived', (e) => {
+    if (e.response?.url) {
+      respUrlById.set(e.requestId, e.response.url);
+    }
+  });
+  cdp.on('Network.responseReceivedExtraInfo', (e) => {
+    const raw = e.headers['set-cookie'] ?? e.headers['Set-Cookie'];
+    if (!raw) {
+      return;
+    }
+    const url = respUrlById.get(e.requestId);
+    if (!url || !url.includes(SITE_HOST_DEFAULT)) {
+      return;
+    }
+    const lines = Array.isArray(raw) ? raw : String(raw).split('\n');
+    const cookies = lines
+      .filter(Boolean)
+      .map((l) => {
+        const nv = l.split(';')[0];
+        const eq = nv.indexOf('=');
+        return {
+          name: eq > 0 ? nv.slice(0, eq).trim() : nv.trim(),
+          value: eq > 0 ? nv.slice(eq + 1) : '',
+          flags: l
+            .split(';')
+            .slice(1)
+            .map((s) => s.trim().toLowerCase())
+            .filter((s) => /^(httponly|secure|samesite|path|domain|expires|max-age)/.test(s)),
+        };
+      })
+      .slice(0, 40);
+    journal.push({
+      t: Date.now(),
+      type: 'set-cookie',
+      tab: idx,
+      url: url.slice(0, 300),
+      status: e.statusCode,
+      cookies,
+    });
   });
 
   cdp.on('Network.loadingFinished', async (e) => {
@@ -614,7 +660,7 @@ async function watchPage(page) {
       return await page.evaluate(() => {
         const out = {
           namespaces: {},
-          cookieView: document.cookie.slice(0, 400),
+          cookieView: document.cookie.slice(0, 1600),
           shieldInstalled: typeof (window).__QL_SHIELD_INSTALLED__ === 'boolean',
           patchedView: { length: localStorage.length, keys: [] },
         };
@@ -652,6 +698,15 @@ async function watchPage(page) {
             }
           } else {
             out.namespaces[acct].deviceFp = v;
+          }
+        }
+        // cookie 中的 token（该平台身份主要载体）→ 页面侧直接解码全量载荷
+        const tok = /(?:^|;\s*)__auth_token__=([^;]+)/.exec(document.cookie)?.[1];
+        if (tok) {
+          try {
+            out.cookieTokenPayload = JSON.parse(atob(tok.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+          } catch {
+            out.cookieTokenRaw = tok.slice(0, 80) + '…';
           }
         }
         // 兼容宽命名空间匹配
@@ -805,6 +860,23 @@ function buildReportHeader(version, rules) {
   return L;
 }
 
+/** 线上身份键的可读标签（WIF 声明：nameidentifier 前缀 | name | role） */
+function subjLabel(s) {
+  if (typeof s !== 'object' || s === null) {
+    return short(s).slice(0, 42);
+  }
+  const keys = Object.keys(s);
+  const pick = (suffix) => keys.find((k) => k.endsWith(suffix));
+  const guid = s[pick('nameidentifier')];
+  const name = s[pick('name')] ?? s.username ?? s.sub ?? s.uid;
+  const role = s[pick('role')];
+  return `${guid ? String(guid).slice(0, 8) : '?'}|${clipStr(name)}|role=${clipStr(role)}`;
+}
+function clipStr(v, n = 18) {
+  const s = v === null || v === undefined ? '' : typeof v === 'string' ? v : JSON.stringify(v);
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
 function writeAnalysis(lines, version, rules) {
   const L = buildReportHeader(version, rules);
 
@@ -816,7 +888,7 @@ function writeAnalysis(lines, version, rules) {
       continue;
     }
     const u = url.length > 70 ? url.slice(0, 67) + '…' : url;
-    const subs = [...st.authSubs.entries()].map(([s, ts]) => `T${[...ts].join(',')}=${short(s).slice(0, 42)}`).join(' | ') || '-';
+    const subs = [...st.authSubs.entries()].map(([s, ts]) => `T${[...ts].join(',')}=${subjLabel(s)}`).join(' | ') || '-';
     const hashes = [...st.hashTab.entries()].map(([h, ts]) => `${h}→T${[...ts]}`).join('/') || '-';
     const hits = st.hits.map((x) => `T${x.idx}:${x.name}`).join(' ') || '';
     L.push(`| ${u} | T${[...st.tabs]} | ${st.n} | ${st.fromCache} | ${st.fromSw ?? 0} | ${subs} | ${hashes} | ${hits} |`);
@@ -982,6 +1054,40 @@ async function main() {
     emit(`🔧 站点/扩展 Service Worker 事件: ${w.url()}`);
   });
 
+  // ---- v3.6 监控补充 2：周期身份快照（泄漏的「时间点」与「翻转内容」直接可见）----
+  let snapBusy = false;
+  async function snapAllIdentities() {
+    if (snapBusy) {
+      return;
+    }
+    snapBusy = true;
+    try {
+      for (const [page] of pageIndexOf) {
+        if (page.isClosed() || typeof page.__qlProbe !== 'function') {
+          continue;
+        }
+        if (!/^https?:/.test(page.url())) {
+          continue;
+        }
+        const probe = await page.__qlProbe();
+        if (probe) {
+          journal.push({
+            t: Date.now(),
+            type: 'identity-snap',
+            tab: pageIndexOf.get(page),
+            url: page.url().slice(0, 200),
+            probe,
+          });
+        }
+      }
+    } catch {
+      // 快照失败不影响其余监控
+    } finally {
+      snapBusy = false;
+    }
+  }
+  setInterval(() => void snapAllIdentities(), 15000);
+
   /* ---- P0 自检 ---- */
   await attachSwConsoleBestEffort();
   const version = await extEval('chrome.runtime.getManifest().version');
@@ -990,10 +1096,10 @@ async function main() {
   const bindingsNow = await extEval('(async()=>{const o=(await chrome.storage.session.get("ql:parTabBindings"))["ql:parTabBindings"]||{};return Object.entries(o).map(([tid,b])=>`${tid}->${b.accountId}@${b.host}`)})()');
 
   if (SELFTEST) {
-    if (version !== '3.4.0') {
-      throw new Error(`期望版本 3.4.0，实际 ${version}`);
+    if (!/^\d+\.\d+\.\d+$/.test(version)) {
+      throw new Error(`版本号格式异常：${version}`);
     }
-    emit('✔ SELFTEST 通过（版本 3.4.0 与 SW 通道可用）');
+    emit(`✔ SELFTEST 通过（版本 ${version}，SW/DNR 通道可用）`);
     await ctx.close();
     return;
   }
@@ -1055,6 +1161,18 @@ async function refreshAndCheck(phase) {
 
 async function refreshAndCheckInner(phase) {
   rules = await getSessionRules();
+  // 扩展 SW 诊断环形缓冲（applyBinding/快照/门控决策）
+  try {
+    const ring = await extEval('(async()=>{const o=(await chrome.storage.local.get("ql:diag"))["ql:diag"];return (o||[]).slice(-16)})()');
+    if (Array.isArray(ring) && ring.length) {
+      emit('扩展诊断（ql:diag 最近记录）:');
+      for (const d of ring) {
+        emit(`  ${d}`);
+      }
+    }
+  } catch {
+    // 诊断读取失败不影响主流程
+  }
   const extRules = rules.filter((r) => r.id >= 100000);
   emit(`\n───── 检查点 ${phase} ─────`);
   emit(`DNR 会话规则 ${extRules.length} 条:`);
