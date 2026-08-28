@@ -24,9 +24,9 @@ interface TokenSnapshot {
   authUser?: string;
   deviceFp?: string;
   /**
-   * 登录时点的全量站内 Cookie 快照（含 HttpOnly，经 chrome.cookies 读取）。
-   * 用于 DNR Cookie 头「按账号回放」（v3.6 对齐 SessionBox 核心机制）：
-   * 绑定标签页的出站请求不再依赖共享真实 jar，服务端始终看到一致会话身份。
+   * 登录时点的站内 Cookie 快照（含 HttpOnly，经 chrome.cookies 读取；身份类黑名单除外，
+   * 见 IDENTITY_COOKIE_BLACKLIST）。用于 DNR Cookie 头「按账号回放」（v3.6 对齐 SessionBox
+   * 核心机制）：绑定标签页的出站请求不再依赖共享真实 jar，服务端始终看到一致会话身份。
    * 仅在该账号首次捕获 token（即登录刚完成、jar 尚未被后续登录污染）时采集。
    */
   cookies?: { name: string; value: string }[];
@@ -179,7 +179,15 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
   await syncAccountRules(accountId, host);
 }
 
-/** 登录时点快照该账号的全量站内 Cookie（含 HttpOnly）进账号档案 */
+/**
+ * 身份类 Cookie 黑名单：这些名字由平台 JS 写入真实 jar（普通/未接管页签无虚拟化保护），
+ * 值 = 「jar 里最后写它的那个账号」。快照若包含它们，回放就会把别人的身份带给本账号
+ * 的请求（3.7.2 修复：真实环境复现「普通用户获得管理员」——普通页签登录态残留 jar，
+ * 被下一次任意账号的登录时点快照打包）。回放只需 WAF 会话对等非身份 Cookie。
+ */
+const IDENTITY_COOKIE_BLACKLIST = new Set(['__auth_token__', '__auth_user__', '__device_fp__']);
+
+/** 登录时点快照该账号的站内 Cookie（含 HttpOnly，剔除身份类黑名单）进账号档案 */
 async function snapshotLoginCookies(accountId: string, host: string): Promise<void> {
   const snap = tokens.get(accountId);
   if (!snap?.token) {
@@ -187,10 +195,13 @@ async function snapshotLoginCookies(accountId: string, host: string): Promise<vo
   }
   try {
     const list = await chrome.cookies.getAll({ url: `https://${host}/` });
-    snap.cookies = list.map((c) => ({ name: c.name, value: c.value }));
+    const before = list.length;
+    snap.cookies = list
+      .filter((c) => !IDENTITY_COOKIE_BLACKLIST.has(c.name))
+      .map((c) => ({ name: c.name, value: c.value }));
     tokens.set(accountId, snap);
     await persistTokens();
-    void diag(`snapshotLoginCookies(${accountId}) 快照 ${snap.cookies.length} 条`);
+    void diag(`snapshotLoginCookies(${accountId}) 快照 ${snap.cookies.length} 条（jar 共 ${before}，剔身份类 ${before - snap.cookies.length}）`);
   } catch (e) {
     void diag(`snapshotLoginCookies(${accountId}) 失败：${e instanceof Error ? e.message : String(e)}`);
   }
@@ -201,7 +212,13 @@ function cookieHeaderOf(accountId: string): string | null {
   if (!cs || !cs.length) {
     return null;
   }
-  return cs.map((c) => `${c.name}=${c.value}`).join('; ');
+  // 回放侧再过滤一次：3.7.2 之前保存的存量快照可能已含身份类 Cookie（jar 残留），
+  // 无需用户重新登录即生效
+  const filtered = cs.filter((c) => !IDENTITY_COOKIE_BLACKLIST.has(c.name));
+  if (!filtered.length) {
+    return null;
+  }
+  return filtered.map((c) => `${c.name}=${c.value}`).join('; ');
 }
 
 /** 把某账号当前 token 同步到其全部绑定标签页的规则（受授权健康门控） */

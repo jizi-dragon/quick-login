@@ -114,6 +114,15 @@ for (const t of types) {
           for (const v of info.sample ?? []) console.log(`     val: ${clip(v, 200)}`);
         }
       }
+    } else if (t === 'replay-cookie') {
+      console.log(`[${time}] phase=${e.phase} T${e.tab} rule#${e.ruleId} 回放${e.bytes}B WAF=${clip(e.waf, 14)} 名单=${(e.names ?? []).join(',')}`);
+    } else if (t === 'jar') {
+      console.log(`[${time}] phase=${e.phase} T${e.tab} 真实jar: ${(e.cookies ?? []).map((c) => `${c.name}=${c.head}…`).join(' | ')}`);
+    } else if (t === 'raw-ls') {
+      const fps = Object.entries(e.fps ?? {});
+      console.log(`[${time}] phase=${e.phase} T${e.tab} 原始LS ${e.count}键${fps.length ? ` · 指纹: ${fps.map(([a, v]) => `${a.slice(0, 12)}=${v}…`).join(' ')}` : ''}`);
+      const uniq = [...new Set(fps.map(([, v]) => v))];
+      if (uniq.length === 1 && fps.length > 1) console.log('   ⚠⚠ 多账号共享同一设备指纹！');
     } else if (t === 'raw-storage') {
       console.log(`[${time}] ${clip(JSON.stringify(e).slice(0, 400), 400)}`);
     } else {

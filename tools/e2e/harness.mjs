@@ -1279,6 +1279,86 @@ async function refreshAndCheck(phase) {
 
 async function refreshAndCheckInner(phase) {
   rules = await getSessionRules();
+  // ---- 回放 Cookie 指纹：每个 Cookie 规则实际回放的是谁家的会话 ----
+  try {
+    for (const r of rules) {
+      const val = r.action?.requestHeaders?.[0]?.value;
+      if (r.action.type !== 'modifyHeaders' || typeof val !== 'string') {
+        continue;
+      }
+      const tabMatch = /tab=(\d+)/.exec(JSON.stringify(r.condition ?? {})) ?? [];
+      const waf = /HWWAFSESID=(\w{0,12})/.exec(val)?.[1] ?? '(无)';
+      journal.push({
+        t: Date.now(),
+        type: 'replay-cookie',
+        phase,
+        ruleId: r.id,
+        tab: Number(tabMatch[1] ?? 0),
+        bytes: val.length,
+        waf,
+        names: val.split(';').map((s) => s.split('=')[0].trim()).filter(Boolean),
+      });
+    }
+  } catch {
+    // 指纹化失败不阻断
+  }
+  // ---- 真实 jar 直读（CDP Network.getCookies）----
+  try {
+    for (const [page] of pageIndexOf) {
+      if (page.isClosed() || !/^https?:/.test(page.url())) {
+        continue;
+      }
+      const cdp = await page.context().newCDPSession(page);
+      try {
+        await cdp.send('Network.enable');
+        const { cookies } = await cdp.send('Network.getCookies', { urls: [new URL(page.url()).origin] });
+        journal.push({
+          t: Date.now(),
+          type: 'jar',
+          phase,
+          tab: pageIndexOf.get(page),
+          cookies: (cookies ?? []).map((c) => ({ name: c.name, head: String(c.value).slice(0, 12) })),
+        });
+      } finally {
+        await cdp.detach().catch(() => undefined);
+      }
+    }
+  } catch {
+    // jar 直读失败不阻断
+  }
+  // ---- 隔离世界原始 LS（绕过页面补丁，读各账号 ns 的 fp/token 原始值）----
+  try {
+    for (const [page] of pageIndexOf) {
+      if (page.isClosed() || !/^https?:/.test(page.url()) || typeof page.__qlProbe !== 'function') {
+        continue;
+      }
+      const cdp = await page.context().newCDPSession(page);
+      try {
+        const { executionContextId } = await cdp.send('Page.createIsolatedWorld', {
+          frameId: page.mainFrame()?._id ?? undefined,
+          worldName: 'QL_RAW_PROBE',
+        });
+        const expr = `JSON.stringify(Object.keys(localStorage)
+          .filter(k => k.startsWith('__ql_ns_'))
+          .map(k => ({ k: k.slice(8, 30), v: String(localStorage.getItem(k)).slice(0, 12) }))
+          .concat(Object.keys(localStorage).filter(k => !k.startsWith('__ql_ns_')).slice(0, 10).map(k => ({ k: 'RAW:' + k.slice(0, 22), v: String(localStorage.getItem(k)).slice(0, 12) }))))`;
+        const res = await cdp.send('Runtime.evaluate', { expression: expr, contextId: executionContextId, returnByValue: true });
+        const rows = JSON.parse(res.result.value ?? '[]');
+        const fps = {};
+        for (const row of rows) {
+          if (row.k.endsWith('__device_fp')) {
+            const acct = row.k.split('__')[0];
+            fps[acct] = row.v;
+          }
+        }
+        journal.push({ t: Date.now(), type: 'raw-ls', phase, tab: pageIndexOf.get(page), fps, count: rows.length });
+      } finally {
+        await cdp.detach().catch(() => undefined);
+      }
+    }
+  } catch {
+    // 隔离世界取证失败不阻断
+  }
   // ---- 全量 IDB 取证（CDP IndexedDB 域 = 浏览器真实存储，绕过页面补丁，可见 Worker 建库）----
   await dumpIdbFull(phase);
   // 扩展 SW 诊断环形缓冲（applyBinding/快照/门控决策）

@@ -2,6 +2,10 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.7.2（2026-08-28）
+
+**修复真实环境复现的「管理员权限被分发覆盖」：登录快照剔除身份类 Cookie。** 用户实测（本地 Chrome，1 管理员 + 2 普通页签 + 一个**绕过扩展的普通登录页签**同时在线）复现权限串号，而 E2E 隔离环境无法复现。根因：普通/未接管页签没有 Cookie 虚拟化保护，其登录态 `__auth_token__` 直接写入**真实 jar**；3.6 的登录时点快照经 `chrome.cookies` 读取 jar 时会把它一并打包，回放后该账号的请求 = Bearer 是自己、Cookie 里却背着别人的身份 → 平台按 Cookie 认证的端点直接认了 jar 残留身份。修复：快照与回放双侧过滤 `IDENTITY_COOKIE_BLACKLIST`（`__auth_token__`/`__auth_user__`/`__device_fp__`），只回放 WAF 会话对等非身份 Cookie；回放侧过滤使**存量已污染快照无需重新登录即自愈**。另：`isEnableSingleDeviceLogin:False`（平台 JWT 实测值）排除了单设备互踢假说。
+
 ## 3.7.1（2026-08-28）
 
 **修复 3.7.0 回归实测缺陷：移除 IDB「历史库清扫」。** 复现症状：关全部 → 先 A 后 U，U 正常，但回到 A 后「管理端点不进、刷新后菜单消失」。根因：passthrough 标签页（bind 未及，ns 为空）的库无前缀，被其它标签页激活时的清扫 `deleteDatabase` 命中；该删除被活动连接阻塞挂起——标签页刷新时连接关闭，删除立即执行，库凭空蒸发。隔离后旧库已是无人读取的孤儿，清扫无害也无益，整体移除。另：E2E 台架新增 **CDP `IndexedDB` 域全量取证**（浏览器真实存储视图，绕过页面补丁，Worker 建库可见），检查点自动 dump 全部库/仓/键/样本。
