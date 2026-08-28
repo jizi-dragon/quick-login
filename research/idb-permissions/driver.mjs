@@ -12,7 +12,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..');
-const DIST = path.join(ROOT, 'dist');
+const DIST = process.env.QL_RESEARCH_DIST ?? path.join(ROOT, 'dist');
 const PROFILE = path.join(ROOT, 'tmp', 'research-profile');
 const DIR = path.join(ROOT, 'tmp', 'research-idb');
 const GO = path.join(DIR, 'go');
