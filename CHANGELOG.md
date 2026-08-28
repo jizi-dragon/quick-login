@@ -2,6 +2,19 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.6.0（2026-08-28）
+
+**策略级修正（对齐 SessionBox 类产品的稳定核心）：Cookie 从「剥离」升级为「按账号回放」。**
+
+此前 3.0 起的策略是剥离绑定标签页的出站 Cookie（基于「该站为纯 Bearer、服务端不看 Cookie」的结论）。四象限实测证明该前提不成立——平台至少存在一层依赖 Cookie/服务端会话亲和的鉴权，剥离使这类请求降级为匿名，与共享 jar 的先后顺序叠加产生了全部四种症状。SessionBox 类产品从不让标签页「无凭证」出请求：每个会话持有独立 Cookie 罐并持续回放。本版在 MV3 约束下实现等价机制：
+
+- **登录时点全量快照**：账号 token 首次捕获（= 登录刚完成、真实 jar 恰为该账号会话）时，经 `chrome.cookies` 采集**含 HttpOnly 在内**的全量站内 Cookie 存入账号档案（此前 HttpOnly 对页面脚本不可见，Cookie 袋天然缺失）；
+- **DNR Cookie 规则 set 回放**：绑定标签页所有出站请求的 Cookie 头由「remove」改为「set 本账号快照」，服务端始终看到一致会话身份；快照为空（未登录过）时保持剥离兜底；页内登出清空快照回到剥离；
+- **父域覆盖**：AUTH/COOKIE 规则的 requestDomains 扩展为 [host, 父域]（DNR 语义含全部子域），网关/接口子域请求不再漏网；
+- `open()` 绑定时即同步规则与回放值——复开标签页从第一刻起就是完整身份（症状①的冷启动半残窗口消除）。
+
+**已知取舍**：快照仅在登录时点采集一次（此后真实 jar 会被后续登录污染，不可再作数据源）；若服务端在会话中经 Set-Cookie 轮转会话标识，该账号需重新登录刷新快照（JWT 主体不受影响）。
+
 ## 3.5.0（2026-08-28）
 
 **重要修正：3.3 的缓存分区在 Chromium 上从未生效。** DNR `redirect.urlTransform` 是 Firefox 专属字段，Chromium 会以 `Unexpected property` 拒绝整个 updateSessionRules 批次（原子失败），3.3 的 CACHE 规则实际一条都没装上。本版重构该平面并新增第五平面：

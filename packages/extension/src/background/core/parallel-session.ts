@@ -23,6 +23,13 @@ interface TokenSnapshot {
   token?: string;
   authUser?: string;
   deviceFp?: string;
+  /**
+   * 登录时点的全量站内 Cookie 快照（含 HttpOnly，经 chrome.cookies 读取）。
+   * 用于 DNR Cookie 头「按账号回放」（v3.6 对齐 SessionBox 核心机制）：
+   * 绑定标签页的出站请求不再依赖共享真实 jar，服务端始终看到一致会话身份。
+   * 仅在该账号首次捕获 token（即登录刚完成、jar 尚未被后续登录污染）时采集。
+   */
+  cookies?: { name: string; value: string }[];
 }
 
 const bindings = new Map<number, ParBinding>();
@@ -166,6 +173,31 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
   await syncAccountRules(accountId, host);
 }
 
+/** 登录时点快照该账号的全量站内 Cookie（含 HttpOnly）进账号档案 */
+async function snapshotLoginCookies(accountId: string, host: string): Promise<void> {
+  const snap = tokens.get(accountId);
+  if (!snap?.token) {
+    return;
+  }
+  try {
+    const list = await chrome.cookies.getAll({ url: `https://${host}/` });
+    snap.cookies = list.map((c) => ({ name: c.name, value: c.value }));
+    tokens.set(accountId, snap);
+    await persistTokens();
+    void diag(`snapshotLoginCookies(${accountId}) 快照 ${snap.cookies.length} 条`);
+  } catch (e) {
+    void diag(`snapshotLoginCookies(${accountId}) 失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function cookieHeaderOf(accountId: string): string | null {
+  const cs = tokens.get(accountId)?.cookies;
+  if (!cs || !cs.length) {
+    return null;
+  }
+  return cs.map((c) => `${c.name}=${c.value}`).join('; ');
+}
+
 /** 把某账号当前 token 同步到其全部绑定标签页的规则（受授权健康门控） */
 async function syncAccountRules(accountId: string, host: string): Promise<void> {
   const bound = boundTabsOf(accountId);
@@ -175,9 +207,12 @@ async function syncAccountRules(accountId: string, host: string): Promise<void> 
     return; // 授权缺失/停用：不装规则，UI 通过 enforcementOff 提示
   }
   const token = tokens.get(accountId)?.token ?? null;
+  const cookieHeader = cookieHeaderOf(accountId);
   try {
-    await Promise.all(bound.map((tabId) => tabRules.applyBinding(host, tabId, token)));
-    void diag(`syncAccountRules(${accountId}) 完成：applyBinding ×${bound.length}（token=${token ? '有' : '无'}）`);
+    await Promise.all(bound.map((tabId) => tabRules.applyBinding(host, tabId, token, cookieHeader)));
+    void diag(
+      `syncAccountRules(${accountId}) 完成：applyBinding ×${bound.length}（token=${token ? '有' : '无'} cookie=${cookieHeader ? `${cookieHeader.length}B` : '剥离'}）`,
+    );
   } catch (e) {
     void diag(`syncAccountRules(${accountId}) 异常：${e instanceof Error ? e.message : String(e)}`);
     throw e;
@@ -289,11 +324,18 @@ export const parallelSession = {
         if (payload.value === null) {
           // 页面内登出：清 token + 摘规则
           delete snap.token;
+          delete snap.cookies;
           tokens.set(binding.accountId, snap);
           await persistTokens();
           await syncAccountRules(binding.accountId, binding.host);
         } else {
+          const hadTokenBefore = Boolean(snap.token);
           await captureToken(binding.accountId, binding.host, payload.value);
+          // 首次捕获 = 登录刚完成：此刻真实 jar 即该账号的会话，快照全量 Cookie（含 HttpOnly）
+          if (!hadTokenBefore) {
+            await snapshotLoginCookies(binding.accountId, binding.host);
+            await syncAccountRules(binding.accountId, binding.host);
+          }
         }
       } else if (payload.key === '__auth_user__') {
         snap.authUser = payload.value ?? undefined;
@@ -362,15 +404,19 @@ export const parallelSession = {
     await applyTitle(tabId, account.tabName);
   },
 
-  /** SW 冷启动恢复：绑定表 + token 快照 → 重建内存态与双规则（授权健康门控） */
+  /** SW 冷启动恢复：绑定表 + token/Cookie 快照 → 重建内存态与规则（授权健康门控） */
   async restore(): Promise<void> {
     void diag('parallelSession.restore 开始');
     await readState();
     enforcement.clear();
-    const persisted = new Map<number, { host: string; token: string | null }>();
+    const persisted = new Map<number, { host: string; token: string | null; cookie: string | null }>();
     for (const [tabId, b] of bindings) {
       if (await isEnforceable(b.host)) {
-        persisted.set(tabId, { host: b.host, token: tokens.get(b.accountId)?.token ?? null });
+        persisted.set(tabId, {
+          host: b.host,
+          token: tokens.get(b.accountId)?.token ?? null,
+          cookie: cookieHeaderOf(b.accountId),
+        });
       }
     }
     await tabRules.restore(persisted);

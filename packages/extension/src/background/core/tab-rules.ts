@@ -25,6 +25,8 @@ interface RuleMeta {
   cookieId?: number;
   /** 当前 AUTH 规则的 token；null 表示未装 AUTH 规则 */
   token: string | null;
+  /** 当前 COOKIE 规则的回放值；null 表示 remove（剥离）模式 */
+  cookieValue: string | null;
 }
 
 const installed = new Map<number, RuleMeta>();
@@ -61,6 +63,12 @@ function asRule(raw: unknown): chrome.declarativeNetRequest.Rule {
   return raw as unknown as chrome.declarativeNetRequest.Rule;
 }
 
+/** 父域（aksoegmp.com）：DNR requestDomains 语义为「该域及其全部子域」，覆盖网关/接口子域 */
+function parentDomainOf(host: string): string {
+  const parts = host.split('.');
+  return parts.length > 2 ? parts.slice(-2).join('.') : host;
+}
+
 function buildAuthRule(ruleId: number, host: string, tabId: number, token: string): chrome.declarativeNetRequest.Rule {
   return asRule({
     id: ruleId,
@@ -73,24 +81,37 @@ function buildAuthRule(ruleId: number, host: string, tabId: number, token: strin
       // API 调用、WS 握手，以及 iframe 内嵌文档（低代码平台的「管理端」控制台常以
       // iframe 承载：只带命名空间存储、无 Bearer 的子框架会被服务端当匿名拒入）
       resourceTypes: ['xmlhttprequest', 'websocket', 'sub_frame'],
-      requestDomains: [host],
+      requestDomains: [host, parentDomainOf(host)],
       tabIds: [tabId],
     },
   });
 }
 
-function buildCookieStripRule(ruleId: number, host: string, tabId: number): chrome.declarativeNetRequest.Rule {
+/**
+ * COOKIE 规则：v3.6 起支持「按账号回放」——cookieHeader 非 null 时 set（服务端始终看到
+ * 一致的会话身份，对齐 SessionBox 核心机制）；null 时保持 remove（共享 jar 对绑定标签隐身）。
+ */
+function buildCookieRule(
+  ruleId: number,
+  host: string,
+  tabId: number,
+  cookieHeader: string | null,
+): chrome.declarativeNetRequest.Rule {
   return asRule({
     id: ruleId,
     priority: 1,
     action: {
       type: 'modifyHeaders',
-      requestHeaders: [{ header: 'Cookie', operation: 'remove' }],
+      requestHeaders: [
+        cookieHeader
+          ? { header: 'Cookie', operation: 'set', value: cookieHeader }
+          : { header: 'Cookie', operation: 'remove' },
+      ],
     },
     condition: {
-      // 全类型剥离：jar 对绑定标签完全隐身（页面读取走 Cookie 袋虚拟化）
+      // 全类型覆盖：绑定标签页的出站 Cookie 完全由本规则决定，与真实 jar 无关
       resourceTypes: ALL_MATCH_TYPES,
-      requestDomains: [host],
+      requestDomains: [host, parentDomainOf(host)],
       tabIds: [tabId],
     },
   });
@@ -110,20 +131,27 @@ async function addOne(rule: chrome.declarativeNetRequest.Rule): Promise<boolean>
 export const tabRules = {
   /**
    * 设置/更新某绑定标签页的网络平面规则。
-   * - COOKIE 剥离规则绑定即装；
+   * - COOKIE 规则绑定即装：cookieHeader 非 null → set（回放），变更时重建；
+   *   null → remove（剥离）。
    * - token 非 null 时装/换 AUTH 规则；null 时摘除。
    * 逐条安装：单条失败不连坐其余规则。
    */
-  async applyBinding(host: string, tabId: number, token: string | null): Promise<void> {
-    const meta: RuleMeta = installed.get(tabId) ?? { token: null };
+  async applyBinding(host: string, tabId: number, token: string | null, cookieHeader?: string | null): Promise<void> {
+    const wanted = cookieHeader ?? null;
+    const meta: RuleMeta = installed.get(tabId) ?? { token: null, cookieValue: null };
 
     const removes: number[] = [];
 
-    // COOKIE 剥离规则
-    if (meta.cookieId === undefined) {
+    // COOKIE 规则（首次安装，或回放值发生变化时重建）
+    if (meta.cookieId === undefined || meta.cookieValue !== wanted) {
+      if (meta.cookieId !== undefined) {
+        removes.push(meta.cookieId);
+        meta.cookieId = undefined;
+      }
       const ruleId = nextCookieId++;
-      if (await addOne(buildCookieStripRule(ruleId, host, tabId))) {
+      if (await addOne(buildCookieRule(ruleId, host, tabId, wanted))) {
         meta.cookieId = ruleId;
+        meta.cookieValue = wanted;
       }
     }
 
@@ -155,7 +183,7 @@ export const tabRules = {
     }
     installed.set(tabId, meta);
     void diag(
-      `applyBinding tab=${tabId} token=${token ? '有' : '无'} cookieId=${meta.cookieId ?? '-'} authId=${meta.authId ?? '-'}`,
+      `applyBinding tab=${tabId} token=${token ? '有' : '无'} cookie=${wanted ? `回放${wanted.length}B` : '剥离'} cookieId=${meta.cookieId ?? '-'} authId=${meta.authId ?? '-'}`,
     );
   },
 
@@ -187,7 +215,7 @@ export const tabRules = {
    * SW 冷启动恢复：persisted 提供 tabId → { host, token|null }，
    * 与浏览器内现存 session 规则做差集同步（孤儿清理 + 缺失重建）。
    */
-  async restore(persisted: Map<number, { host: string; token: string | null }>): Promise<void> {
+  async restore(persisted: Map<number, { host: string; token: string | null; cookie?: string | null }>): Promise<void> {
     let existing: chrome.declarativeNetRequest.Rule[] = [];
     try {
       existing = await chrome.declarativeNetRequest.getSessionRules();
@@ -226,7 +254,7 @@ export const tabRules = {
 
     installed.clear();
     for (const [tabId, info] of persisted) {
-      await this.applyBinding(info.host, tabId, info.token ?? null);
+      await this.applyBinding(info.host, tabId, info.token ?? null, info.cookie ?? null);
     }
     void diag(`tabRules.restore persisted=${persisted.size}`);
   },
@@ -239,6 +267,7 @@ export const tabRules = {
         authId: m.authId ?? null,
         cookieId: m.cookieId ?? null,
         token: m.token ? '有' : '无',
+        cookie: m.cookieValue ? `回放${m.cookieValue.length}B` : '剥离',
       })),
       nextAuthId,
       nextCookieId,
