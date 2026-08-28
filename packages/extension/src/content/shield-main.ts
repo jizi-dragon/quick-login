@@ -454,7 +454,6 @@
    * 残余风险：站点若在 Web Worker 内开 IDB 则不受此补丁（主世界专用），待观测。
    */
   const IDB_SHIELD_ENABLED = true;
-  let idbSweepDone = false;
 
   function installIdbShield(): void {
     try {
@@ -488,25 +487,10 @@
           );
         });
       }
-      // 历史毒源清扫：无前缀共享库（激活期间站点 bundle 尚未跑，无人持有连接）
-      if (!idbSweepDone) {
-        idbSweepDone = true;
-        void Promise.resolve()
-          .then(async () => {
-            const legacy = typeof oDatabases === 'function' ? await oDatabases.call(indexedDB) : [];
-            for (const info of legacy ?? []) {
-              if (typeof info.name !== 'string' || info.name.startsWith(ns)) {
-                continue;
-              }
-              try {
-                oDelete.call(indexedDB, info.name);
-              } catch {
-                // 单库删除失败不阻断
-              }
-            }
-          })
-          .catch(() => undefined);
-      }
+      // 注意：不做「无前缀历史库清扫」。v3.7.0 的清扫会误伤 passthrough 标签页
+      // （ns 未生效 → 其库无前缀）正持有的连接：deleteDatabase 被连接阻塞挂起，
+      // 标签页一刷新连接关闭、删除立即执行、库凭空蒸发（v3.7.1 移除）。
+      // 隔离后旧库已成孤儿（补丁页一律读写带前缀库），保留无害。
     } catch {
       // 第六平面失败不阻断其余隔离平面
     }

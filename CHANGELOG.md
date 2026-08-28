@@ -2,6 +2,10 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.7.1（2026-08-28）
+
+**修复 3.7.0 回归实测缺陷：移除 IDB「历史库清扫」。** 复现症状：关全部 → 先 A 后 U，U 正常，但回到 A 后「管理端点不进、刷新后菜单消失」。根因：passthrough 标签页（bind 未及，ns 为空）的库无前缀，被其它标签页激活时的清扫 `deleteDatabase` 命中；该删除被活动连接阻塞挂起——标签页刷新时连接关闭，删除立即执行，库凭空蒸发。隔离后旧库已是无人读取的孤儿，清扫无害也无益，整体移除。另：E2E 台架新增 **CDP `IndexedDB` 域全量取证**（浏览器真实存储视图，绕过页面补丁，Worker 建库可见），检查点自动 dump 全部库/仓/键/样本。
+
 ## 3.7.0（2026-08-28）
 
 **第六隔离平面：IndexedDB 命名空间**（E2E 台架实锤的泄漏根因修复）。取证链：平台前端把 **`isAdmin` 标志位与全量菜单树**缓存在 origin 级共享 IndexedDB 库 `DBFetch`（键 = URL 哈希、无账号维度）；免密恢复登录的标签页直接消费上一账号写入的条目——先管理员后普通用户 → 普通用户读到 `ADMIN=TRUE` + 130KB 管理菜单（象限「U 获得管理员」）；反向则管理员被精简菜单同化。该层完全绕开存储/Bearer/Cookie/HTTP 缓存/SW 五平面。对策：`indexedDB.open/deleteDatabase` 按账号前缀化（`__ql_ns_<accountId>__`，与存储平面同命名空间）、`databases()` 剥前缀回显、激活时清扫历史无前缀共享库（毒源）。已知残余：Web Worker 内开的 IDB 不受主世界补丁（待观测）。台架可复现验证：`npm run e2e`，探针现按「len+SHA1+isAdmin 位」判定级 dump DBFetch。

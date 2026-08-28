@@ -1,6 +1,6 @@
 {
   "name": "quick-login",
-  "version": "3.7.0",
+  "version": "3.7.1",
   "private": true,
   "description": "QuickLogin：扩展（单账号免密切换）+ 本地引擎（多账号并行在线）",
   "type": "module",

@@ -101,6 +101,19 @@ for (const t of types) {
     } else if (t === 'wire-auth') {
       const p = typeof e.authSubject === 'object' ? e.authSubject : jwtFrom(e.authSubject);
       console.log(`[${time}] T${e.tab} ${p ? whoOf(p) : clip(e.authSubject, 70)}  ← ${clip(e.url, 90)}`);
+    } else if (t === 'idb-full') {
+      console.log(`[${time}] T${e.tab} phase=${e.phase} 真实IDB @${e.origin}`);
+      for (const [db, stores] of Object.entries(e.dbs ?? {})) {
+        if (stores.err) {
+          console.log(`   [${db}] 错误: ${stores.err}`);
+          continue;
+        }
+        for (const [s, info] of Object.entries(stores)) {
+          console.log(`   [${db}].${s} 共${info.count}条`);
+          for (const k of info.keys ?? []) console.log(`     key: ${k}`);
+          for (const v of info.sample ?? []) console.log(`     val: ${clip(v, 200)}`);
+        }
+      }
     } else if (t === 'raw-storage') {
       console.log(`[${time}] ${clip(JSON.stringify(e).slice(0, 400), 400)}`);
     } else {

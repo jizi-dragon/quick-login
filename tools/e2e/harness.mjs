@@ -1222,6 +1222,53 @@ function lines() {
   return []; // 占位：报告由 writeAnalysis 自行汇总 journal
 }
 
+/** CDP 全量 IDB dump：真实存储视图（安全原点级），每个库每个仓的条数/键/首行样本 */
+async function dumpIdbFull(phase) {
+  try {
+    for (const [page] of pageIndexOf) {
+      if (page.isClosed() || !/^https?:/.test(page.url())) {
+        continue;
+      }
+      const idx = pageIndexOf.get(page);
+      const cdp = await page.context().newCDPSession(page);
+      try {
+        await cdp.send('IndexedDB.enable');
+        const origin = new URL(page.url()).origin;
+        const { databaseNames } = await cdp.send('IndexedDB.requestDatabaseNames', { securityOrigin: origin });
+        const dbs = {};
+        for (const db of (databaseNames ?? []).slice(0, 12)) {
+          try {
+            const { entries } = await cdp.send('IndexedDB.requestDatabaseData', {
+              securityOrigin: origin,
+              databaseName: db,
+              pageSize: 200,
+            });
+            const stores = {};
+            for (const entry of entries ?? []) {
+              const os = entry.objectStoreContent?.[0];
+              stores[entry.objectStore ?? '?'] = {
+                count: (entry.objectStoreContent ?? []).length,
+                keys: (entry.objectStoreContent ?? []).slice(0, 40).map((r) => JSON.stringify(r.key).slice(0, 70)),
+                sample: (entry.objectStoreContent ?? []).slice(0, 2).map((r) => JSON.stringify(r.value).slice(0, 200)),
+              };
+              void os;
+            }
+            dbs[db] = stores;
+          } catch (e2) {
+            dbs[db] = { err: String(e2?.message ?? e2).slice(0, 80) };
+          }
+        }
+        journal.push({ t: Date.now(), type: 'idb-full', phase, tab: idx, origin, dbs });
+        emit(`IDB 全量（T${idx}，真实视图）：${Object.keys(dbs).join(', ') || '(空)'}`);
+      } finally {
+        await cdp.detach().catch(() => undefined);
+      }
+    }
+  } catch (e) {
+    emit(`⚠ IDB 全量取证失败（继续）：${e?.message ?? e}`);
+  }
+}
+
 async function refreshAndCheck(phase) {
   try {
     await refreshAndCheckInner(phase);
@@ -1232,6 +1279,8 @@ async function refreshAndCheck(phase) {
 
 async function refreshAndCheckInner(phase) {
   rules = await getSessionRules();
+  // ---- 全量 IDB 取证（CDP IndexedDB 域 = 浏览器真实存储，绕过页面补丁，可见 Worker 建库）----
+  await dumpIdbFull(phase);
   // 扩展 SW 诊断环形缓冲（applyBinding/快照/门控决策）
   try {
     const ring = await extEval('(async()=>{const o=(await chrome.storage.local.get("ql:diag"))["ql:diag"];return (o||[]).slice(-16)})()');
