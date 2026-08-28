@@ -21,6 +21,7 @@
 | COOKIE | 出站 `Cookie` 头 **set 本账号快照回放**（登录时点经 `chrome.cookies` 采集，含 HttpOnly；未登录/登出回退 remove）——对齐 SessionBox「会话独立罐回放」机制，真实 jar 从不参与 | 全部资源类型 | 3.0 剥离 → **3.6 回放** |
 | CACHE | GET XHR 查询串追加 `_qlck=t<tabId>`，把全 profile 共享的 HTTP 缓存按标签硬分区（v3.5 起由 MAIN 壳页面层实现；Chromium DNR 无 urlTransform） | xmlhttprequest GET | 3.3 / 3.5 修正 |
 | SW/Cache | `navigator.serviceWorker.register` 拦截 + 既有注册注销；`CacheStorage.prototype` 按账号命名空间键控、match 一律 miss | 站点级 SW 自建缓存 | 3.5 |
+| IDB | `indexedDB.open/deleteDatabase` 按账号前缀化、`databases()` 剥前缀回显。**3.7 台架实锤的泄漏根因**：平台把 `isAdmin` 标志与全量菜单树缓存于 origin 级共享 IDB（库 `DBFetch`，键=URL 哈希无账号维度），免密恢复的标签页直接消费上一账号条目 → 四象限「U 获得管理员/A 被同化」 | 站点 IndexedDB | **3.7**（3.7.1 移除危险的历史库清扫——阻塞删除会误杀 passthrough 标签页的库） |
 
 配套机制：
 
@@ -29,7 +30,7 @@
 - 「移除授权」= 尽力调用 `permissions.remove` + 失败时写入**本地停用名单**（Chrome 的 required 权限无法经 API 回收，功能层必然生效）。
 - `main_frame` 导航刻意不改写（保护静态资源与 SSO 跳转语义）。
 
-## 三、版本里程碑速览（v2.5 → v3.6）
+## 三、版本里程碑速览（v2.5 → v3.7）
 
 | 版本 | 要点 |
 |---|---|
@@ -45,6 +46,9 @@
 | 3.4 | AUTH 改写扩展到 sub_frame；诊断脚本沉淀入 CHANGELOG |
 | 3.5 | 修正 DNR urlTransform 不受支持问题（缓存分区移页面层）；新增第五平面 SW/CacheStorage 封控 |
 | 3.6 | **Cookie 剥离升级为按账号回放**（登录时点全量快照含 HttpOnly；父域覆盖）；对齐 SessionBox 稳定核心 |
+| 3.6.1 | 修复：Cookie 快照触发内聚 `captureToken`（3.6 的快照因首捕走 authHeader 通道从未执行，回放一直未生效——E2E 台架诊断实锤） |
+| 3.7 | **第六平面 IndexedDB 命名空间**。台架取证闭环：共享 IDB（`DBFetch`）缓存 `isAdmin`+菜单树是四象限泄漏载体；时间线拍到 `ADMIN=TRUE`/`admin=false` 两组 sha1 随打开顺序交叉翻转；3.7.1 回归全绿（A 进管理端、U 保持普通、CDP 真实 IDB 全景仅见 `__ql_ns_*` 库） |
+| E2E | `npm run e2e`：Playwright+扩展隔离环境，事件流 `tmp/e2e-events.jsonl`（set-cookie / identity-snap / wire-auth / idb-full / resp-hash…），CDP `IndexedDB` 域全量取证，`node tools/e2e/peek.mjs <type>` 随手判读 |
 
 ## 四、快捷键与轮盘形态
 
