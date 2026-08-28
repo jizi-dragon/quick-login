@@ -2,6 +2,15 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.5.0（2026-08-28）
+
+**重要修正：3.3 的缓存分区在 Chromium 上从未生效。** DNR `redirect.urlTransform` 是 Firefox 专属字段，Chromium 会以 `Unexpected property` 拒绝整个 updateSessionRules 批次（原子失败），3.3 的 CACHE 规则实际一条都没装上。本版重构该平面并新增第五平面：
+
+- **缓存分区移至页面层**：MAIN 壳补丁 fetch/XHR，对同源 GET 幂等追加 `_qlck=t<tabId>`（tabId 由 bind 载荷携带；已含参数则跳过）。POST/PUT 与跨域不受影响；DNR 中已移除 CACHE 规则族。
+- **第五平面：Service Worker / Cache Storage 封控**（SW_SHIELD_ENABLED）：拦截 `navigator.serviceWorker.register`（站点 SW 在网络栈内自建缓存、完全无视 DNR 改头与 `_qlck` 分区）；注销既有注册；`CacheStorage.prototype` 的 open/keys/has/delete 按账号命名空间键控、`match` 一律 miss 回落网络。这是「四象限泄漏」候选一（站点级 SW 缓存）的直接防线。
+- 新增 `docs/CODEBASE_OVERVIEW.md` 代码库导读；E2E 台架扩容并新增 analyze-events / fix-verify / rule-probe 三个取证工具。
+- 修复 shield-main 一个未用变量导致的类型检查失败。
+
 ## 3.4.0（2026-08-28）
 
 **针对实测四象限症状的针对性加固 + 诊断工具化：**

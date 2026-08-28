@@ -403,7 +403,6 @@
         const oKeys = CacheStorageProto.keys as typeof CacheStorageProto.keys;
         const oHas = CacheStorageProto.has as typeof CacheStorageProto.has;
         const oDelete = CacheStorageProto.delete as typeof CacheStorageProto.delete;
-        const oMatch = CacheStorageProto.match as typeof CacheStorageProto.match;
         const patch = (
           proto: object,
           key: string,
