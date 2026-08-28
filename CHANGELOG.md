@@ -2,6 +2,10 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.7.0（2026-08-28）
+
+**第六隔离平面：IndexedDB 命名空间**（E2E 台架实锤的泄漏根因修复）。取证链：平台前端把 **`isAdmin` 标志位与全量菜单树**缓存在 origin 级共享 IndexedDB 库 `DBFetch`（键 = URL 哈希、无账号维度）；免密恢复登录的标签页直接消费上一账号写入的条目——先管理员后普通用户 → 普通用户读到 `ADMIN=TRUE` + 130KB 管理菜单（象限「U 获得管理员」）；反向则管理员被精简菜单同化。该层完全绕开存储/Bearer/Cookie/HTTP 缓存/SW 五平面。对策：`indexedDB.open/deleteDatabase` 按账号前缀化（`__ql_ns_<accountId>__`，与存储平面同命名空间）、`databases()` 剥前缀回显、激活时清扫历史无前缀共享库（毒源）。已知残余：Web Worker 内开的 IDB 不受主世界补丁（待观测）。台架可复现验证：`npm run e2e`，探针现按「len+SHA1+isAdmin 位」判定级 dump DBFetch。
+
 ## 3.6.1（2026-08-28）
 
 **修复（E2E 台架实测发现）：3.6 的 Cookie 登录快照从未执行。** token 首次捕获可能经 authHeader 出站嗅探通道（早于 `__auth_token__` 写入事件），而快照触发只挂在 storageWrite 分支——首捕后同一 token 再写入被去重跳过，快照永远错过登录时点，所有绑定标签始终运行在 `cookie=剥离` 模式。现把快照触发内聚到 `captureToken`（首捕即触发，双通道覆盖）。诊断：`applyBinding` 应出现 `cookie=回放<N>B` 而非 `剥离`。

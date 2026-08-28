@@ -13,6 +13,9 @@
  * 5. SW/CacheStorage 封控 —— 绑定标签页内阻止站点注册 Service Worker、注销既有注册，
  *    CacheStorage 按账号命名空间键控且 CacheStorage.match 一律 miss（封堵无视 DNR/_qlck
  *    的站点自建缓存层，详见 installSwAndCacheShield）。
+ * 6. IndexedDB 命名空间 —— open/deleteDatabase 按账号前缀化、databases() 剥前缀回显、
+ *    激活时清扫历史共享库。v3.7 实测：站点把 isAdmin 标志与菜单树缓存在共享 IDB（DBFetch），
+ *    是四象限权限串号的直接载体（详见 installIdbShield）。
  */
 
 (() => {
@@ -437,6 +440,78 @@
     }
   }
 
+  /* ================= 第六平面：IndexedDB 命名空间 ================= */
+
+  /**
+   * IndexedDB 是 origin 级共享存储，完全绕开 DNR/_qlck/CacheStorage 各平面。
+   * v3.7 实测：目标站把 `isAdmin` 标志位与全量菜单树缓存在 IDB 库 `DBFetch`
+   * （键 = URL 哈希，无账号维度）——后打开的标签页免密恢复时直接消费前一账号
+   * 写入的条目，即四象限「普通用户获得管理员 / 管理员被同化」的载体。
+   * 对策（与 CacheStorage 层同法）：
+   * 1. open / deleteDatabase 重定向到 `ns + name`（每账号独立库）；
+   * 2. databases() 仅返回本命名空间内的库（剥离前缀，页面视图不变）；
+   * 3. 激活时清扫历史无前缀共享库（毒源；fire-and-forget，删除幂等）。
+   * 残余风险：站点若在 Web Worker 内开 IDB 则不受此补丁（主世界专用），待观测。
+   */
+  const IDB_SHIELD_ENABLED = true;
+  let idbSweepDone = false;
+
+  function installIdbShield(): void {
+    try {
+      if (!IDB_SHIELD_ENABLED || typeof IDBFactory === 'undefined') {
+        return;
+      }
+      const idbProto = IDBFactory.prototype as unknown as Record<string, unknown>;
+      const oOpen = idbProto.open as (name: string, version?: number) => IDBOpenDBRequest;
+      const oDelete = idbProto.deleteDatabase as (name: string) => IDBOpenDBRequest;
+      const oDatabases = idbProto.databases as () => Promise<IDBDatabaseInfo[]>;
+      const patch = (proto: object, key: string, value: (...args: any[]) => any): void => {
+        const d = Object.getOwnPropertyDescriptor(proto, key);
+        if (!d || d.configurable) {
+          Object.defineProperty(proto, key, { configurable: true, writable: true, value });
+        }
+      };
+      patch(idbProto, 'open', function (this: IDBFactory, name: string, version?: number) {
+        return version === undefined
+          ? oOpen.call(this, ns + String(name))
+          : oOpen.call(this, ns + String(name), version);
+      });
+      patch(idbProto, 'deleteDatabase', function (this: IDBFactory, name: string) {
+        return oDelete.call(this, ns + String(name));
+      });
+      if (typeof oDatabases === 'function') {
+        patch(idbProto, 'databases', function (this: IDBFactory) {
+          return Promise.resolve(oDatabases.call(this)).then((infos) =>
+            (infos ?? [])
+              .filter((i) => typeof i.name === 'string' && i.name.startsWith(ns))
+              .map((i) => ({ ...i, name: i.name!.slice(ns.length) })),
+          );
+        });
+      }
+      // 历史毒源清扫：无前缀共享库（激活期间站点 bundle 尚未跑，无人持有连接）
+      if (!idbSweepDone) {
+        idbSweepDone = true;
+        void Promise.resolve()
+          .then(async () => {
+            const legacy = typeof oDatabases === 'function' ? await oDatabases.call(indexedDB) : [];
+            for (const info of legacy ?? []) {
+              if (typeof info.name !== 'string' || info.name.startsWith(ns)) {
+                continue;
+              }
+              try {
+                oDelete.call(indexedDB, info.name);
+              } catch {
+                // 单库删除失败不阻断
+              }
+            }
+          })
+          .catch(() => undefined);
+      }
+    } catch {
+      // 第六平面失败不阻断其余隔离平面
+    }
+  }
+
   /* ================= 绑定处理 ================= */
 
   function activate(accountId: string, seed?: Record<string, string>): void {
@@ -447,6 +522,7 @@
     ns = `${NS_TAG}${accountId}__`;
     installStoragePatch();
     installSwAndCacheShield();
+    installIdbShield();
     applySeed(seed);
   }
 

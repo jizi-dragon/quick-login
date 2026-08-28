@@ -81,6 +81,23 @@ for (const t of types) {
       }
       console.log(`   cookie视图=${clip(e.probe?.cookieView, full ? 99999 : 120)}`);
       if (e.probe?.fpValues?.length > 1) console.log(`   ⚠ 多指纹并存: ${e.probe.fpValues.length}`);
+      const idb = e.probe?.idb ?? {};
+      for (const [db, stores] of Object.entries(idb)) {
+        if (stores.err) {
+          console.log(`   IDB[${db}] 错误: ${stores.err}`);
+          continue;
+        }
+        for (const [s, info] of Object.entries(stores)) {
+          console.log(`   IDB[${db}].${s} 共${info.count}条`);
+          for (const e2 of info.sample ?? []) {
+            if (e2?.sha1 !== undefined) {
+              console.log(`     ${e2.id}… len=${e2.len} sha1=${e2.sha1} ${e2.admin ?? ''} | ${clip(e2.head, 60)}`);
+            } else {
+              console.log(`     ${clip(e2, 200)}`);
+            }
+          }
+        }
+      }
     } else if (t === 'wire-auth') {
       const p = typeof e.authSubject === 'object' ? e.authSubject : jwtFrom(e.authSubject);
       console.log(`[${time}] T${e.tab} ${p ? whoOf(p) : clip(e.authSubject, 70)}  ← ${clip(e.url, 90)}`);

@@ -657,7 +657,7 @@ async function watchPage(page) {
       return null;
     }
     try {
-      return await page.evaluate(() => {
+      return await page.evaluate(async () => {
         const out = {
           namespaces: {},
           cookieView: document.cookie.slice(0, 1600),
@@ -708,6 +708,77 @@ async function watchPage(page) {
           } catch {
             out.cookieTokenRaw = tok.slice(0, 80) + '…';
           }
+        }
+        // IndexedDB 取证：跨标签共享缓存（DBFetch/CacheDb）是缓存分区外的最后嫌疑层
+        try {
+          if (typeof indexedDB.databases === 'function') {
+            const names = (await indexedDB.databases()).map((d) => d.name).filter(Boolean).slice(0, 8);
+            const idb = {};
+            for (const name of names) {
+              try {
+                const db = await new Promise((res, rej) => {
+                  const r = indexedDB.open(name);
+                  r.onsuccess = () => res(r.result);
+                  r.onerror = () => rej(r.error);
+                });
+                const dump = {};
+                for (const s of [...db.objectStoreNames].slice(0, 4)) {
+                  const tx = db.transaction(s, 'readonly');
+                  const st = tx.objectStore(s);
+                  const keys = await new Promise((res) => {
+                    const q = st.getAllKeys();
+                    q.onsuccess = () => res((q.result ?? []).slice(0, 40));
+                    q.onerror = () => res([]);
+                  });
+                  const vals = await new Promise((res) => {
+                    const q = st.getAll();
+                    q.onsuccess = () => res((q.result ?? []).slice(0, 6));
+                    q.onerror = () => res([]);
+                  });
+                  // DBFetch 判定级摘要（页面侧 WebCrypto）：len+sha1+isAdmin 位+头部
+                  const summarize = async (v) => {
+                    try {
+                      const o = JSON.parse(JSON.stringify(v));
+                      const raw = typeof o.values === 'string' ? o.values : JSON.stringify(o.values ?? o);
+                      let hash = '';
+                      try {
+                        const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(raw));
+                        hash = [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 10);
+                      } catch {
+                        hash = 'hash-err';
+                      }
+                      const admin = /"isAdmin"\s*:\s*true/.test(raw) ? 'ADMIN=TRUE' : /"isAdmin"\s*:\s*false/.test(raw) ? 'admin=false' : '';
+                      return {
+                        id: String(o.id ?? '').slice(0, 34),
+                        len: raw.length,
+                        sha1: hash,
+                        admin,
+                        head: raw.slice(0, 60),
+                      };
+                    } catch {
+                      return { raw: String(v).slice(0, 60) };
+                    }
+                  };
+                  const samples = [];
+                  for (const v of vals) {
+                    samples.push(await summarize(v));
+                  }
+                  dump[s] = {
+                    count: keys.length,
+                    keys: keys.map((k) => String(k).slice(0, 90)),
+                    sample: samples,
+                  };
+                }
+                db.close();
+                idb[name] = dump;
+              } catch (e2) {
+                idb[name] = { err: String(e2?.message ?? e2).slice(0, 80) };
+              }
+            }
+            out.idb = idb;
+          }
+        } catch {
+          // IDB 枚举失败不影响其余探针
         }
         // 兼容宽命名空间匹配
         for (let i = 0; i < localStorage.length; i++) {
