@@ -48,6 +48,7 @@
 | 3.6 | **Cookie 剥离升级为按账号回放**（登录时点全量快照含 HttpOnly；父域覆盖）；对齐 SessionBox 稳定核心 |
 | 3.6.1 | 修复：Cookie 快照触发内聚 `captureToken`（3.6 的快照因首捕走 authHeader 通道从未执行，回放一直未生效——E2E 台架诊断实锤） |
 | 3.7 | **第六平面 IndexedDB 命名空间**。台架取证闭环：共享 IDB（`DBFetch`）缓存 `isAdmin`+菜单树是四象限泄漏载体；时间线拍到 `ADMIN=TRUE`/`admin=false` 两组 sha1 随打开顺序交叉翻转；3.7.1 回归全绿（A 进管理端、U 保持普通、CDP 真实 IDB 全景仅见 `__ql_ns_*` 库） |
+| 3.7.2 | **修复真实环境「权限被分发覆盖」**：绕过扩展的普通登录页签把 `__auth_token__` 写进真实 jar（无虚拟化保护），3.6 登录时点快照经 `chrome.cookies` 把 jar 残留身份一并打包回放 → 请求 Bearer 与 Cookie 身份不一致。快照/回放双侧过滤 `IDENTITY_COOKIE_BLACKLIST`；回放侧过滤使存量快照无需重登自愈。用户实测 1A+2U+普通页签并存全绿。E2E 台架无法复现此因（全新档案 jar 干净）——「真实档案 vs 隔离档案」差异本身成为取证线索 |
 | E2E | `npm run e2e`：Playwright+扩展隔离环境，事件流 `tmp/e2e-events.jsonl`（set-cookie / identity-snap / wire-auth / idb-full / resp-hash…），CDP `IndexedDB` 域全量取证，`node tools/e2e/peek.mjs <type>` 随手判读 |
 
 ## 四、快捷键与轮盘形态
