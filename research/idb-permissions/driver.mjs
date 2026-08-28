@@ -252,6 +252,92 @@ const EDIT_FN = `async function(arg) {
   });
 }`;
 
+/* ---------------- 持续网络记录器：权限类 API 请求 + 线上 Bearer 主体 ---------------- */
+const PERM_HINT = /\/api\/platform\/.*(menu|config|view|power|nav|home|basicobject|system|user|workflow)/i;
+const netWatch = new Map(); // tabIdx -> cdp
+
+async function attachNet(page, getIdx) {
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Network.enable');
+    const inflight = new Map();
+    cdp.on('Network.requestWillBeSent', (e) => {
+      const url = e.request.url;
+      if (!/tonbridge-config\.aksoegmp\.com\/api\//.test(url)) return;
+      inflight.set(e.requestId, { url: url.slice(0, 200), auth: null });
+    });
+    cdp.on('Network.requestWillBeSentExtraInfo', (e) => {
+      const infl = inflight.get(e.requestId);
+      if (!infl) return;
+      const a = e.headers['Authorization'] ?? e.headers['authorization'];
+      if (typeof a === 'string') infl.auth = a;
+    });
+    cdp.on('Network.responseReceived', (e) => {
+      const infl = inflight.get(e.requestId);
+      if (!infl) return;
+      const auth = (infl.auth ?? '').replace(/\s+/g, ' ').trim();
+      let sub = '(无Bearer)';
+      let authHead = '';
+      if (/^Bearer\s+\S/i.test(auth)) {
+        const raw = auth.replace(/^Bearer\s+/i, '').replace(/\s+/g, '');
+        try {
+          const p = JSON.parse(Buffer.from(raw.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64'));
+          const k = Object.keys(p).find((x) => x.endsWith('nameidentifier'));
+          sub = String(p[k]).slice(0, 8) ?? '?';
+        } catch { sub = 'bearer?'; }
+        authHead = raw.slice(0, 24) + '|' + raw.split('.')[1].slice(0, 20);
+      }
+      const hit = PERM_HINT.test(infl.url);
+      const idx = getIdx();
+      jlog({ type: 'wire', tab: idx, url: infl.url, status: e.response.status, sub, authHead, perm: hit });
+      if (hit) emit(`wire T${idx} [${e.response.status}] ${sub} ← ${infl.url.slice(0, 110)}`);
+      inflight.delete(e.requestId);
+    });
+    netWatch.set(getIdx, cdp);
+    page.on('close', () => {
+      netWatch.delete(getIdx);
+      cdp.detach().catch(() => undefined);
+    });
+  } catch (e) {
+    emit(`网络记录器挂载失败: ${e?.message ?? e}`);
+  }
+}
+
+/* ---------------- BLOCKAPI：CDP Fetch 拦截，阻断权限类重取（模拟网络失败） ---------------- */
+const blockers = new Map(); // tabIdx -> cdp
+async function setBlock(page, idx, on) {
+  if (on) {
+    if (blockers.has(idx)) return `T${idx} 已在阻断`;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Fetch.enable', {
+      patterns: [{ urlPattern: '*tonbridge-config.aksoegmp.com/api/platform*', requestStage: 'Request' }],
+    });
+    cdp.on('Fetch.requestPaused', async (e) => {
+      try {
+        if (PERM_HINT.test(e.request.url)) {
+          await cdp.send('Fetch.failRequest', { requestId: e.requestId, errorReason: 'Failed' });
+          jlog({ type: 'blocked', tab: idx, url: e.request.url.slice(0, 160) });
+        } else {
+          await cdp.send('Fetch.continueRequest', { requestId: e.requestId });
+        }
+      } catch { /* 请求可能已自然结束 */ }
+    });
+    blockers.set(idx, cdp);
+    page.on('close', () => {
+      blockers.delete(idx);
+      cdp.detach().catch(() => undefined);
+    });
+    return `T${idx} BLOCKAPI ON（权限类 API 一律网络失败，其余放行）`;
+  }
+  const cdp = blockers.get(idx);
+  if (cdp) {
+    try { await cdp.send('Fetch.disable'); await cdp.detach(); } catch { /* */ }
+    blockers.delete(idx);
+    return `T${idx} BLOCKAPI OFF`;
+  }
+  return `T${idx} 本未阻断`;
+}
+
 /* ---------------- 命令执行 ---------------- */
 async function runCommand(line) {
   const parts = line.trim().split(/\s+/);
@@ -312,6 +398,18 @@ async function runCommand(line) {
       const r = await pageEval(p, EDIT_FN, { idPrefix: parts[2], jsonPath: parts[3], literal: parts.slice(4).join(' ') });
       jlog({ type: 'edit', tab: Number(parts[1]), idPrefix: parts[2], jsonPath: parts[3], result: r });
       emit(`T${parts[1]} EDIT ${parts[3]} → ${JSON.stringify(r)}`);
+    } else if (cmd === 'BLOCKAPI') {
+      const p = tabByNum(parts[1]);
+      if (!p) return emit(`无 T${parts[1]}`);
+      emit(await setBlock(p, Number(parts[1]), (parts[2] ?? 'on').toLowerCase() === 'on'));
+    } else if (cmd === 'SNAPS') {
+      const n = Number(parts[1] ?? 5);
+      const gap = Number(parts[2] ?? 2) * 1000;
+      for (let i = 0; i < n; i++) {
+        await cmdSnap();
+        if (i < n - 1) await new Promise((r) => setTimeout(r, gap));
+      }
+      emit(`SNAPS ×${n} 完成`);
     } else if (cmd === 'PROBE') {
       const p = tabByNum(parts[1]);
       if (!p) return emit(`无 T${parts[1]}`);
@@ -347,8 +445,12 @@ ctx = await chromium.launchPersistentContext(PROFILE, {
     '--disable-sync',
   ],
 });
-emit(`研究浏览器已启动（dist ${JSON.parse(fs.readFileSync(path.join(DIST, 'manifest.json'), 'utf8')).version} · 隔离档案）。等待 ${GO} 命令…`);
+emit(`研究浏览器已启动（dist ${JSON.parse(fs.readFileSync(path.join(DIST, 'manifest.json'), 'utf8')).version}${process.env.QL_RESEARCH_DIST ? ' · 考古构建' : ''} · 隔离档案）。等待 ${GO} 命令…`);
+for (const p of ctx.pages()) {
+  if (p.url().includes(SITE_HOST)) void attachNet(p, () => siteTabs().indexOf(p) + 1);
+}
 ctx.on('page', (p) => {
+  void attachNet(p, () => siteTabs().indexOf(p) + 1);
   p.on('load', () => {
     if (!p.isClosed() && p.url().includes(SITE_HOST)) {
       emit(`页面加载: T${siteTabs().indexOf(p) + 1} ${p.url().slice(0, 80)}`);
