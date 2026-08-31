@@ -7,6 +7,7 @@
  * 交互：悬停高亮 → 点击切换；Esc / 再次快捷键 / 点击遮罩关闭。无任何窗口控制元素。
  */
 import type { ParallelAccount, ParallelAccountStatus } from '../shared/types';
+import { LOCAL_KEYS } from '../shared/constants';
 import { buildSectorWheel, groupPagesByBox, type WheelAccount } from '../ui/wheel/wheel-core';
 
 const WIN = window as typeof window & { __QL_WHEEL_ACTIVE__?: boolean };
@@ -37,9 +38,27 @@ async function fetchAccounts(): Promise<WheelAccount[]> {
   return res?.result?.ok && Array.isArray(res.result.data) ? res.result.data : [];
 }
 
-async function mount(): Promise<void> {
-  const accounts = await fetchAccounts();
+/** 轮盘分页 = 账号归属盒子 + 管理页记忆的空盒子（修复「新建空盒子切换不到」） */
+async function fetchPages(): Promise<{ label: string; accounts: WheelAccount[] }[]> {
+  const [accounts, remembered] = await Promise.all([
+    fetchAccounts(),
+    chrome.storage.local
+      .get(LOCAL_KEYS.boxList)
+      .then((s) => (s[LOCAL_KEYS.boxList] as string[] | undefined) ?? [])
+      .catch(() => [] as string[]),
+  ]);
   const pages = groupPagesByBox(accounts);
+  const seen = new Set(pages.map((p) => p.label));
+  for (const name of remembered) {
+    if (!seen.has(name)) {
+      pages.push({ label: name, accounts: [] });
+    }
+  }
+  return pages;
+}
+
+async function mount(): Promise<void> {
+  const pages = await fetchPages();
   let pageIndex = 0;
 
   /* ---------- 宿主节点与 Shadow 根 ---------- */

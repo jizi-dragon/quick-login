@@ -6,6 +6,7 @@
  * 中心翻页：滚轮 / 点击 Hub 循环切换盒子，单环显示当前盒子的账号。
  */
 import type { ParallelAccount, ParallelAccountStatus } from '../../shared/types';
+import { LOCAL_KEYS } from '../../shared/constants';
 import { buildSectorWheel, groupPagesByBox, type WheelAccount } from './wheel-core';
 
 const wheelEl = document.getElementById('wheel') as HTMLDivElement;
@@ -34,6 +35,28 @@ async function fetchAccounts(): Promise<WheelAccount[]> {
   return res.result.data;
 }
 
+/**
+ * 轮盘分页 = 账号归属的盒子（有账号）+ 管理页记忆的空盒子（`ql:boxes`，补到页尾）。
+ * 修复：新建的空盒子此前不会出现在轮盘里，导致「切换不到」。
+ */
+async function fetchPages(): Promise<{ label: string; accounts: WheelAccount[] }[]> {
+  const [accounts, remembered] = await Promise.all([
+    fetchAccounts(),
+    chrome.storage.local
+      .get(LOCAL_KEYS.boxList)
+      .then((s) => (s[LOCAL_KEYS.boxList] as string[] | undefined) ?? [])
+      .catch(() => [] as string[]),
+  ]);
+  const pages = groupPagesByBox(accounts);
+  const seen = new Set(pages.map((p) => p.label));
+  for (const name of remembered) {
+    if (!seen.has(name)) {
+      pages.push({ label: name, accounts: [] });
+    }
+  }
+  return pages;
+}
+
 async function pick(accountId: string): Promise<void> {
   try {
     await chrome.runtime.sendMessage({ kind: 'par.open', id: accountId });
@@ -45,7 +68,6 @@ async function pick(accountId: string): Promise<void> {
 let accounts: WheelAccount[] = [];
 let pages: { label: string; accounts: WheelAccount[] }[] = [];
 let pageIndex = 0;
-
 function render(): void {
   buildSectorWheel(wheelEl, {
     pages,
@@ -86,9 +108,9 @@ function onKey(e: KeyboardEvent): void {
   }
 }
 
-void fetchAccounts().then((list) => {
-  accounts = list;
-  pages = groupPagesByBox(accounts);
+void fetchPages().then((grouped) => {
+  pages = grouped;
+  accounts = pages.flatMap((p) => p.accounts);
   render();
   document.addEventListener('keydown', onKey);
 });

@@ -534,6 +534,83 @@
   font-size: 22px;
 }
 
+/* ---- 移入盒子选择弹窗 ---- */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(23, 42, 84, 0.32);
+  backdrop-filter: blur(4px);
+}
+.modal-card {
+  width: min(430px, 92vw);
+  max-height: 84vh;
+  overflow-y: auto;
+  background: var(--sb-surface);
+  border: 1px solid var(--sb-border);
+  border-radius: var(--sb-radius-lg);
+  box-shadow: var(--sb-shadow-lg);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.modal-card h3 {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 700;
+}
+.box-options {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.box-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  padding: 10px 13px;
+  border-radius: var(--sb-radius);
+  border: 1.5px solid var(--sb-border);
+  background: var(--sb-surface-2);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sb-text);
+  transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+.box-option:hover {
+  border-color: var(--sb-brand);
+}
+.box-option.active {
+  border-color: var(--sb-brand);
+  background: var(--sb-brand-soft);
+  color: var(--sb-brand);
+}
+.box-option .chip-n {
+  font-size: 10.5px;
+  background: rgba(23, 42, 84, 0.08);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-weight: 700;
+  color: var(--sb-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.box-option.active .chip-n {
+  background: rgba(30, 111, 255, 0.15);
+  color: var(--sb-brand);
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .hidden {
   display: none !important;
 }

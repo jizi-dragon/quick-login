@@ -35,6 +35,12 @@ const importText = document.getElementById('import-text') as HTMLTextAreaElement
 const importRun = document.getElementById('import-run') as HTMLButtonElement;
 const importCancel = document.getElementById('import-cancel') as HTMLButtonElement;
 
+const boxModal = document.getElementById('box-modal') as HTMLDivElement;
+const boxModalList = document.getElementById('box-modal-list') as HTMLDivElement;
+const boxModalNew = document.getElementById('box-modal-new') as HTMLInputElement;
+const boxModalOk = document.getElementById('box-modal-ok') as HTMLButtonElement;
+const boxModalCancel = document.getElementById('box-modal-cancel') as HTMLButtonElement;
+
 /** 有历史记录或站点清单有它时优先预选的默认站点 */
 const PREFERRED_HOST = 'tonbridge-config.aksoegmp.com';
 const LAST_HOST_KEY = 'ql:lastParHost';
@@ -232,7 +238,7 @@ function renderBrowserAccounts(): void {
     const moveBtn = document.createElement('button');
     moveBtn.className = 'btn-ghost';
     moveBtn.textContent = '移入盒子';
-    moveBtn.addEventListener('click', () => void moveAccounts([a.id]));
+    moveBtn.addEventListener('click', () => openBoxChooser([a.id]));
 
     const del = document.createElement('button');
     del.className = 'btn-danger';
@@ -338,12 +344,12 @@ function syncBatchBar(): void {
 batchToggle.addEventListener('click', () => {
   batchMode = !batchMode;
   batchToggle.textContent = batchMode ? '退出批量' : '批量管理';
-  batchToggle.classList.toggle('active-btn', batchMode);
   if (!batchMode) {
     selectedIds.clear();
-    lastListKey = '';
-    renderBrowserAccounts();
   }
+  // 强制重绘：卡片上的勾选框随批量模式增删（进入/退出都要）
+  lastListKey = '';
+  renderBrowserAccounts();
   syncBatchBar();
   lastChipsKey = '';
   renderBoxChips();
@@ -360,7 +366,7 @@ selMove.addEventListener('click', () => {
   if (!selectedIds.size) {
     return;
   }
-  void moveAccounts([...selectedIds]);
+  openBoxChooser([...selectedIds]);
 });
 
 selDelete.addEventListener('click', () => {
@@ -379,34 +385,99 @@ selDelete.addEventListener('click', () => {
   })();
 });
 
-/** 把一批账号移入盒子（弹窗输入目标盒子名；空 = 默认盒子） */
-async function moveAccounts(ids: string[]): Promise<void> {
-  const first = browserAccounts.find((a) => a.id === ids[0]);
-  const suggestion = currentBox !== '全部' ? currentBox : first ? boxOf(first) : DEFAULT_BOX;
-  const target = prompt(
-    `把 ${ids.length} 个账号移入哪个盒子？（留空 = ${DEFAULT_BOX}；输入新名称将自动创建）`,
-    suggestion === '全部' ? DEFAULT_BOX : suggestion,
-  );
-  if (target === null) {
+/* ==================== 移入盒子：选择弹窗（列出实际存在的盒子 + 可输新名） ==================== */
+
+let pendingMoveIds: string[] = [];
+let modalPick = DEFAULT_BOX;
+
+function openBoxChooser(ids: string[]): void {
+  if (!ids.length) {
     return;
   }
-  const name = target.trim();
-  for (const id of ids) {
-    await send({ kind: 'par.moveBox', id, box: name });
-  }
-  if (name && !boxes.includes(name)) {
-    boxes.push(name);
-    await saveBoxes();
-    lastBoxOptions = '';
-  }
-  if (currentBox !== '全部' && name && currentBox !== name) {
-    currentBox = name;
-  }
-  selectedIds.clear();
-  lastChipsKey = '';
-  lastListKey = '';
-  await refreshAll();
+  pendingMoveIds = ids;
+  const first = browserAccounts.find((a) => a.id === ids[0]);
+  modalPick = currentBox !== '全部' ? currentBox : first ? boxOf(first) : DEFAULT_BOX;
+  boxModalNew.value = '';
+  renderBoxModalList();
+  boxModal.classList.remove('hidden');
 }
+
+function renderBoxModalList(): void {
+  boxModalList.innerHTML = '';
+  const typing = boxModalNew.value.trim();
+  for (const name of boxes) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'box-option' + (!typing && modalPick === name ? ' active' : '');
+    const label = document.createElement('span');
+    label.textContent = name;
+    const count = document.createElement('span');
+    count.className = 'chip-n';
+    count.textContent = String(browserAccounts.filter((a) => boxOf(a) === name).length);
+    row.append(label, count);
+    row.addEventListener('click', () => {
+      modalPick = name;
+      boxModalNew.value = '';
+      renderBoxModalList();
+    });
+    boxModalList.append(row);
+  }
+}
+
+boxModalNew.addEventListener('input', () => {
+  const typed = boxModalNew.value.trim();
+  if (typed) {
+    modalPick = typed; // 输入新盒子名 = 以新名参与选择（确定时自动创建）
+    renderBoxModalList();
+  } else {
+    const first = browserAccounts.find((a) => a.id === pendingMoveIds[0]);
+    modalPick = currentBox !== '全部' ? currentBox : first ? boxOf(first) : DEFAULT_BOX;
+    renderBoxModalList();
+  }
+});
+
+function hideBoxModal(): void {
+  boxModal.classList.add('hidden');
+  pendingMoveIds = [];
+}
+
+boxModalOk.addEventListener('click', () => {
+  void (async () => {
+    const target = (boxModalNew.value.trim() || modalPick).trim() || DEFAULT_BOX;
+    const ids = [...pendingMoveIds];
+    hideBoxModal();
+    if (!ids.length) {
+      return;
+    }
+    for (const id of ids) {
+      await send({ kind: 'par.moveBox', id, box: target });
+    }
+    if (target !== DEFAULT_BOX && !boxes.includes(target)) {
+      boxes.push(target);
+      await saveBoxes();
+      lastBoxOptions = '';
+    }
+    if (currentBox !== '全部' && currentBox !== target) {
+      currentBox = target;
+    }
+    selectedIds.clear();
+    lastChipsKey = '';
+    lastListKey = '';
+    await refreshAll();
+  })();
+});
+
+boxModalCancel.addEventListener('click', hideBoxModal);
+boxModal.addEventListener('click', (e) => {
+  if (e.target === boxModal) {
+    hideBoxModal();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !boxModal.classList.contains('hidden')) {
+    hideBoxModal();
+  }
+});
 
 /* ==================== 批量导入 ==================== */
 

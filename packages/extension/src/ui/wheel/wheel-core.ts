@@ -239,16 +239,19 @@ export function buildSectorWheel(root: HTMLElement, opts: SectorWheelOpts): void
   root.append(svg);
 }
 
-/** 滚轮换页（附在 root 上；核心不持有状态，由调用方重渲染） */
+/** 滚轮换页（附在 root 上；重渲染时防重复附着——监听器累积会导致一次滚动翻多页） */
 function attachPageNav(
   root: HTMLElement,
-  svg: SVGElement,
+  _svg: SVGElement,
   opts: SectorWheelOpts,
   arcCirc: number,
   frac: number,
 ): void {
-  svg.style.setProperty('--arc-len', `${arcCirc.toFixed(2)}`);
-  svg.style.setProperty('--arc-frac', `${frac}`);
+  svgStyleArc(root, arcCirc, frac);
+  if (root.dataset.qlWheelNav === '1') {
+    return;
+  }
+  root.dataset.qlWheelNav = '1';
   root.addEventListener(
     'wheel',
     (e) => {
@@ -257,4 +260,13 @@ function attachPageNav(
     },
     { passive: false },
   );
+}
+
+/** 把弧长/进度写为 CSS 变量（供当前 SVG 的进度弧过渡使用） */
+function svgStyleArc(root: HTMLElement, arcCirc: number, frac: number): void {
+  const svg = root.querySelector('svg.sector-svg') as SVGElement | null;
+  if (svg) {
+    svg.style.setProperty('--arc-len', `${arcCirc.toFixed(2)}`);
+    svg.style.setProperty('--arc-frac', `${frac}`);
+  }
 }

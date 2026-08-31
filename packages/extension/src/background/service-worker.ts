@@ -259,8 +259,8 @@ chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
 /* ---------------- 快捷键：账号选择轮盘（v3.8：扇形环；页面内无框浮层优先） ---------------- */
 
 const WHEEL_PAGE = 'ui/wheel/wheel.html';
-const WHEEL_W = 600;
-const WHEEL_H = 632;
+const WHEEL_W = 720;
+const WHEEL_H = 760;
 /** 兜底浮层脚本（ISOLATED world，幂等开关）：普通网页上直接铺开无框轮盘 */
 const WHEEL_OVERLAY_FILE = 'content/wheel-overlay.js';
 

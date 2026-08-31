@@ -19,8 +19,8 @@ body {
 }
 
 .stage {
-  width: min(88vmin, 560px);
-  padding: 14px;
+  width: min(92vmin, 660px);
+  padding: 16px;
 }
 
 /* ---- 轮盘容器 ---- */

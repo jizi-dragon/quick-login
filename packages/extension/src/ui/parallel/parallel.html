@@ -114,6 +114,20 @@
       </div>
     </main>
 
+    <!-- 移入盒子：选择弹窗（列出实际存在的盒子，可输入新盒子名） -->
+    <div id="box-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3 id="box-modal-title">移入盒子</h3>
+        <p class="desc">选择目标盒子（单选），或在下方输入新盒子名（自动创建）。</p>
+        <div id="box-modal-list" class="box-options"></div>
+        <input id="box-modal-new" placeholder="或输入新盒子名…" autocomplete="off" />
+        <div class="modal-actions">
+          <button id="box-modal-cancel" class="btn-ghost" type="button">取消</button>
+          <button id="box-modal-ok" class="btn-primary" type="button">确定移入</button>
+        </div>
+      </div>
+    </div>
+
     <script src="parallel.js"></script>
   </body>
 </html>
