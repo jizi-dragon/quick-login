@@ -12,8 +12,9 @@ export type RuntimeRequest =
   | { kind: 'site.grants.list' }
   | { kind: 'site.grant.add'; host: string }
   | { kind: 'par.list' }
-  | { kind: 'par.create'; siteHost: string; tabName: string; username: string; password: string; open: boolean }
+  | { kind: 'par.create'; siteHost: string; tabName: string; username: string; password: string; open: boolean; box?: string }
   | { kind: 'par.update'; id: string; patch: Partial<Pick<ParallelAccount, 'tabName'>> }
+  | { kind: 'par.moveBox'; id: string; box: string }
   | { kind: 'par.delete'; id: string }
   | { kind: 'par.open'; id: string; forceNewTab?: boolean }
   | { kind: 'par.grantChanged' }
@@ -31,6 +32,7 @@ export type RuntimeResponse =
   | { kind: 'par.list'; result: Result<Array<ParallelAccount & ParallelAccountStatus & { password: boolean }>> }
   | { kind: 'par.create'; result: Result<ParallelAccount> }
   | { kind: 'par.update'; result: Result<ParallelAccount> }
+  | { kind: 'par.moveBox'; result: Result<ParallelAccount> }
   | { kind: 'par.delete'; result: Result<void> }
   | { kind: 'par.open'; result: Result<{ tabId: number; reused: boolean }> }
   | { kind: 'par.grantChanged'; result: Result<boolean> }

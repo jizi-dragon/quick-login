@@ -1,5 +1,5 @@
 import { CONTENT_MESSAGE, LOCAL_KEYS, SESSION_KEYS } from '../../shared/constants';
-import type { BridgeDownPayload, BridgeUpPayload } from '../../shared/types';
+import type { BridgeDownPayload, BridgeUpPayload, ParallelAccount } from '../../shared/types';
 import { credentials } from './credentials';
 import { setTabTitle } from '../tabs/tab-title';
 import { parallelStore } from './parallel-store';
@@ -89,6 +89,11 @@ async function isEnforceable(host: string): Promise<boolean> {
 /** 强制刷新授权缓存（授权增撤后调用） */
 export function invalidateEnforcementCache(): void {
   enforcement.clear();
+}
+
+/** 预热授权健康缓存（par.list 调用，供 statusOf 同步读取；isEnforceable 有缓存，稳态开销近零） */
+export async function warmEnforcementCache(hosts: string[]): Promise<void> {
+  await Promise.all([...new Set(hosts)].map((h) => isEnforceable(h).catch(() => undefined)));
 }
 
 async function readState(): Promise<void> {
@@ -374,21 +379,17 @@ export const parallelSession = {
     return undefined;
   },
 
-  /** UI 列表：返回实时状态（绑定标签页 / token / 网络平面健康） */
-  statusOf(accountId: string): { tabIds: number[]; hasToken: boolean; enforcementOff: boolean } {
-    const tabs = boundTabsOf(accountId);
-    const host = tabs.length ? bindings.get(tabs[0])?.host : undefined;
-    let enforcementOff = false;
-    if (host) {
-      enforcementOff = !enforcement.get(host);
-    } else {
-      // 无绑定标签时以账号自身 host 判定
-      void parallelStore
-        .get(accountId)
-        .then((a) => isEnforceable(a.siteHost))
-        .catch(() => false);
-    }
-    return { tabIds: tabs, hasToken: Boolean(tokens.get(accountId)?.token), enforcementOff };
+  /**
+   * UI 列表：返回实时状态（绑定标签页 / token / 网络平面健康）。
+   * host 取绑定标签页的，无绑定时取账号自身 siteHost；授权健康读取 isEnforceable
+   * 的同步缓存（par.list 已预先预热）——修复旧实现「无绑定账号永远显示离线、
+   * 未授权状态不可见」的问题。
+   */
+  statusOf(account: ParallelAccount): { tabIds: number[]; hasToken: boolean; enforcementOff: boolean } {
+    const tabs = boundTabsOf(account.id);
+    const host = tabs.length ? bindings.get(tabs[0])?.host : account.siteHost;
+    const enforcementOff = host ? !enforcement.get(host) : true;
+    return { tabIds: tabs, hasToken: Boolean(tokens.get(account.id)?.token), enforcementOff };
   },
 
   /** 账号改名后刷新所有绑定标签页标题 */

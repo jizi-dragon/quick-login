@@ -8,6 +8,7 @@ import {
   invalidateEnforcementCache,
   parallelSession,
   registerParallelHandlers,
+  warmEnforcementCache,
 } from './core/parallel-session';
 import { parallelStore } from './core/parallel-store';
 import { sessionManager } from './core/session-manager';
@@ -161,13 +162,16 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
 
     /* ---------------- 浏览器并行账号（纯扩展模式） ---------------- */
     case 'par.list': {
-      const r = await tryRun(async () =>
-        (await parallelStore.list()).map((a) => ({
+      const r = await tryRun(async () => {
+        const list = await parallelStore.list();
+        // 预热授权健康缓存（statusOf 同步读取；修复「无绑定账号永远显示离线」）
+        await warmEnforcementCache(list.map((a) => a.siteHost));
+        return list.map((a) => ({
           ...a,
-          ...parallelSession.statusOf(a.id),
+          ...parallelSession.statusOf(a),
           password: Boolean(a.credentials),
-        })),
-      );
+        }));
+      });
       return { kind: 'par.list', result: r };
     }
     case 'par.create': {
@@ -177,6 +181,7 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
           tabName: req.tabName,
           username: req.username,
           password: req.password,
+          box: req.box,
         });
         if (req.open) {
           await parallelSession.open(account.id, false);
@@ -184,6 +189,10 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
         return account;
       });
       return { kind: 'par.create', result: r };
+    }
+    case 'par.moveBox': {
+      const r = await tryRun(() => parallelStore.updateBox(req.id, req.box));
+      return { kind: 'par.moveBox', result: r };
     }
     case 'par.update': {
       const r = await tryRun(async () => {
@@ -247,11 +256,11 @@ chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
   return true;
 });
 
-/* ---------------- 快捷键：账号选择轮盘（v3.2：页面内无框浮层优先） ---------------- */
+/* ---------------- 快捷键：账号选择轮盘（v3.8：扇形环；页面内无框浮层优先） ---------------- */
 
 const WHEEL_PAGE = 'ui/wheel/wheel.html';
-const WHEEL_W = 420;
-const WHEEL_H = 480;
+const WHEEL_W = 600;
+const WHEEL_H = 632;
 /** 兜底浮层脚本（ISOLATED world，幂等开关）：普通网页上直接铺开无框轮盘 */
 const WHEEL_OVERLAY_FILE = 'content/wheel-overlay.js';
 

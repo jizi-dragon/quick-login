@@ -47,6 +47,8 @@ export interface ParallelAccount {
   /** 加密存储的密码等凭证 */
   credentials?: EncryptedCredentials;
   color: string;
+  /** 所属盒子（收纳分组）；缺省 = 「默认盒子」 */
+  box?: string;
   createdAt: number;
   updatedAt: number;
 }

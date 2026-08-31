@@ -21,15 +21,23 @@ export const parallelStore = {
     return account;
   },
 
-  async create(input: { siteHost: string; tabName: string; username: string; password: string }): Promise<ParallelAccount> {
+  async create(input: {
+    siteHost: string;
+    tabName: string;
+    username: string;
+    password: string;
+    box?: string;
+  }): Promise<ParallelAccount> {
     const now = Date.now();
     const existing = await db.accounts.list();
+    const box = input.box?.trim();
     const account: ParallelAccount = {
       id: newId(),
       siteHost: input.siteHost,
       tabName: input.tabName || input.username,
       username: input.username,
       color: SESSION_COLORS[existing.length % SESSION_COLORS.length],
+      ...(box ? { box } : {}),
       createdAt: now,
       updatedAt: now,
       credentials: await credentials.encryptCredentials(input.username, input.password),
@@ -41,6 +49,20 @@ export const parallelStore = {
   async updateTabName(id: string, tabName: string): Promise<ParallelAccount> {
     const account = await this.get(id);
     const next: ParallelAccount = { ...account, tabName, updatedAt: Date.now() };
+    await db.accounts.put(next);
+    return next;
+  },
+
+  /** 移入盒子（空串/空白 = 回到「默认盒子」，即移除 box 字段） */
+  async updateBox(id: string, box: string): Promise<ParallelAccount> {
+    const account = await this.get(id);
+    const name = box.trim();
+    const next: ParallelAccount = { ...account, updatedAt: Date.now() };
+    if (name) {
+      next.box = name;
+    } else {
+      delete next.box;
+    }
     await db.accounts.put(next);
     return next;
   },

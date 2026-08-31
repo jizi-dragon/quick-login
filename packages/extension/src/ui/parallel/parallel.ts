@@ -4,24 +4,75 @@ import { send } from '../send';
 
 type BrowserAccount = ParallelAccount & ParallelAccountStatus & { password: boolean };
 
-/* ==================== 浏览器并行账号（唯一模式） ==================== */
+/* ==================== 元素引用 ==================== */
 
 const verChip = document.getElementById('ver-chip') as HTMLSpanElement;
-verChip.textContent = `v${EXT_VERSION} · 纯浏览器并行`;
+verChip.textContent = `v${EXT_VERSION}`;
 
 const browserListEl = document.getElementById('browser-list') as HTMLUListElement;
 const parForm = document.getElementById('par-form') as HTMLFormElement;
 const pHostSelect = document.getElementById('p-host') as HTMLSelectElement;
+const pBoxSelect = document.getElementById('p-box') as HTMLSelectElement;
 const pTabName = document.getElementById('p-tabname') as HTMLInputElement;
 const pUsername = document.getElementById('p-username') as HTMLInputElement;
 const pPassword = document.getElementById('p-password') as HTMLInputElement;
 
+const boxChipsEl = document.getElementById('box-chips') as HTMLDivElement;
+const batchToggle = document.getElementById('batch-toggle') as HTMLButtonElement;
+const batchBar = document.getElementById('batch-bar') as HTMLDivElement;
+const selCount = document.getElementById('sel-count') as HTMLElement;
+const selClear = document.getElementById('sel-clear') as HTMLButtonElement;
+const selMove = document.getElementById('sel-move') as HTMLButtonElement;
+const selDelete = document.getElementById('sel-delete') as HTMLButtonElement;
+
+const siteForm = document.getElementById('site-form') as HTMLFormElement;
+const sHost = document.getElementById('s-host') as HTMLInputElement;
+const siteListEl = document.getElementById('site-list') as HTMLUListElement;
+
+const importToggle = document.getElementById('import-toggle') as HTMLButtonElement;
+const importPanel = document.getElementById('import-panel') as HTMLDivElement;
+const importText = document.getElementById('import-text') as HTMLTextAreaElement;
+const importRun = document.getElementById('import-run') as HTMLButtonElement;
+const importCancel = document.getElementById('import-cancel') as HTMLButtonElement;
+
 /** 有历史记录或站点清单有它时优先预选的默认站点 */
 const PREFERRED_HOST = 'tonbridge-config.aksoegmp.com';
-/** 记住上次选择站点的 storage.local 键 */
 const LAST_HOST_KEY = 'ql:lastParHost';
+const LAST_BOX_KEY = 'ql:lastParBox';
+const DEFAULT_BOX = '默认盒子';
+
+/* ==================== 状态 ==================== */
 
 let browserAccounts: BrowserAccount[] = [];
+let grantedHosts: string[] = [];
+let blockedHosts: string[] = [];
+/** 盒子清单（默认盒子恒在 + storage 记忆 + 账号实际归属） */
+let boxes: string[] = [DEFAULT_BOX];
+/** 当前盒子筛选：'全部' 或盒子名 */
+let currentBox: string = '全部';
+/** 批量模式与选中集 */
+let batchMode = false;
+const selectedIds = new Set<string>();
+
+/* 防闪烁：数据未变化的轮询不做 DOM 重建 */
+let lastListKey = '';
+let lastSitesKey = '';
+let lastChipsKey = '';
+let lastHostOptions = '';
+let lastBoxOptions = '';
+
+function setStat(id: string, value: string | number): void {
+  const el = document.getElementById(id);
+  if (el) {
+    el.textContent = String(value);
+  }
+}
+
+function boxOf(a: ParallelAccount): string {
+  return a.box?.trim() || DEFAULT_BOX;
+}
+
+/* ==================== 加载与渲染（diff 防闪烁） ==================== */
 
 async function loadBrowserAccounts(): Promise<void> {
   const res = await send({ kind: 'par.list' });
@@ -29,9 +80,35 @@ async function loadBrowserAccounts(): Promise<void> {
     res.kind === 'par.list' && res.result.ok
       ? (res.result.data as BrowserAccount[])
       : [];
-  renderBrowserAccounts();
-  // 站点行的「N 个并行账号」依赖本数据；每次刷新后同步重渲染，杜绝计数滞后
-  renderSites(grantedHosts);
+  // 清掉已删除账号的选中态
+  for (const id of Array.from(selectedIds)) {
+    if (!browserAccounts.some((a) => a.id === id)) {
+      selectedIds.delete(id);
+    }
+  }
+
+  const key = JSON.stringify(
+    browserAccounts.map((a) => [
+      a.id,
+      a.tabName,
+      a.username,
+      a.siteHost,
+      a.color,
+      a.password,
+      a.tabIds,
+      a.hasToken,
+      a.enforcementOff ?? false,
+      a.box ?? '',
+    ]),
+  );
+  if (key !== lastListKey) {
+    lastListKey = key;
+    renderBrowserAccounts();
+  } else if (batchMode) {
+    syncBatchBar();
+  }
+  setStat('stat-accounts', browserAccounts.length);
+  setStat('stat-online', browserAccounts.filter((a) => a.tabIds.length > 0).length);
 }
 
 function badgeOf(a: BrowserAccount): { cls: string; text: string } {
@@ -49,18 +126,61 @@ function badgeOf(a: BrowserAccount): { cls: string; text: string } {
 
 function renderBrowserAccounts(): void {
   browserListEl.innerHTML = '';
-  if (!browserAccounts.length) {
+  browserListEl.classList.toggle('batch-on', batchMode);
+
+  const filtered =
+    currentBox === '全部' ? browserAccounts : browserAccounts.filter((a) => boxOf(a) === currentBox);
+
+  if (!filtered.length) {
     const li = document.createElement('li');
-    li.className = 'account-item';
-    li.textContent = '暂无并行账号。填写上方表单添加，密码将以 AES-GCM 加密存放在本机。';
+    li.className = 'empty';
+    const ico = document.createElement('div');
+    ico.className = 'empty-ico';
+    ico.textContent = '🗂️';
+    const tip = document.createElement('div');
+    tip.textContent = browserAccounts.length
+      ? `盒子「${currentBox}」暂无账号。把其它盒子的账号移入，或在右侧表单直接添加到该盒子。`
+      : '还没有并行账号。在下方表单填写并「添加并打开」，密码将以 AES-GCM 加密存放在本机。';
+    li.append(ico, tip);
     browserListEl.appendChild(li);
     return;
   }
 
-  for (const a of browserAccounts) {
+  for (const a of filtered) {
     const li = document.createElement('li');
-    li.className = 'card account-item par-account';
-    li.style.borderLeft = `3px solid ${a.color}`;
+    li.className = 'account-card' + (selectedIds.has(a.id) ? ' selected' : '');
+    li.style.setProperty('--accent', a.color);
+    li.dataset.id = a.id;
+
+    if (batchMode) {
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.className = 'ac-check';
+      check.checked = selectedIds.has(a.id);
+      check.title = '选择该账号';
+      check.addEventListener('change', () => {
+        if (check.checked) {
+          selectedIds.add(a.id);
+        } else {
+          selectedIds.delete(a.id);
+        }
+        li.classList.toggle('selected', check.checked);
+        syncBatchBar();
+      });
+      li.append(check);
+    }
+
+    const head = document.createElement('div');
+    head.className = 'ac-head';
+
+    const avatar = document.createElement('span');
+    avatar.className = 'ac-avatar';
+    avatar.style.setProperty('--ring', a.color);
+    avatar.textContent = (a.tabName || a.username).trim().charAt(0).toUpperCase() || '?';
+    const online = a.tabIds.length > 0;
+    const dot = document.createElement('i');
+    dot.className = online ? 'dot on' : 'dot';
+    avatar.append(dot);
 
     const meta = document.createElement('div');
     meta.className = 'meta';
@@ -69,13 +189,21 @@ function renderBrowserAccounts(): void {
     alias.textContent = a.tabName || a.username;
     const sub = document.createElement('div');
     sub.className = 'sub';
-    sub.textContent = `${a.username} · ${a.siteHost}${a.password ? ' · 已存密码' : ''}`;
+    const boxTag = document.createElement('span');
+    boxTag.className = 'box-tag';
+    boxTag.textContent = boxOf(a);
+    sub.append(boxTag, `${a.username} · ${a.siteHost}${a.password ? ' · 已存密码' : ''}`);
     meta.append(alias, sub);
 
     const badge = document.createElement('span');
     const b = badgeOf(a);
     badge.className = `badge ${b.cls}`;
     badge.textContent = b.text;
+
+    head.append(avatar, meta, badge);
+
+    const actions = document.createElement('div');
+    actions.className = 'ac-actions';
 
     const openBtn = document.createElement('button');
     openBtn.className = 'btn-ghost';
@@ -97,9 +225,14 @@ function renderBrowserAccounts(): void {
       }
       void (async () => {
         await send({ kind: 'par.update', id: a.id, patch: { tabName: next.trim() || a.username } });
-        await loadBrowserAccounts();
+        await refreshAll();
       })();
     });
+
+    const moveBtn = document.createElement('button');
+    moveBtn.className = 'btn-ghost';
+    moveBtn.textContent = '移入盒子';
+    moveBtn.addEventListener('click', () => void moveAccounts([a.id]));
 
     const del = document.createElement('button');
     del.className = 'btn-danger';
@@ -108,15 +241,269 @@ function renderBrowserAccounts(): void {
       if (confirm(`删除账号「${a.tabName || a.username}」？将同时关闭其所有并行标签页。`)) {
         void (async () => {
           await send({ kind: 'par.delete', id: a.id });
-          await loadBrowserAccounts();
+          await refreshAll();
         })();
       }
     });
 
-    li.append(meta, badge, openBtn, newTabBtn, renameBtn, del);
+    actions.append(openBtn, newTabBtn, renameBtn, moveBtn, del);
+    li.append(head, actions);
     browserListEl.appendChild(li);
   }
 }
+
+/* ==================== 盒子 ==================== */
+
+async function loadBoxes(): Promise<void> {
+  const stored = await chrome.storage.local.get(LOCAL_KEYS.boxList);
+  const remembered = (stored[LOCAL_KEYS.boxList] as string[] | undefined) ?? [];
+  const fromAccounts = browserAccounts.map((a) => boxOf(a));
+  boxes = [...new Set([DEFAULT_BOX, ...remembered, ...fromAccounts])];
+  setStat('stat-boxes', boxes.length);
+}
+
+async function saveBoxes(): Promise<void> {
+  await chrome.storage.local.set({ [LOCAL_KEYS.boxList]: boxes.filter((b) => b !== DEFAULT_BOX) });
+}
+
+function renderBoxChips(): void {
+  const key = JSON.stringify([boxes, currentBox, browserAccounts.map((a) => boxOf(a)), batchMode]);
+  if (key === lastChipsKey) {
+    return;
+  }
+  lastChipsKey = key;
+  boxChipsEl.innerHTML = '';
+
+  const countOf = (name: string) => browserAccounts.filter((a) => boxOf(a) === name).length;
+
+  const all = document.createElement('button');
+  all.type = 'button';
+  all.className = 'chip' + (currentBox === '全部' ? ' active' : '');
+  all.innerHTML = `全部 <span class="chip-n">${browserAccounts.length}</span>`;
+  all.addEventListener('click', () => {
+    currentBox = '全部';
+    lastListKey = '';
+    renderBoxChips();
+    renderBrowserAccounts();
+  });
+  boxChipsEl.append(all);
+
+  for (const name of boxes) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'chip' + (currentBox === name ? ' active' : '');
+    chip.innerHTML = `${name} <span class="chip-n">${countOf(name)}</span>`;
+    chip.addEventListener('click', () => {
+      currentBox = name;
+      lastListKey = '';
+      renderBoxChips();
+      renderBrowserAccounts();
+    });
+    boxChipsEl.append(chip);
+  }
+
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'chip chip-add';
+  add.textContent = '＋ 新建盒子';
+  add.addEventListener('click', () => void createBox());
+  boxChipsEl.append(add);
+}
+
+async function createBox(): Promise<void> {
+  const name = prompt('新盒子名称（账号按盒子收纳，轮盘按盒子翻页）', '');
+  const trimmed = name?.trim();
+  if (!trimmed) {
+    return;
+  }
+  if (boxes.includes(trimmed)) {
+    alert(`盒子「${trimmed}」已存在。`);
+    return;
+  }
+  boxes.push(trimmed);
+  await saveBoxes();
+  lastChipsKey = '';
+  lastBoxOptions = '';
+  renderBoxChips();
+  fillBoxOptions();
+}
+
+/* ==================== 批量管理 ==================== */
+
+function syncBatchBar(): void {
+  selCount.textContent = String(selectedIds.size);
+  batchBar.classList.toggle('hidden', !batchMode);
+}
+
+batchToggle.addEventListener('click', () => {
+  batchMode = !batchMode;
+  batchToggle.textContent = batchMode ? '退出批量' : '批量管理';
+  batchToggle.classList.toggle('active-btn', batchMode);
+  if (!batchMode) {
+    selectedIds.clear();
+    lastListKey = '';
+    renderBrowserAccounts();
+  }
+  syncBatchBar();
+  lastChipsKey = '';
+  renderBoxChips();
+});
+
+selClear.addEventListener('click', () => {
+  selectedIds.clear();
+  lastListKey = '';
+  renderBrowserAccounts();
+  syncBatchBar();
+});
+
+selMove.addEventListener('click', () => {
+  if (!selectedIds.size) {
+    return;
+  }
+  void moveAccounts([...selectedIds]);
+});
+
+selDelete.addEventListener('click', () => {
+  if (!selectedIds.size) {
+    return;
+  }
+  if (!confirm(`删除选中的 ${selectedIds.size} 个账号？将同时关闭它们的所有并行标签页。`)) {
+    return;
+  }
+  void (async () => {
+    for (const id of selectedIds) {
+      await send({ kind: 'par.delete', id });
+    }
+    selectedIds.clear();
+    await refreshAll();
+  })();
+});
+
+/** 把一批账号移入盒子（弹窗输入目标盒子名；空 = 默认盒子） */
+async function moveAccounts(ids: string[]): Promise<void> {
+  const first = browserAccounts.find((a) => a.id === ids[0]);
+  const suggestion = currentBox !== '全部' ? currentBox : first ? boxOf(first) : DEFAULT_BOX;
+  const target = prompt(
+    `把 ${ids.length} 个账号移入哪个盒子？（留空 = ${DEFAULT_BOX}；输入新名称将自动创建）`,
+    suggestion === '全部' ? DEFAULT_BOX : suggestion,
+  );
+  if (target === null) {
+    return;
+  }
+  const name = target.trim();
+  for (const id of ids) {
+    await send({ kind: 'par.moveBox', id, box: name });
+  }
+  if (name && !boxes.includes(name)) {
+    boxes.push(name);
+    await saveBoxes();
+    lastBoxOptions = '';
+  }
+  if (currentBox !== '全部' && name && currentBox !== name) {
+    currentBox = name;
+  }
+  selectedIds.clear();
+  lastChipsKey = '';
+  lastListKey = '';
+  await refreshAll();
+}
+
+/* ==================== 批量导入 ==================== */
+
+importToggle.addEventListener('click', () => {
+  importPanel.classList.toggle('hidden');
+});
+
+importCancel.addEventListener('click', () => {
+  importPanel.classList.add('hidden');
+});
+
+interface ImportRow {
+  tabName: string;
+  username: string;
+  password: string;
+}
+
+function parseImportText(text: string): ImportRow[] {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return [];
+  }
+  // 先尝试 JSON 数组：[{"tabName":"…","username":"…","password":"…"}, …]
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((row) => {
+          const r = row as Record<string, unknown>;
+          return {
+            tabName: String(r.tabName ?? r['页签名'] ?? '').trim(),
+            username: String(r.username ?? r['账号名'] ?? '').trim(),
+            password: String(r.password ?? r['密码'] ?? '').trim(),
+          };
+        })
+        .filter((r) => r.username && r.password);
+    }
+  } catch {
+    // 非 JSON：按 CSV/TSV 行解析
+  }
+  return trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split(/[,，\t]/).map((s) => s.trim());
+      return { tabName: parts[0] ?? '', username: parts[1] ?? '', password: parts[2] ?? '' };
+    })
+    .filter((r) => r.username && r.password);
+}
+
+importRun.addEventListener('click', () => {
+  void (async () => {
+    const siteHost = pHostSelect.value;
+    if (!siteHost) {
+      alert('请先在「站点管理」添加并授权站点。');
+      return;
+    }
+    const box = pBoxSelect.value;
+    const rows = parseImportText(importText.value);
+    if (!rows.length) {
+      alert('没有可导入的行。请检查格式：每行「页签名,账号名,密码」，或 JSON 数组。');
+      return;
+    }
+    let okCount = 0;
+    let failCount = 0;
+    for (const row of rows) {
+      try {
+        const res = await send({
+          kind: 'par.create',
+          siteHost,
+          tabName: row.tabName,
+          username: row.username,
+          password: row.password,
+          open: false,
+          box,
+        });
+        if (res.result.ok) {
+          okCount += 1;
+        } else {
+          failCount += 1;
+        }
+      } catch {
+        failCount += 1;
+      }
+    }
+    if (okCount) {
+      await chrome.storage.local.set({ [LAST_HOST_KEY]: siteHost });
+    }
+    importText.value = '';
+    importPanel.classList.add('hidden');
+    await refreshAll();
+    alert(`批量导入完成：成功 ${okCount} 个${failCount ? `，失败 ${failCount} 条（缺账号名或密码）` : ''}。账号已保存到盒子「${box}」，可从列表逐个打开。`);
+  })();
+});
+
+/* ==================== 添加账号（单个） ==================== */
 
 async function ensureHostPermission(host: string): Promise<boolean> {
   try {
@@ -141,13 +528,13 @@ async function openAccount(id: string, forceNewTab: boolean): Promise<void> {
     alert(`打开失败：${res.result.error}`);
     return;
   }
-  await loadBrowserAccounts();
+  await refreshAll();
 }
 
 async function createAccount(open: boolean): Promise<void> {
   const siteHost = pHostSelect.value;
   if (!siteHost) {
-    alert('请先在下方「站点管理」添加并授权站点，站点下拉才会有可选项。');
+    alert('请先在「站点管理」添加并授权站点，站点下拉才会有可选项。');
     return;
   }
   const tabName = pTabName.value.trim();
@@ -156,17 +543,25 @@ async function createAccount(open: boolean): Promise<void> {
   if (!username || !password) {
     return;
   }
-  const res = await send({ kind: 'par.create', siteHost, tabName, username, password, open });
+  const res = await send({
+    kind: 'par.create',
+    siteHost,
+    tabName,
+    username,
+    password,
+    open,
+    box: pBoxSelect.value,
+  });
   if (!res.result.ok) {
     alert(`添加失败：${res.result.error}`);
     return;
   }
-  // 记住本次选择的站点，下次打开默认选中
-  await chrome.storage.local.set({ [LAST_HOST_KEY]: siteHost });
+  // 记住本次选择的站点与盒子，下次打开默认选中
+  await chrome.storage.local.set({ [LAST_HOST_KEY]: siteHost, [LAST_BOX_KEY]: pBoxSelect.value });
   pTabName.value = '';
   pUsername.value = '';
   pPassword.value = '';
-  await loadBrowserAccounts();
+  await refreshAll();
 }
 
 parForm.addEventListener('submit', (e) => {
@@ -179,15 +574,6 @@ document.getElementById('add-only')!.addEventListener('click', () => {
 });
 
 /* ==================== 站点管理（读取真实权限清单） ==================== */
-
-const siteForm = document.getElementById('site-form') as HTMLFormElement;
-const sHost = document.getElementById('s-host') as HTMLInputElement;
-const siteListEl = document.getElementById('site-list') as HTMLUListElement;
-
-/** 当前真实授权 host 清单（loadSites 维护；渲染与下拉共享） */
-let grantedHosts: string[] = [];
-/** 手动停用的站点（Chrome 拒绝回收授权时的本地封锁名单） */
-let blockedHosts: string[] = [];
 
 function originToHost(origin: string): string | null {
   // 形如 "*://tonbridge-config.aksoegmp.com/*" 或 "https://*.example.com/*"
@@ -228,15 +614,28 @@ async function loadSites(): Promise<void> {
   blockedHosts = Array.from(blocked).sort();
   await chrome.storage.local.set({ [LOCAL_KEYS.blockedHosts]: blockedHosts });
 
-  renderSites(grantedHosts, blockedHosts);
+  const sitesKey = JSON.stringify([
+    grantedHosts,
+    blockedHosts,
+    browserAccounts.map((a) => [a.id, a.tabName, a.box ?? '']),
+  ]);
+  if (sitesKey !== lastSitesKey) {
+    lastSitesKey = sitesKey;
+    renderSites(grantedHosts, blockedHosts);
+  }
 }
 
 function renderSites(hosts: string[], blocked: string[] = []): void {
   siteListEl.innerHTML = '';
   if (!hosts.length && !blocked.length) {
     const li = document.createElement('li');
-    li.className = 'account-item';
-    li.textContent = '尚无授权站点。用上方表单添加，或在目标站标签页上使用弹窗的「授权当前站点」。';
+    li.className = 'empty';
+    const ico = document.createElement('div');
+    ico.className = 'empty-ico';
+    ico.textContent = '🛡️';
+    const tip = document.createElement('div');
+    tip.textContent = '尚无授权站点。用上方表单输入 host 添加并授权。';
+    li.append(ico, tip);
     siteListEl.appendChild(li);
     return;
   }
@@ -251,7 +650,7 @@ function renderSites(hosts: string[], blocked: string[] = []): void {
     const n = countAccountsFor(host);
 
     const li = document.createElement('li');
-    li.className = 'card account-item';
+    li.className = 'site-row';
 
     const meta = document.createElement('div');
     meta.className = 'meta';
@@ -334,9 +733,7 @@ async function revokeHost(displayHost: string): Promise<void> {
   }
 
   await send({ kind: 'par.grantChanged' });
-  await loadSites();
-  await fillSiteOptions();
-  await loadBrowserAccounts();
+  await refreshAll();
 }
 
 /** 恢复此前手动停用的站点（仅解除 QuickLogin 内部封锁） */
@@ -346,11 +743,17 @@ async function unblockHost(host: string): Promise<void> {
   blocked.delete(host);
   await chrome.storage.local.set({ [LOCAL_KEYS.blockedHosts]: Array.from(blocked).sort() });
   await send({ kind: 'par.grantChanged' });
-  await Promise.all([loadSites(), fillSiteOptions(), loadBrowserAccounts()]);
+  await refreshAll();
 }
 
-/** 新增账号表单的站点下拉：数据源 = 已授权站点清单；默认记住上次选择 */
+/* ==================== 下拉填充（防闪烁：选项未变化不重建） ==================== */
+
 async function fillSiteOptions(): Promise<void> {
+  const key = grantedHosts.join('|');
+  if (key === lastHostOptions && pHostSelect.options.length) {
+    return;
+  }
+  lastHostOptions = key;
   pHostSelect.innerHTML = '';
 
   if (!grantedHosts.length) {
@@ -358,7 +761,7 @@ async function fillSiteOptions(): Promise<void> {
     empty.value = '';
     empty.disabled = true;
     empty.selected = true;
-    empty.textContent = '（暂无已授权站点 —— 请在下方「站点管理」添加）';
+    empty.textContent = '（暂无已授权站点 —— 请在「站点管理」添加）';
     pHostSelect.append(empty);
     return;
   }
@@ -381,6 +784,26 @@ async function fillSiteOptions(): Promise<void> {
   pHostSelect.value = preferred;
 }
 
+async function fillBoxOptions(): Promise<void> {
+  const key = boxes.join('|');
+  if (key === lastBoxOptions && pBoxSelect.options.length) {
+    return;
+  }
+  lastBoxOptions = key;
+  pBoxSelect.innerHTML = '';
+  for (const name of boxes) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    pBoxSelect.append(opt);
+  }
+  const stored = await chrome.storage.local.get(LAST_BOX_KEY);
+  const last = stored[LAST_BOX_KEY] as string | undefined;
+  pBoxSelect.value = currentBox !== '全部' && boxes.includes(currentBox) ? currentBox : last && boxes.includes(last) ? last : DEFAULT_BOX;
+}
+
+/* ==================== 站点授权表单 ==================== */
+
 siteForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const host = sHost.value.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
@@ -395,19 +818,27 @@ siteForm.addEventListener('submit', (e) => {
     }
     sHost.value = '';
     await send({ kind: 'par.grantChanged' });
-    await loadSites();
-    await fillSiteOptions();
+    await refreshAll();
   })();
 });
 
-/* ==================== 启动装载 ==================== */
+/* ==================== 统一刷新（轮询与操作后共用；各渲染层自带 diff 防闪烁） ==================== */
 
-// 顺序敏感：先账号、再站点（保证首帧的「N 个并行账号」基于已加载的账号集），最后填下拉
-void (async () => {
+async function refreshAll(): Promise<void> {
   await loadBrowserAccounts();
   await loadSites();
+  await loadBoxes();
+  renderBoxChips();
   await fillSiteOptions();
-})();
+  await fillBoxOptions();
+  syncBatchBar();
+}
 
-// 轻量轮询：绑定/在线状态/计数可能被后台事件改变（标签关闭、token 捕获）
-setInterval(() => void loadBrowserAccounts(), 3000);
+/* ==================== 启动装载 ==================== */
+
+// 顺序：账号（含统计/卡片）→ 站点 → 盒子 → 下拉填充
+void refreshAll();
+
+// 轻量轮询：绑定/在线状态/计数可能被后台事件改变（标签关闭、token 捕获）；
+// 各渲染函数自带 diff 守卫，数据未变化时不重建 DOM（消除 3s 轮询闪烁）
+setInterval(() => void refreshAll(), 3000);
