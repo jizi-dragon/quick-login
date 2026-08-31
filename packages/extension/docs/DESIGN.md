@@ -1,5 +1,10 @@
 # SessionBox 多账号快速切换 — 设计文档
 
+> ⚠️ **历史文档（v2.1.0 时代，2026-08-26）**：本文 §3「纯扩展无法实现同站多账号并行在线」
+> 的结论已被 v3.x 推翻——DNR `tabIds` session 规则 + MAIN 壳注入 + 六平面隔离（v3.7.2）
+> 已实现并行在线。现状请读根目录 `docs/PROJECT-STATUS.md` 与 `docs/CODEBASE_OVERVIEW.md`；
+> 方案论证史见 `docs/BROWSER-ONLY-MULTILOGIN-RESEARCH.md`。
+
 > 状态：`已实现（免密快速切换版 v2.1.0）`（2026-08-26）
 > 本文档与最终源码一一对应；实现阶段若改动行为，必须同步更新本文件。
 

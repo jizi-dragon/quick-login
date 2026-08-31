@@ -1,5 +1,10 @@
 # QuickLogin 纯扩展多账号并行在线 —— Bearer 鉴权规避方案调研
 
+> ⚠️ **历史调研文档（v3.4 时代，2026-08-28）**：本文的方案 C「双平面隔离」已按 §10 落地，
+> 并在 v3.5–v3.7.2 演进为六平面隔离（新增 SW/CacheStorage 封控、IndexedDB 命名空间、
+> Cookie 按账号回放）。现状见根目录 `docs/PROJECT-STATUS.md`；泄漏终审见
+> `research/idb-permissions/`。
+
 > 状态：`调研稿 v2 —— 已并入 15 条先例核实`（2026-08-28）
 > v2 变更：注入架构改为「静态 MAIN 壳 + 种子握手」双轨制；存储层首选从 defineProperty 整包劫持改为 **Storage.prototype 方法级前缀补丁**（先例验证）；§8 落地完整先例参考。
 > 目标站：`https://tonbridge-config.aksoegmp.com/`（无状态 JWT + 前端内存 token + Bearer 鉴权 + 前端失效自检）

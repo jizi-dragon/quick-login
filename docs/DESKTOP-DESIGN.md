@@ -1,5 +1,8 @@
 # QuickLogin — 扩展 UI + 本地引擎 多账号并行方案 架构设计稿
 
+> ⚠️ **历史文档（v2.2 时代本地引擎路线）**：该路线自 v2.4 起退出扩展运行时（纯浏览器模式
+> 成为唯一模式），`packages/engine/` 仅作为遗留代码留存。现状见根目录 `docs/PROJECT-STATUS.md`。
+
 > 状态：`设计稿 v5（决策已收口，可开工）`（2026-08-27）
 > 前置调研：见 `docs/DESIGN.md` §3、§9（扩展无法同站多账号并行在线的实测结论）与竞品调研（AdsPower / Multilogin / SessionBox One 均为桌面形态）。
 > v2 变更：去掉独立桌面 UI，本地程序退为纯后台引擎，全部交互收敛到扩展弹窗（对标 VSCode 扩展 + Language Server）。
