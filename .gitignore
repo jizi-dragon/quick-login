@@ -6,3 +6,6 @@ tmp/
 packages/engine/dist/
 packages/engine/data/
 packages/engine/profiles/
+
+# 分发包不入库（见 docs 打包说明）
+quicklogin-chrome-*.zip
