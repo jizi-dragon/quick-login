@@ -96,10 +96,9 @@ async function mount(): Promise<void> {
       filter: drop-shadow(0 26px 60px rgba(23,42,84,.16)) drop-shadow(0 2px 10px rgba(23,42,84,.08));
     }
 
-    .hub-arc-track{fill:none;stroke:#e4eaf6;stroke-width:3.5;stroke-linecap:round}
-    .hub-arc{fill:none;stroke:url(#qlArcGrad);stroke-width:3.5;stroke-linecap:round;
-      transition:stroke-dasharray .32s cubic-bezier(.22,1.2,.36,1);
-      filter:drop-shadow(0 0 5px rgba(30,111,255,.35))}
+    .box-track{fill:none;stroke:url(#qlBoxGrad);stroke-width:3.5;stroke-linecap:round}
+    .box-node{fill:#b9c4d8;opacity:.55}
+    .box-node-on{fill:#1e6fff;stroke:#fff;stroke-width:2;filter:drop-shadow(0 0 6px rgba(30,111,255,.55))}
 
     .sector{cursor:pointer;transform-box:view-box;transform-origin:50% 50%;
       transform:scale(.96);opacity:0;

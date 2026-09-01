@@ -40,20 +40,22 @@ body {
   filter: drop-shadow(0 26px 60px rgba(23, 42, 84, 0.16)) drop-shadow(0 2px 10px rgba(23, 42, 84, 0.08));
 }
 
-/* ---- 盒子进度弧（外圈细弧） ---- */
-.hub-arc-track {
+/* ---- 右侧固定装饰轨道：120° 弧 + 盒子节点（半径/粗细/渐变恒定） ---- */
+.box-track {
   fill: none;
-  stroke: #e4eaf6;
+  stroke: url(#qlBoxGrad);
   stroke-width: 3.5;
   stroke-linecap: round;
 }
-.hub-arc {
-  fill: none;
-  stroke: url(#qlArcGrad);
-  stroke-width: 3.5;
-  stroke-linecap: round;
-  transition: stroke-dasharray 0.32s cubic-bezier(0.22, 1.2, 0.36, 1);
-  filter: drop-shadow(0 0 5px rgba(30, 111, 255, 0.35));
+.box-node {
+  fill: #b9c4d8;
+  opacity: 0.55;
+}
+.box-node-on {
+  fill: #1e6fff;
+  stroke: #ffffff;
+  stroke-width: 2;
+  filter: drop-shadow(0 0 6px rgba(30, 111, 255, 0.55));
 }
 
 /* ---- 扇区（按账号色着色） ---- */

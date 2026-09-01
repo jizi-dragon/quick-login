@@ -9,7 +9,8 @@ import type { ParallelAccount, ParallelAccountStatus } from '../../shared/types'
  *  - 扇区按账号色着色（低饱和底 + 悬停加深），不再是纯白。
  *
  * 视觉契约（两个表面的 CSS 各自实现，类名由本模块约定）：
- *   svg.sector-svg > defs(#qlArcGrad) + circle.hub-arc-track / circle.hub-arc
+ *   svg.sector-svg > defs(#qlBoxGrad) + path.box-track（右侧 120° 固定装饰轨道）
+ *     + circle.box-node（每盒一节点）+ circle.box-node-on（当前盒高亮节点）
  *     + g.sector(.is-online)[style --acc] > path.sector-hit + text.sector-label
  *       + g.sector-num(circle+text) + circle.sector-dot(.on)
  *   + g.hub(.hub-click) > circle.hub-bg + text.hub-box / text.hub-num(.den)
@@ -131,9 +132,16 @@ export function buildSectorWheel(root: HTMLElement, opts: SectorWheelOpts): void
 
   const svg = el('svg', { class: 'sector-svg', viewBox: `0 0 ${SIZE} ${SIZE}` });
 
-  /* ---- 盒子进度弧：细轨道 + 品牌渐变进度（外圈） ---- */
+  /* ---- 右侧固定装饰轨道：120° 弧 + 盒子节点（半径/粗细/渐变全周期恒定） ---- */
   const defs = el('defs', {});
-  const grad = el('linearGradient', { id: 'qlArcGrad', x1: '0%', y1: '0%', x2: '100%', y2: '100%' });
+  const grad = el('linearGradient', {
+    id: 'qlBoxGrad',
+    gradientUnits: 'userSpaceOnUse',
+    x1: '387',
+    y1: '40',
+    x2: '387',
+    y2: '480',
+  });
   grad.append(
     el('stop', { offset: '0%', 'stop-color': '#1E6FFF' }),
     el('stop', { offset: '55%', 'stop-color': '#7C5CFF' }),
@@ -142,18 +150,40 @@ export function buildSectorWheel(root: HTMLElement, opts: SectorWheelOpts): void
   defs.append(grad);
   svg.append(defs);
 
-  const ARC_CIRC = 2 * Math.PI * R_ARC;
-  svg.append(el('circle', { class: 'hub-arc-track', cx: C, cy: C, r: R_ARC }));
-  const frac = pageCount > 0 ? pagePos / pageCount : 0;
-  const arc = el('circle', {
-    class: 'hub-arc',
-    cx: C,
-    cy: C,
-    r: R_ARC,
-    transform: `rotate(-90 ${C} ${C})`,
-    'stroke-dasharray': `${(ARC_CIRC * frac).toFixed(2)} ${ARC_CIRC.toFixed(2)}`,
+  const arcPt = (deg: number) => ({
+    x: +(C + R_ARC * Math.cos((deg * Math.PI) / 180)).toFixed(2),
+    y: +(C + R_ARC * Math.sin((deg * Math.PI) / 180)).toFixed(2),
   });
-  svg.append(arc);
+  const ARC_FROM = -60;
+  const ARC_TO = 60;
+  const pa = arcPt(ARC_FROM);
+  const pb = arcPt(ARC_TO);
+  svg.append(el('path', { class: 'box-track', d: `M ${pa.x} ${pa.y} A ${R_ARC} ${R_ARC} 0 0 1 ${pb.x} ${pb.y}` }));
+
+  const nodeAngle = (i: number) => (pageCount > 1 ? ARC_FROM + ((ARC_TO - ARC_FROM) * i) / (pageCount - 1) : 0);
+  for (let i = 0; i < pageCount; i++) {
+    const pt = arcPt(nodeAngle(i));
+    svg.append(el('circle', { class: 'box-node', cx: pt.x, cy: pt.y, r: 5 }));
+  }
+  /* 高亮节点 = 当前盒子；切盒时沿轨道从上一节点平滑滑入 */
+  const curIdx = pageCount > 0 ? ((opts.pageIndex % pageCount) + pageCount) % pageCount : 0;
+  const cur = arcPt(nodeAngle(curIdx));
+  const active = el('circle', { class: 'box-node-on', cx: cur.x, cy: cur.y, r: 7 });
+  svg.append(active);
+  const prevRaw = Number(root.dataset.qlWheelLastIdx ?? NaN);
+  root.dataset.qlWheelLastIdx = String(curIdx);
+  if (!Number.isNaN(prevRaw) && prevRaw !== curIdx && prevRaw >= 0 && prevRaw < pageCount) {
+    const prev = arcPt(nodeAngle(prevRaw));
+    const mid = arcPt((nodeAngle(prevRaw) + nodeAngle(curIdx)) / 2);
+    active.animate(
+      [
+        { transform: `translate(${(prev.x - cur.x).toFixed(2)}px, ${(prev.y - cur.y).toFixed(2)}px)` },
+        { transform: `translate(${(mid.x - cur.x).toFixed(2)}px, ${(mid.y - cur.y).toFixed(2)}px)`, offset: 0.5 },
+        { transform: 'translate(0px, 0px)' },
+      ],
+      { duration: 280, easing: 'cubic-bezier(0.3, 0.9, 0.35, 1)' },
+    );
+  }
 
   if (n === 0) {
     /* ---- 当前盒子无账号（或全部为空）：中心提示 ---- */
@@ -182,7 +212,7 @@ export function buildSectorWheel(root: HTMLElement, opts: SectorWheelOpts): void
       go.addEventListener('click', () => opts.emptyAction!.run());
       svg.append(go);
     }
-    attachPageNav(root, svg, opts, ARC_CIRC, frac);
+    attachPageNav(root, opts);
     root.append(svg);
     return;
   }
@@ -239,19 +269,12 @@ export function buildSectorWheel(root: HTMLElement, opts: SectorWheelOpts): void
   hub.addEventListener('click', () => opts.onPage(1));
   svg.append(hub);
 
-  attachPageNav(root, svg, opts, ARC_CIRC, frac);
+  attachPageNav(root, opts);
   root.append(svg);
 }
 
 /** 滚轮换页（附在 root 上；重渲染时防重复附着——监听器累积会导致一次滚动翻多页） */
-function attachPageNav(
-  root: HTMLElement,
-  _svg: SVGElement,
-  opts: SectorWheelOpts,
-  arcCirc: number,
-  frac: number,
-): void {
-  svgStyleArc(root, arcCirc, frac);
+function attachPageNav(root: HTMLElement, opts: SectorWheelOpts): void {
   if (root.dataset.qlWheelNav === '1') {
     return;
   }
@@ -266,11 +289,4 @@ function attachPageNav(
   );
 }
 
-/** 把弧长/进度写为 CSS 变量（供当前 SVG 的进度弧过渡使用） */
-function svgStyleArc(root: HTMLElement, arcCirc: number, frac: number): void {
-  const svg = root.querySelector('svg.sector-svg') as SVGElement | null;
-  if (svg) {
-    svg.style.setProperty('--arc-len', `${arcCirc.toFixed(2)}`);
-    svg.style.setProperty('--arc-frac', `${frac}`);
-  }
-}
+
