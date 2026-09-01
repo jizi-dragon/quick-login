@@ -5,7 +5,6 @@
  * 页面内无窗口控制元素；Esc 关闭；数字键 1-9/0 快选；失焦自动关闭（带启动宽限）。
  * 中心翻页：滚轮 / 点击 Hub 循环切换盒子，单环显示当前盒子的账号。
  */
-import type { ParallelAccount, ParallelAccountStatus } from '../../shared/types';
 import { LOCAL_KEYS } from '../../shared/constants';
 import { buildSectorWheel, groupPagesByBox, type WheelAccount } from './wheel-core';
 
@@ -65,7 +64,6 @@ async function pick(accountId: string): Promise<void> {
   }
 }
 
-let accounts: WheelAccount[] = [];
 let pages: { label: string; accounts: WheelAccount[] }[] = [];
 let pageIndex = 0;
 function render(): void {
@@ -110,7 +108,6 @@ function onKey(e: KeyboardEvent): void {
 
 void fetchPages().then((grouped) => {
   pages = grouped;
-  accounts = pages.flatMap((p) => p.accounts);
   render();
   document.addEventListener('keydown', onKey);
 });

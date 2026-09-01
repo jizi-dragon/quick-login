@@ -6,7 +6,6 @@
  * 指示盒子序位；中心 Hub 显示盒子名与汇总，滚轮 / 点击 Hub 循环切盒。
  * 交互：悬停高亮 → 点击切换；Esc / 再次快捷键 / 点击遮罩关闭。无任何窗口控制元素。
  */
-import type { ParallelAccount, ParallelAccountStatus } from '../shared/types';
 import { LOCAL_KEYS } from '../shared/constants';
 import { buildSectorWheel, groupPagesByBox, type WheelAccount } from '../ui/wheel/wheel-core';
 
