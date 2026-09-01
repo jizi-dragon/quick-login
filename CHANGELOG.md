@@ -2,6 +2,16 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.9.6（2026-08-29）
+
+**修复致命缺陷：站点自开页签的账号身份继承（opener 亲子绑定）：**
+
+- 低代码平台在编辑中点配置按钮弹出**新页签**（`window.open`/`target=_blank`）时，此前该页签无 tabId 绑定——六个隔离平面全部失效（无 Bearer 改写、无 Cookie 回放、MAIN 壳无种子不激活），导致跳登录页/串号/403；
+- 现在 `chrome.tabs.onCreated` 检测 `openerTabId` 已绑定的弹窗，**自动继承源账号**：写入绑定表 + 装该账号 AUTH/COOKIE 规则 + 推送种子 + 标题角标随迁；弹窗套弹窗链式继承；
+- **授权域护栏**：绑定页签漫游到其它未授权 http(s) 域 → 自动解绑摘规则，防种子/身份头外漏（同时封堵既有「绑定页签手动改址」的泄漏面）；
+- 手动 Ctrl+T 新页签（无 openerTabId）不继承，保留有意脱离的口子；`noopener` 弹窗无法识别 opener，退化为旧行为；
+- 验证 5/5（tmp/verify-adopt.mjs）：同站弹窗继承、异域护栏解绑、手动页签不继承、原页签保持、弹窗 SPA 读 `__auth_token__` 得到账号身份。
+
 ## 3.9.5（2026-08-29）
 
 **轮盘盒子指示重做——右侧 120° 固定轨道 + 节点：**

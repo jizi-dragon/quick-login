@@ -314,6 +314,33 @@ export const parallelSession = {
     }
   },
 
+  /**
+   * 站点自开的新页签亲子继承（window.open / target=_blank）：opener 已绑定账号 A
+   * → 新页签自动绑定为 A 的第二个页签（AUTH/COOKIE 规则、种子、命名空间、标题全随 A）。
+   * 手动 Ctrl+T（无 openerTabId）不继承，保留有意脱离的口子。
+   */
+  async adoptFromOpener(tab: chrome.tabs.Tab): Promise<void> {
+    const openerId = tab.openerTabId;
+    const tabId = tab.id;
+    if (openerId === undefined || tabId === undefined) {
+      return;
+    }
+    const parent = bindings.get(openerId);
+    if (!parent || bindings.has(tabId)) {
+      return;
+    }
+    const account = await parallelStore.get(parent.accountId).catch(() => undefined);
+    if (!account) {
+      return;
+    }
+    bindings.set(tabId, { accountId: account.id, host: parent.host });
+    await persistBindings();
+    await syncAccountRules(account.id, parent.host);
+    await pushBind(tabId);
+    await applyTitle(tabId, account.tabName);
+    void diag(`adopt tab=${tabId} ← opener=${openerId} 账号=${account.id}（亲子继承）`);
+  },
+
   /** 删除账号：关闭其全部绑定标签页、摘除规则、清 token */
   async deleteAccount(accountId: string): Promise<void> {
     const tabs = boundTabsOf(accountId);
@@ -415,6 +442,22 @@ export const parallelSession = {
     if (!binding) {
       return;
     }
+    // 授权域护栏：绑定页签漫游到其它未授权 http(s) 域 → 解绑摘规则，
+    // 防止账号种子/身份头流向非授权域（异域弹窗跳转、手动改址）。自身 host 不受影响。
+    let url = '';
+    try {
+      url = (await chrome.tabs.get(tabId)).url ?? '';
+    } catch {
+      return;
+    }
+    if (/^https?:\/\//i.test(url)) {
+      const host = new URL(url).hostname;
+      if (host !== binding.host && !(await isEnforceable(host))) {
+        void diag(`onNavigation 非授权域 ${host}：解除 tab=${tabId} 绑定`);
+        await this.unbindTab(tabId);
+        return;
+      }
+    }
     const account = await parallelStore.get(binding.accountId).catch(() => undefined);
     if (!account) {
       return;
@@ -501,6 +544,11 @@ export function registerParallelHandlers(): void {
 
   chrome.tabs.onRemoved.addListener((tabId) => {
     void parallelSession.handleTabRemoved(tabId);
+  });
+
+  // 站点自开的新页签：opener 已绑定 → 亲子继承（低代码平台弹窗编辑保持同一账号身份）
+  chrome.tabs.onCreated.addListener((tab) => {
+    void parallelSession.adoptFromOpener(tab);
   });
 
   // 导航提交近似信号：status=loading 时重推种子/标题（不引入 webNavigation 权限）
