@@ -1,4 +1,5 @@
 import type { ParallelAccount, ParallelAccountStatus } from '../../shared/types';
+import type { DataBackup } from '../../shared/messages';
 import { EXT_VERSION, LOCAL_KEYS } from '../../shared/constants';
 import { send } from '../send';
 
@@ -34,6 +35,10 @@ const importPanel = document.getElementById('import-panel') as HTMLDivElement;
 const importText = document.getElementById('import-text') as HTMLTextAreaElement;
 const importRun = document.getElementById('import-run') as HTMLButtonElement;
 const importCancel = document.getElementById('import-cancel') as HTMLButtonElement;
+
+const dataExportBtn = document.getElementById('data-export') as HTMLButtonElement;
+const dataImportBtn = document.getElementById('data-import') as HTMLButtonElement;
+const dataImportFile = document.getElementById('data-import-file') as HTMLInputElement;
 
 const boxModal = document.getElementById('box-modal') as HTMLDivElement;
 const boxModalList = document.getElementById('box-modal-list') as HTMLDivElement;
@@ -261,10 +266,13 @@ function renderBrowserAccounts(): void {
 
 /* ==================== 盒子 ==================== */
 
+let disabledBoxes: string[] = [];
+
 async function loadBoxes(): Promise<void> {
-  const stored = await chrome.storage.local.get([LOCAL_KEYS.boxList, LOCAL_KEYS.defaultBox]);
+  const stored = await chrome.storage.local.get([LOCAL_KEYS.boxList, LOCAL_KEYS.defaultBox, LOCAL_KEYS.disabledBoxes]);
   const remembered = (stored[LOCAL_KEYS.boxList] as string[] | undefined) ?? [];
   defaultBox = ((stored[LOCAL_KEYS.defaultBox] as string | undefined) ?? '').trim() || DEFAULT_BOX_FALLBACK;
+  disabledBoxes = (stored[LOCAL_KEYS.disabledBoxes] as string[] | undefined) ?? [];
   const fromAccounts = browserAccounts.map((a) => boxOf(a));
   boxes = [...new Set([defaultBox, ...remembered.filter((b) => b !== defaultBox), ...fromAccounts])];
   setStat('stat-boxes', boxes.length);
@@ -272,6 +280,15 @@ async function loadBoxes(): Promise<void> {
 
 async function saveBoxes(): Promise<void> {
   await chrome.storage.local.set({ [LOCAL_KEYS.boxList]: boxes.filter((b) => b !== defaultBox) });
+}
+
+async function saveDisabled(): Promise<void> {
+  await chrome.storage.local.set({ [LOCAL_KEYS.disabledBoxes]: disabledBoxes });
+}
+
+/** 盒子禁用态：手动禁用名单命中，或空默认盒自动禁用（轮盘不出现） */
+function isBoxDisabled(name: string): boolean {
+  return disabledBoxes.includes(name) || (name === defaultBox && !browserAccounts.some((a) => boxOf(a) === name));
 }
 
 function renderBoxChips(): void {
@@ -302,9 +319,10 @@ function renderBoxChips(): void {
   boxChipsEl.append(all);
 
   for (const name of boxes) {
+    const off = isBoxDisabled(name);
     const chip = document.createElement('button');
     chip.type = 'button';
-    chip.className = 'chip' + (currentBox === name ? ' active' : '');
+    chip.className = 'chip' + (currentBox === name ? ' active' : '') + (off ? ' chip-off' : '');
     const label = document.createElement('span');
     label.textContent = name;
     const n = document.createElement('span');
@@ -318,21 +336,35 @@ function renderBoxChips(): void {
       e.stopPropagation();
       void renameBoxFlow(name);
     });
+    const toggle = document.createElement('span');
+    toggle.className = 'chip-act';
+    toggle.textContent = off ? '▶' : '⏸';
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      void toggleBoxFlow(name);
+    });
     if (name === defaultBox) {
       rename.title = '修改默认盒子名称（未归盒账号的归宿）';
-      chip.append(rename);
-      chip.title = '默认盒子：未归盒账号的归宿，可重命名，不可删除';
+      chip.title = off
+        ? '默认盒子：当前为空，已自动禁用（轮盘不显示）'
+        : '默认盒子：未归盒账号的归宿，可重命名，不可删除';
+      chip.append(rename, toggle);
+      toggle.title = off ? '默认盒为空时自动禁用' : '默认盒为空时自动禁用（当前有账号）';
+      if (off) {
+        toggle.style.display = 'none';
+      }
     } else {
       rename.title = '重命名盒子（盒内账号随迁）';
+      toggle.title = off ? '启用盒子（恢复轮盘切换）' : '禁用盒子（轮盘跳过切换）';
       const remove = document.createElement('span');
       remove.className = 'chip-act chip-act-del';
       remove.textContent = '✕';
-      remove.title = '删除盒子（盒内账号回到默认盒子）';
+      remove.title = '删除盒子（可选：盒内账号一并删除或归入默认盒子）';
       remove.addEventListener('click', (e) => {
         e.stopPropagation();
         void removeBoxFlow(name);
       });
-      chip.append(rename, remove);
+      chip.append(rename, toggle, remove);
     }
     chip.addEventListener('click', () => {
       currentBox = name;
@@ -370,6 +402,22 @@ async function createBox(): Promise<void> {
 }
 
 /** 盒子重命名：普通盒 = 账号随迁（目标名已存在则并入）；默认盒 = 仅改显示名（未归盒账号语义不变） */
+/** 禁用/启用盒子：禁用后轮盘跳过该盒（盒内账号不受影响，管理页照常可用） */
+async function toggleBoxFlow(name: string): Promise<void> {
+  if (name === defaultBox) {
+    return; // 默认盒只随「是否为空」自动禁用
+  }
+  if (disabledBoxes.includes(name)) {
+    disabledBoxes = disabledBoxes.filter((b) => b !== name);
+  } else {
+    disabledBoxes.push(name);
+  }
+  await saveDisabled();
+  lastChipsKey = '';
+  lastListKey = '';
+  await refreshAll();
+}
+
 async function renameBoxFlow(from: string): Promise<void> {
   const isDefault = from === defaultBox;
   const input = prompt(
@@ -390,6 +438,8 @@ async function renameBoxFlow(from: string): Promise<void> {
     defaultBox = to;
     await chrome.storage.local.set({ [LOCAL_KEYS.defaultBox]: to });
     boxes = boxes.map((b) => (b === from ? to : b));
+    disabledBoxes = disabledBoxes.map((b) => (b === from ? to : b));
+    await saveDisabled();
     if (currentBox === from) {
       currentBox = to;
     }
@@ -408,7 +458,9 @@ async function renameBoxFlow(from: string): Promise<void> {
     return;
   }
   boxes = [...new Set(boxes.map((b) => (b === from ? to : b)))];
+  disabledBoxes = disabledBoxes.map((b) => (b === from ? to : b));
   await saveBoxes();
+  await saveDisabled();
   if (currentBox === from) {
     currentBox = to;
   }
@@ -418,25 +470,48 @@ async function renameBoxFlow(from: string): Promise<void> {
   await refreshAll();
 }
 
-/** 删除盒子：盒内账号回到默认盒子（默认盒本身不可删除） */
+/**
+ * 删除盒子：两步确认——
+ * 1) 确认删除盒子本身；
+ * 2) 盒内有账号时选择处置：[确定]=连同账号一并删除（含关闭页签），[取消]=账号归入默认盒子。
+ */
 async function removeBoxFlow(name: string): Promise<void> {
   if (name === defaultBox) {
     return;
   }
-  const count = browserAccounts.filter((a) => boxOf(a) === name).length;
-  const tip = count
-    ? `删除盒子「${name}」？其中 ${count} 个账号将回到「${defaultBox}」。`
-    : `删除空盒子「${name}」？`;
-  if (!confirm(tip)) {
+  if (!confirm(`删除盒子「${name}」？`)) {
     return;
   }
-  const res = await send({ kind: 'par.deleteBox', name });
-  if (!(res.kind === 'par.deleteBox' && res.result.ok)) {
-    alert(`删除失败：${res.kind === 'par.deleteBox' && !res.result.ok ? res.result.error : '无响应'}`);
-    return;
+  const victims = browserAccounts.filter((a) => boxOf(a) === name);
+  let deleteAccounts = false;
+  if (victims.length) {
+    deleteAccounts = confirm(
+      `盒子「${name}」中有 ${victims.length} 个账号。\n\n「确定」= 连同账号一并删除（关闭其页签）\n「取消」= 保留账号，移入「${defaultBox}」`,
+    );
+  }
+  if (deleteAccounts) {
+    let failed = 0;
+    for (const a of victims) {
+      const res = await send({ kind: 'par.delete', id: a.id });
+      if (!(res.kind === 'par.delete' && res.result.ok)) {
+        failed++;
+      }
+    }
+    if (failed) {
+      alert(`有 ${failed} 个账号删除失败，盒子已保留，请重试。`);
+      return;
+    }
+  } else {
+    const res = await send({ kind: 'par.deleteBox', name });
+    if (!(res.kind === 'par.deleteBox' && res.result.ok)) {
+      alert(`删除失败：${res.kind === 'par.deleteBox' && !res.result.ok ? res.result.error : '无响应'}`);
+      return;
+    }
   }
   boxes = boxes.filter((b) => b !== name);
+  disabledBoxes = disabledBoxes.filter((b) => b !== name);
   await saveBoxes();
+  await saveDisabled();
   if (currentBox === name) {
     currentBox = '全部';
   }
@@ -445,6 +520,82 @@ async function removeBoxFlow(name: string): Promise<void> {
   lastListKey = '';
   await refreshAll();
 }
+
+/* ==================== 数据导出 / 导入（备份文件 v1） ==================== */
+
+dataExportBtn.addEventListener('click', () => {
+  void (async () => {
+    const res = await send({ kind: 'data.export' });
+    if (!(res.kind === 'data.export' && res.result.ok)) {
+      alert(`导出失败：${res.kind === 'data.export' && !res.result.ok ? res.result.error : '无响应'}`);
+      return;
+    }
+    const blob = new Blob([JSON.stringify(res.result.data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `quicklogin-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+  })();
+});
+
+dataImportBtn.addEventListener('click', () => dataImportFile.click());
+
+dataImportFile.addEventListener('change', () => {
+  void (async () => {
+    const file = dataImportFile.files?.[0];
+    dataImportFile.value = ''; // 允许重复选择同一文件
+    if (!file) {
+      return;
+    }
+    let backup: DataBackup;
+    try {
+      backup = JSON.parse(await file.text()) as DataBackup;
+    } catch {
+      alert('文件不是有效的 JSON。');
+      return;
+    }
+    if (backup?.format !== 'quicklogin-backup' || backup.version !== 1) {
+      alert('不是 QuickLogin 备份文件（格式版本不符）。');
+      return;
+    }
+    const total = backup.accounts?.length ?? 0;
+    if (!confirm(`导入备份：${total} 个账号、${backup.sites?.length ?? 0} 个授权站点。\n同站同名的账号将跳过，盒子配置以备份为准。继续？`)) {
+      return;
+    }
+    const res = await send({ kind: 'data.import', data: backup });
+    if (!(res.kind === 'data.import' && res.result.ok)) {
+      alert(`导入失败：${res.kind === 'data.import' && !res.result.ok ? res.result.error : '无响应'}`);
+      return;
+    }
+    const { created, skipped, hosts } = res.result.data;
+    if (hosts.length) {
+      try {
+        // change 事件仍是用户手势链：一次性请求全部站点授权（单个浏览器弹窗）
+        await chrome.permissions.request({ origins: hosts.map((h) => `*://${h}/*`) });
+        const stored = await chrome.storage.local.get(LOCAL_KEYS.siteGrants);
+        const grants = (stored[LOCAL_KEYS.siteGrants] as Array<{ host: string; grantedAt: number }> | undefined) ?? [];
+        const known = new Set(grants.map((g) => g.host.toLowerCase()));
+        const now = Date.now();
+        for (const h of hosts) {
+          if (h && !known.has(h.toLowerCase())) {
+            grants.push({ host: h.toLowerCase(), grantedAt: now });
+          }
+        }
+        await chrome.storage.local.set({ [LOCAL_KEYS.siteGrants]: grants });
+        await send({ kind: 'par.grantChanged' });
+      } catch {
+        // 用户拒绝授权：站点可稍后在「添加授权」中单独补
+      }
+    }
+    alert(`导入完成：新建 ${created} 个账号，跳过 ${skipped} 个。`);
+    lastChipsKey = '';
+    lastBoxOptions = '';
+    lastListKey = '';
+    await refreshAll();
+  })();
+});
 
 /* ==================== 批量管理 ==================== */
 

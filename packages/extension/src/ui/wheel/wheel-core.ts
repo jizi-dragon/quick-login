@@ -130,7 +130,7 @@ export function buildSectorWheel(root: HTMLElement, opts: SectorWheelOpts): void
   const pageCount = pages.length;
   const pagePos = pageCount > 0 ? (opts.pageIndex % pageCount) + 1 : 0;
 
-  const svg = el('svg', { class: 'sector-svg', viewBox: `0 0 ${SIZE} ${SIZE}` });
+  const svg = el('svg', { class: 'sector-svg', viewBox: `-18 0 596 520` });
 
   /* ---- 右侧固定装饰轨道：120° 弧 + 盒子节点（半径/粗细/渐变全周期恒定） ---- */
   const defs = el('defs', {});
@@ -165,17 +165,32 @@ export function buildSectorWheel(root: HTMLElement, opts: SectorWheelOpts): void
     const pt = arcPt(nodeAngle(i));
     svg.append(el('circle', { class: 'box-node', cx: pt.x, cy: pt.y, r: 5 }));
   }
-  /* 高亮节点 = 当前盒子；切盒时沿轨道从上一节点平滑滑入 */
+  /* 高亮节点 = 当前盒子；切盒时沿轨道从上一节点平滑滑入；节点径向外侧标注盒子名 */
   const curIdx = pageCount > 0 ? ((opts.pageIndex % pageCount) + pageCount) % pageCount : 0;
   const cur = arcPt(nodeAngle(curIdx));
-  const active = el('circle', { class: 'box-node-on', cx: cur.x, cy: cur.y, r: 7 });
-  svg.append(active);
+  const labR = R_ARC + 22;
+  const lab = {
+    x: +(C + labR * Math.cos((nodeAngle(curIdx) * Math.PI) / 180)).toFixed(2),
+    y: +(C + labR * Math.sin((nodeAngle(curIdx) * Math.PI) / 180)).toFixed(2),
+  };
+  const activeG = el('g', { class: 'box-node-on-g' });
+  activeG.append(el('circle', { class: 'box-node-on', cx: cur.x, cy: cur.y, r: 7 }));
+  const label = el('text', {
+    class: 'box-node-label',
+    x: lab.x,
+    y: lab.y,
+    'text-anchor': 'middle',
+    'dominant-baseline': 'central',
+  });
+  label.textContent = truncate(page?.label ?? DEFAULT_BOX, 5);
+  activeG.append(label);
+  svg.append(activeG);
   const prevRaw = Number(root.dataset.qlWheelLastIdx ?? NaN);
   root.dataset.qlWheelLastIdx = String(curIdx);
   if (!Number.isNaN(prevRaw) && prevRaw !== curIdx && prevRaw >= 0 && prevRaw < pageCount) {
     const prev = arcPt(nodeAngle(prevRaw));
     const mid = arcPt((nodeAngle(prevRaw) + nodeAngle(curIdx)) / 2);
-    active.animate(
+    activeG.animate(
       [
         { transform: `translate(${(prev.x - cur.x).toFixed(2)}px, ${(prev.y - cur.y).toFixed(2)}px)` },
         { transform: `translate(${(mid.x - cur.x).toFixed(2)}px, ${(mid.y - cur.y).toFixed(2)}px)`, offset: 0.5 },

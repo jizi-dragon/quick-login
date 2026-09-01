@@ -51,11 +51,22 @@ body {
   fill: #b9c4d8;
   opacity: 0.55;
 }
+.box-node-on-g {
+  /* 高亮节点 + 盒名标签（整体随切盒滑动） */
+}
 .box-node-on {
   fill: #1e6fff;
   stroke: #ffffff;
   stroke-width: 2;
   filter: drop-shadow(0 0 6px rgba(30, 111, 255, 0.55));
+}
+.box-node-label {
+  fill: #64748b;
+  font-size: 15px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 3;
 }
 
 /* ---- 扇区（按账号色着色） ---- */

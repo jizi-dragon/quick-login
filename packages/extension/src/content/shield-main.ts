@@ -443,6 +443,38 @@
   /* ================= 第六平面：IndexedDB 命名空间 ================= */
 
   /**
+   * 平面 1.5：BroadcastChannel 命名空间。
+   * BroadcastChannel 按 origin 全局共享——同源所有页签（无论账号）收发同一频道。
+   * 平台用它广播「登出/会话失效」等事件时，任一账号登出会把其它账号的页签一并
+   * 广播下线（v3.9.6 实测「退出一个账号全部同步退出」的最可能通路）。
+   * 对策：频道名加账号命名空间前缀——同账号各页签仍可互通，跨账号互不可闻。
+   * （storage 事件因键名已带命名空间前缀、平台监听的是裸键名，天然安全；SharedWorker
+   *   未处理——脚本 URL 无法改名，观测到站点依赖时再评估阻断。）
+   */
+  function installBroadcastShield(): void {
+    try {
+      const BCtor = window.BroadcastChannel as unknown as
+        | (new (name: string) => BroadcastChannel)
+        | undefined;
+      if (!BCtor) {
+        return;
+      }
+      class NSBroadcastChannel extends BCtor {
+        constructor(name: string) {
+          super(ns + String(name));
+        }
+      }
+      Object.defineProperty(window, 'BroadcastChannel', {
+        configurable: true,
+        writable: true,
+        value: NSBroadcastChannel,
+      });
+    } catch {
+      // 封控失败不阻断其余隔离平面
+    }
+  }
+
+  /**
    * IndexedDB 是 origin 级共享存储，完全绕开 DNR/_qlck/CacheStorage 各平面。
    * v3.7 实测：目标站把 `isAdmin` 标志位与全量菜单树缓存在 IDB 库 `DBFetch`
    * （键 = URL 哈希，无账号维度）——后打开的标签页免密恢复时直接消费前一账号
@@ -506,6 +538,7 @@
     ns = `${NS_TAG}${accountId}__`;
     installStoragePatch();
     installSwAndCacheShield();
+    installBroadcastShield();
     installIdbShield();
     applySeed(seed);
   }

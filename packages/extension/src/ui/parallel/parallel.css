@@ -219,6 +219,26 @@
 .chip .chip-act.chip-act-del:hover {
   background: rgba(220, 38, 38, 0.2);
 }
+.chip.chip-off > span:first-child {
+  text-decoration: line-through;
+}
+.chip.chip-off {
+  opacity: 0.55;
+}
+.chip.chip-off.active {
+  opacity: 1;
+}
+
+/* ---- 头部小按钮（导出/导入） ---- */
+.head-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.btn-sm {
+  font-size: 12px;
+  padding: 5px 10px;
+}
 
 /* ---- 批量工具条 ---- */
 .batch-bar {

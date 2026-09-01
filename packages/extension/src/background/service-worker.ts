@@ -1,9 +1,10 @@
 import type { RuntimeRequest, RuntimeResponse, Result } from '../shared/messages';
 import type { BridgeUpPayload } from '../shared/types';
-import { CONTENT_MESSAGE, EXT_VERSION } from '../shared/constants';
+import { CONTENT_MESSAGE, EXT_VERSION, LOCAL_KEYS } from '../shared/constants';
 import { accountRegistry } from './core/account-registry';
 import { credentials } from './core/credentials';
 import { navigation, registerNavigationHandlers } from './core/navigation';
+import { siteAuth } from './core/site-auth';
 import {
   invalidateEnforcementCache,
   parallelSession,
@@ -224,6 +225,98 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
         return { opened: wheelWinId !== null };
       });
       return { kind: 'wheel.toggle', result: r };
+    }
+    case 'data.export': {
+      const r = await tryRun(async () => {
+        const [accounts, grants, stored] = await Promise.all([
+          parallelStore.list(),
+          siteAuth.list(),
+          chrome.storage.local.get([LOCAL_KEYS.boxList, LOCAL_KEYS.defaultBox, LOCAL_KEYS.disabledBoxes]),
+        ]);
+        return {
+          format: 'quicklogin-backup' as const,
+          version: 1 as const,
+          exportedAt: new Date().toISOString(),
+          cryptoSeed: await credentials.getKeySeed(),
+          sites: grants.map((g) => g.host),
+          boxes: {
+            default: (stored[LOCAL_KEYS.defaultBox] as string | undefined)?.trim() || undefined,
+            remembered: (stored[LOCAL_KEYS.boxList] as string[] | undefined) ?? [],
+            disabled: (stored[LOCAL_KEYS.disabledBoxes] as string[] | undefined) ?? [],
+          },
+          accounts: accounts.map((a) => ({
+            siteHost: a.siteHost,
+            tabName: a.tabName,
+            box: a.box,
+            credentials: a.credentials ?? null,
+          })),
+        };
+      });
+      return { kind: 'data.export', result: r };
+    }
+    case 'data.import': {
+      const r = await tryRun(async () => {
+        const data = req.data;
+        if (data?.format !== 'quicklogin-backup' || data.version !== 1) {
+          throw new Error('不是有效的 QuickLogin 备份文件（format/version 不符）');
+        }
+        if (!data.cryptoSeed || !Array.isArray(data.accounts)) {
+          throw new Error('备份缺少加密种子或账号清单');
+        }
+        const fileKey = await credentials.deriveKey(data.cryptoSeed);
+        let created = 0;
+        let skipped = 0;
+        for (const item of data.accounts) {
+          if (!item?.siteHost || !item.credentials) {
+            skipped++;
+            continue;
+          }
+          let username: string;
+          let password: string;
+          try {
+            username = await credentials.decryptValue(item.credentials.encryptedUsername, item.credentials.iv, fileKey);
+            password = await credentials.decryptValue(
+              item.credentials.encryptedPassword,
+              item.credentials.ivPassword,
+              fileKey,
+            );
+          } catch {
+            skipped++; // 凭证无法用文件种子解开（文件损坏/被篡改）
+            continue;
+          }
+          const all = await parallelStore.list();
+          if (all.some((x) => x.siteHost === item.siteHost && x.username === username)) {
+            skipped++; // 同站同名账号已存在
+            continue;
+          }
+          await parallelStore.create({
+            siteHost: item.siteHost,
+            tabName: item.tabName || username,
+            username,
+            password,
+            box: item.box || undefined,
+          });
+          created++;
+        }
+        // 盒子配置：恢复备份语义 = 以文件为准覆盖（记住盒/默认盒名/禁用名单）
+        if (data.boxes) {
+          const patch: Record<string, unknown> = {};
+          if (Array.isArray(data.boxes.remembered)) {
+            patch[LOCAL_KEYS.boxList] = data.boxes.remembered;
+          }
+          if (data.boxes.default?.trim()) {
+            patch[LOCAL_KEYS.defaultBox] = data.boxes.default.trim();
+          }
+          if (Array.isArray(data.boxes.disabled)) {
+            patch[LOCAL_KEYS.disabledBoxes] = data.boxes.disabled;
+          }
+          if (Object.keys(patch).length) {
+            await chrome.storage.local.set(patch);
+          }
+        }
+        return { created, skipped, hosts: Array.isArray(data.sites) ? data.sites : [] };
+      });
+      return { kind: 'data.import', result: r };
     }
   }
 }

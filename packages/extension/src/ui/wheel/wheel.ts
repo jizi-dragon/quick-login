@@ -39,7 +39,7 @@ async function fetchAccounts(): Promise<WheelAccount[]> {
  * 修复：新建的空盒子此前不会出现在轮盘里，导致「切换不到」。
  */
 async function fetchPages(): Promise<{ label: string; accounts: WheelAccount[] }[]> {
-  const [accounts, remembered, defaultBoxStore] = await Promise.all([
+  const [accounts, remembered, defaultBoxStore, disabledStore] = await Promise.all([
     fetchAccounts(),
     chrome.storage.local
       .get(LOCAL_KEYS.boxList)
@@ -49,11 +49,17 @@ async function fetchPages(): Promise<{ label: string; accounts: WheelAccount[] }
       .get(LOCAL_KEYS.defaultBox)
       .then((s) => (s[LOCAL_KEYS.defaultBox] as string | undefined)?.trim() ?? '')
       .catch(() => ''),
+    chrome.storage.local
+      .get(LOCAL_KEYS.disabledBoxes)
+      .then((s) => (s[LOCAL_KEYS.disabledBoxes] as string[] | undefined) ?? [])
+      .catch(() => [] as string[]),
   ]);
-  const pages = groupPagesByBox(accounts, defaultBoxStore || DEFAULT_BOX);
+  const disabled = new Set(disabledStore);
+  // 禁用盒不进轮盘（即使盒内有账号）；空默认盒自动禁用（groupPagesByBox 只为有未归盒账号的默认盒出页）
+  const pages = groupPagesByBox(accounts, defaultBoxStore || DEFAULT_BOX).filter((p) => !disabled.has(p.label));
   const seen = new Set(pages.map((p) => p.label));
   for (const name of remembered) {
-    if (!seen.has(name) && name !== defaultBoxStore) {
+    if (!seen.has(name) && name !== defaultBoxStore && !disabled.has(name)) {
       pages.push({ label: name, accounts: [] });
     }
   }
@@ -110,8 +116,27 @@ function onKey(e: KeyboardEvent): void {
   }
 }
 
-void fetchPages().then((grouped) => {
+/* 盒子/账号/禁用名单变化联动：3s 轮询，指纹未变不重绘（避免打断节点滑移动画） */
+let lastFingerprint = '';
+function fingerprint(grouped: { label: string; accounts: WheelAccount[] }[]): string {
+  return JSON.stringify(grouped.map((p) => [p.label, p.accounts.map((a) => a.id)]));
+}
+async function refresh(): Promise<void> {
+  const grouped = await fetchPages();
+  const fp = fingerprint(grouped);
+  if (fp === lastFingerprint) {
+    return;
+  }
+  lastFingerprint = fp;
   pages = grouped;
+  if (pageIndex >= pages.length) {
+    pageIndex = Math.max(0, pages.length - 1);
+  }
   render();
+  requestAnimationFrame(() => requestAnimationFrame(() => wheelEl.classList.add('in')));
+}
+
+void refresh().then(() => {
   document.addEventListener('keydown', onKey);
 });
+window.setInterval(() => void refresh(), 3000);

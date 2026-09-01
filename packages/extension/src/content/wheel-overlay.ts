@@ -39,7 +39,7 @@ async function fetchAccounts(): Promise<WheelAccount[]> {
 
 /** 轮盘分页 = 账号归属盒子 + 管理页记忆的空盒子（修复「新建空盒子切换不到」） */
 async function fetchPages(): Promise<{ label: string; accounts: WheelAccount[] }[]> {
-  const [accounts, remembered, defaultBoxStore] = await Promise.all([
+  const [accounts, remembered, defaultBoxStore, disabledStore] = await Promise.all([
     fetchAccounts(),
     chrome.storage.local
       .get(LOCAL_KEYS.boxList)
@@ -49,11 +49,17 @@ async function fetchPages(): Promise<{ label: string; accounts: WheelAccount[] }
       .get(LOCAL_KEYS.defaultBox)
       .then((s) => (s[LOCAL_KEYS.defaultBox] as string | undefined)?.trim() ?? '')
       .catch(() => ''),
+    chrome.storage.local
+      .get(LOCAL_KEYS.disabledBoxes)
+      .then((s) => (s[LOCAL_KEYS.disabledBoxes] as string[] | undefined) ?? [])
+      .catch(() => [] as string[]),
   ]);
-  const pages = groupPagesByBox(accounts, defaultBoxStore || DEFAULT_BOX);
+  const disabled = new Set(disabledStore);
+  // 禁用盒不进轮盘（即使盒内有账号）；空默认盒自动禁用（groupPagesByBox 只为有未归盒账号的默认盒出页）
+  const pages = groupPagesByBox(accounts, defaultBoxStore || DEFAULT_BOX).filter((p) => !disabled.has(p.label));
   const seen = new Set(pages.map((p) => p.label));
   for (const name of remembered) {
-    if (!seen.has(name) && name !== defaultBoxStore) {
+    if (!seen.has(name) && name !== defaultBoxStore && !disabled.has(name)) {
       pages.push({ label: name, accounts: [] });
     }
   }
@@ -61,7 +67,7 @@ async function fetchPages(): Promise<{ label: string; accounts: WheelAccount[] }
 }
 
 async function mount(): Promise<void> {
-  const pages = await fetchPages();
+  let pages = await fetchPages();
   let pageIndex = 0;
 
   /* ---------- 宿主节点与 Shadow 根 ---------- */
@@ -98,7 +104,9 @@ async function mount(): Promise<void> {
 
     .box-track{fill:none;stroke:url(#qlBoxGrad);stroke-width:3.5;stroke-linecap:round}
     .box-node{fill:#b9c4d8;opacity:.55}
+    .box-node-on-g{}
     .box-node-on{fill:#1e6fff;stroke:#fff;stroke-width:2;filter:drop-shadow(0 0 6px rgba(30,111,255,.55))}
+    .box-node-label{fill:#64748b;font-size:15px;font-weight:600;paint-order:stroke;stroke:#fff;stroke-width:3}
 
     .sector{cursor:pointer;transform-box:view-box;transform-origin:50% 50%;
       transform:scale(.96);opacity:0;
@@ -171,11 +179,13 @@ async function mount(): Promise<void> {
   shadow.append(wheelRoot, hint);
 
   let closed = false;
+  const refreshTimer = window.setInterval(() => void refresh(), 3000);
   function close(): void {
     if (closed) {
       return;
     }
     closed = true;
+    window.clearInterval(refreshTimer);
     document.removeEventListener('keydown', onKeyDown, true);
     document.documentElement.style.removeProperty('overflow');
     host.classList.remove('show');
@@ -240,6 +250,27 @@ async function mount(): Promise<void> {
     });
     requestAnimationFrame(() => requestAnimationFrame(() => wheelRoot.classList.add('in')));
   }
+
+  /* ---------- 盒子/账号/禁用名单变化联动：3s 轮询（指纹未变不重绘） ---------- */
+  let lastFingerprint = JSON.stringify(pages.map((p) => [p.label, p.accounts.map((a) => a.id)]));
+  const refresh = async (): Promise<void> => {
+    try {
+      const grouped = await fetchPages();
+      const fp = JSON.stringify(grouped.map((p) => [p.label, p.accounts.map((a) => a.id)]));
+      if (fp === lastFingerprint) {
+        return;
+      }
+      lastFingerprint = fp;
+      pages = grouped;
+      if (pageIndex >= pages.length) {
+        pageIndex = Math.max(0, pages.length - 1);
+      }
+      render();
+    } catch {
+      // 轮询失败静默，下个周期重试
+    }
+  };
+  window.setInterval(() => void refresh(), 3000);
 
   /* ---------- 挂载 & 入场 ---------- */
   document.addEventListener('keydown', onKeyDown, true);

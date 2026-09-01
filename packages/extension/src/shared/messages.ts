@@ -21,7 +21,33 @@ export type RuntimeRequest =
   | { kind: 'par.open'; id: string; forceNewTab?: boolean }
   | { kind: 'par.grantChanged' }
   | { kind: 'ql.diag' }
-  | { kind: 'wheel.toggle' };
+  | { kind: 'wheel.toggle' }
+  | { kind: 'data.export' }
+  | { kind: 'data.import'; data: DataBackup };
+
+/** 备份文件结构（v1）：种子 + 加密凭证 + 授权站 + 盒子配置（见 tmp 导出脚本） */
+export interface DataBackup {
+  format: 'quicklogin-backup';
+  version: 1;
+  exportedAt: string;
+  /** 源设备加密种子（导入端用它解密凭证，再以本地种子重加密入库） */
+  cryptoSeed: string;
+  /** 授权站点 host 清单 */
+  sites: string[];
+  boxes: { default?: string; remembered?: string[]; disabled?: string[] };
+  accounts: Array<{
+    siteHost: string;
+    tabName: string;
+    box?: string;
+    credentials: {
+      encryptedUsername: string;
+      encryptedPassword: string;
+      iv: string;
+      ivPassword: string;
+      encryptedAt?: number;
+    } | null;
+  }>;
+}
 
 export type RuntimeResponse =
   | { kind: 'session.list'; result: Result<Session[]> }
@@ -41,6 +67,8 @@ export type RuntimeResponse =
   | { kind: 'par.open'; result: Result<{ tabId: number; reused: boolean }> }
   | { kind: 'par.grantChanged'; result: Result<boolean> }
   | { kind: 'ql.diag'; result: Result<Record<string, unknown>> }
-  | { kind: 'wheel.toggle'; result: Result<{ opened: boolean }> };
+  | { kind: 'wheel.toggle'; result: Result<{ opened: boolean }> }
+  | { kind: 'data.export'; result: Result<DataBackup> }
+  | { kind: 'data.import'; result: Result<{ created: number; skipped: number; hosts: string[] }> };
 
 export type { Result };
