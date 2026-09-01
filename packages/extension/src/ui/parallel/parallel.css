@@ -195,6 +195,30 @@
   border-style: dashed;
   color: var(--sb-text-secondary);
 }
+/* ---- 盒子管理（重命名/删除，悬停浮现） ---- */
+.chip .chip-act {
+  display: none;
+  margin-left: -1px;
+  padding: 1px 4px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  line-height: 1.2;
+  opacity: 0.8;
+}
+.chip:hover .chip-act,
+.chip.active .chip-act {
+  display: inline-block;
+}
+.chip .chip-act:hover {
+  opacity: 1;
+  background: rgba(30, 111, 255, 0.16);
+}
+.chip.active .chip-act:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+.chip .chip-act.chip-act-del:hover {
+  background: rgba(220, 38, 38, 0.2);
+}
 
 /* ---- 批量工具条 ---- */
 .batch-bar {

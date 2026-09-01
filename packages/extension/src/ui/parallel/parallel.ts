@@ -285,7 +285,12 @@ function renderBoxChips(): void {
   const all = document.createElement('button');
   all.type = 'button';
   all.className = 'chip' + (currentBox === '全部' ? ' active' : '');
-  all.innerHTML = `全部 <span class="chip-n">${browserAccounts.length}</span>`;
+  const allLabel = document.createElement('span');
+  allLabel.textContent = '全部';
+  const allN = document.createElement('span');
+  allN.className = 'chip-n';
+  allN.textContent = String(browserAccounts.length);
+  all.append(allLabel, allN);
   all.addEventListener('click', () => {
     currentBox = '全部';
     lastListKey = '';
@@ -298,7 +303,33 @@ function renderBoxChips(): void {
     const chip = document.createElement('button');
     chip.type = 'button';
     chip.className = 'chip' + (currentBox === name ? ' active' : '');
-    chip.innerHTML = `${name} <span class="chip-n">${countOf(name)}</span>`;
+    const label = document.createElement('span');
+    label.textContent = name;
+    const n = document.createElement('span');
+    n.className = 'chip-n';
+    n.textContent = String(countOf(name));
+    chip.append(label, n);
+    if (name !== DEFAULT_BOX) {
+      const rename = document.createElement('span');
+      rename.className = 'chip-act';
+      rename.textContent = '✎';
+      rename.title = '重命名盒子（盒内账号随迁）';
+      rename.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void renameBoxFlow(name);
+      });
+      const remove = document.createElement('span');
+      remove.className = 'chip-act chip-act-del';
+      remove.textContent = '✕';
+      remove.title = '删除盒子（盒内账号回到默认盒子）';
+      remove.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void removeBoxFlow(name);
+      });
+      chip.append(rename, remove);
+    } else {
+      chip.title = '默认盒子：未归盒账号的归宿，不可删除或重命名';
+    }
     chip.addEventListener('click', () => {
       currentBox = name;
       lastListKey = '';
@@ -332,6 +363,57 @@ async function createBox(): Promise<void> {
   lastBoxOptions = '';
   renderBoxChips();
   fillBoxOptions();
+}
+
+/** 盒子重命名：账号随迁；目标名已存在 = 并入该盒子 */
+async function renameBoxFlow(from: string): Promise<void> {
+  const input = prompt(`重命名盒子「${from}」（盒内账号随迁）`, from);
+  const to = input?.trim();
+  if (!to || to === from) {
+    return;
+  }
+  if (boxes.includes(to) && !confirm(`盒子「${to}」已存在，将把「${from}」中的账号并入其中。继续？`)) {
+    return;
+  }
+  const res = await send({ kind: 'par.renameBox', from, to });
+  if (!(res.kind === 'par.renameBox' && res.result.ok)) {
+    alert(`重命名失败：${res.kind === 'par.renameBox' && !res.result.ok ? res.result.error : '无响应'}`);
+    return;
+  }
+  boxes = [...new Set(boxes.map((b) => (b === from ? to : b)))];
+  await saveBoxes();
+  if (currentBox === from) {
+    currentBox = to;
+  }
+  lastChipsKey = '';
+  lastBoxOptions = '';
+  lastListKey = '';
+  await refreshAll();
+}
+
+/** 删除盒子：盒内账号回到默认盒子 */
+async function removeBoxFlow(name: string): Promise<void> {
+  const count = browserAccounts.filter((a) => boxOf(a) === name).length;
+  const tip = count
+    ? `删除盒子「${name}」？其中 ${count} 个账号将回到「默认盒子」。`
+    : `删除空盒子「${name}」？`;
+  if (!confirm(tip)) {
+    return;
+  }
+  const res = await send({ kind: 'par.deleteBox', name });
+  if (!(res.kind === 'par.deleteBox' && res.result.ok)) {
+    alert(`删除失败：${res.kind === 'par.deleteBox' && !res.result.ok ? res.result.error : '无响应'}`);
+    return;
+  }
+  boxes = boxes.filter((b) => b !== name);
+  await saveBoxes();
+  if (currentBox === name) {
+    currentBox = '全部';
+  }
+  lastChipsKey = '';
+  lastBoxOptions = '';
+  lastListKey = '';
+  await refreshAll();
 }
 
 /* ==================== 批量管理 ==================== */

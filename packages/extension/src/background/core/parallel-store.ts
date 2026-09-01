@@ -67,6 +67,39 @@ export const parallelStore = {
     return next;
   },
 
+  /** 盒子重命名：盒内账号随迁；to 为空 = 并入「默认盒子」。返回随迁账号数 */
+  async renameBox(from: string, to: string): Promise<number> {
+    const fromName = from.trim();
+    const toName = to.trim();
+    if (!fromName) {
+      throw new Error('源盒子名为空');
+    }
+    if (fromName === toName) {
+      return 0;
+    }
+    const accounts = await db.accounts.list();
+    let moved = 0;
+    for (const account of accounts) {
+      if ((account.box ?? '').trim() !== fromName) {
+        continue;
+      }
+      const next: ParallelAccount = { ...account, updatedAt: Date.now() };
+      if (toName) {
+        next.box = toName;
+      } else {
+        delete next.box;
+      }
+      await db.accounts.put(next);
+      moved++;
+    }
+    return moved;
+  },
+
+  /** 删除盒子：盒内账号全部回到「默认盒子」。返回随迁账号数 */
+  async clearBox(name: string): Promise<number> {
+    return this.renameBox(name, '');
+  },
+
   async updateCredentials(id: string, creds: EncryptedCredentials): Promise<void> {
     const account = await this.get(id);
     await db.accounts.put({ ...account, credentials: creds, updatedAt: Date.now() });

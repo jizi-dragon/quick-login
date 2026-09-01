@@ -1,11 +1,11 @@
-# QuickLogin 项目现状快照（2026-08-29 · v3.7.2）
+# QuickLogin 项目现状快照（2026-08-29 · v3.9.2）
 
 > 配套阅读：版本明细见根目录 `CHANGELOG.md`；代码库导读见 `docs/CODEBASE_OVERVIEW.md`；
-> 四象限泄漏的完整取证链见 `research/idb-permissions/`（5 份报告）。
+> 功能与使用说明见 `docs/USER-MANUAL.md`（用户手册）。
 
 ## 一、当前形态
 
-**纯浏览器扩展**实现多账号在同一浏览器窗口并行登录内部低代码平台（无状态 JWT Bearer 认证）。历史上的「本地引擎（CDP spawn 隔离）/Native Messaging」路线自 v2.4 起退出扩展运行时（manifest 无 `nativeMessaging`、无调用方），但 `packages/engine/` 目录与 `scripts/build.mjs` 的引擎打包步骤仍留存于仓库（属待清理遗产，不影响扩展产物）。
+**纯浏览器扩展**实现多账号在同一浏览器窗口并行登录内部低代码平台（无状态 JWT Bearer 认证）。历史上的「本地引擎（CDP spawn 隔离）/Native Messaging」路线已于 v3.9.2 自仓库移除（`packages/engine/`、`packages/shared/nm-protocol.ts`、`nm-client.ts` 已删，构建不再打包引擎）；同批清理的还有取证/研究工具链（`tools/e2e/`、`research/idb-permissions/`，其历史结论已沉淀于 git 历史与本文档）。
 
 - 扩展 ID 固定，卡片入口 `chrome://extensions`；
 - 并行管理主页：`ui/parallel/`；启动弹窗：`ui/popup/`；账号轮盘：`ui/wheel/`（独立小窗）+ `content/wheel-overlay.ts`（页面内浮层）；
@@ -70,11 +70,11 @@
 | **共享 IndexedDB（主载体）** | 平台把 `isAdmin` 标志与全量菜单树缓存在 origin 级共享 IDB（`DBFetch`，键=URL 哈希无账号维度），免密恢复的标签页直接消费上一账号条目 | v3.7 第六平面：IDB 按账号前缀化 |
 | 真实 jar 残留身份 | 绕过扩展的普通页签把 token 写进真实 jar，登录快照经 `chrome.cookies` 把它打包回放 → Bearer 与 Cookie 身份不一致 | v3.7.2：快照/回放双侧过滤 `IDENTITY_COOKIE_BLACKLIST`，存量快照自愈 |
 
-**验证结论**：E2E 台架 3.7.1 回归全绿（A 进管理端、U 保持普通、CDP 真实 IDB 全景仅见 `__ql_ns_*` 库）；v3.7.2 用户实测 1 管理员 + 2 普通 + 绕过扩展的普通页签并存全绿；研究构建（仅关第六平面）可 1:1 复现泄漏，**官方 v3.7.2 不可复现**（详见 `research/idb-permissions/reports/04-archaeology.md`）。
+**验证结论**：E2E 台架 3.7.1 回归全绿（A 进管理端、U 保持普通、CDP 真实 IDB 全景仅见 `__ql_ns_*` 库）；v3.7.2 用户实测 1 管理员 + 2 普通 + 绕过扩展的普通页签并存全绿；研究构建（仅关第六平面）可 1:1 复现泄漏，**官方 v3.7.2 不可复现**（取证链已随收束清理移除，git 历史可考）。
 
 ### 2. 现存边界与残余风险（客户端能力上界）
 
-1. **主动提权方向无法在客户端根治**：把普通用户抬成管理员需「接管服务端应答」，客户端篡改 IDB → 白屏（无回退渲染路径，`reports/05-minimal-capability.md`）。权限真边界在服务端（JWT 无 role；管理侧读接口未过滤 + 单设备登录未启用 `isEnableSingleDeviceLogin:False`）——建议向平台方反馈。
+1. **主动提权方向无法在客户端根治**：把普通用户抬成管理员需「接管服务端应答」，客户端篡改 IDB → 白屏（无回退渲染路径）。权限真边界在服务端（JWT 无 role；管理侧读接口未过滤 + 单设备登录未启用 `isEnableSingleDeviceLogin:False`）——建议向平台方反馈。
 2. **Web Worker 内打开的 IndexedDB** 不受主世界补丁（待观测）。
 3. Cookie 快照仅登录时点采集一次；服务端若在会话中轮转会话标识，该账号需重新登录刷新（JWT 主体不受影响）。
 4. 轮盘页面浮层需站点授权；未授权站点按设计降级独立小窗（用户知悉接受）。
@@ -86,37 +86,22 @@
 - **更新 dist 后必须在扩展卡片点「重新加载」**：Chrome 会缓存扩展 SW 脚本（实测档案内 ScriptCache 长期复用首次加载的旧脚本，导致「诊断埋点全空 + 旧缺陷常驻」的假象）；必要时删除档案 `Default/Service Worker/` 后重开。
 - `tmp/` 下档案/事件流均 gitignored；`QuickLogin-v*.zip` 官方构建包不入库。
 
-## 六、验证工具链
+## 六、验证
 
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # esbuild → dist/
-npm run e2e         # Playwright 真实 Chrome 台架（交互式，见下）
-QL_E2E_SELFTEST=1 npm run e2e   # 冒烟自检（自动退出）
-QL_E2E_DRIVE=file npm run e2e   # 文件驱动模式（无人值守 stdin；检查点写 tmp/e2e-go 推进）
 ```
 
-E2E 台架（`tools/e2e/harness.mjs`）：隔离档案加载 dist、经扩展页评估通道 + 浏览器级 CDP 同时采集：SW 日志/DNR 规则/每标签 localStorage 身份解码/**线上 Authorization 终值/缓存与 SW 命中标记/响应体跨账号名嗅探/CDP `IndexedDB` 域全量取证**。三种运行模式（交互 / 自检 / 文件驱动）；事件流 `tmp/e2e-events.jsonl`（set-cookie / identity-snap / wire-auth / idb-full / resp-hash…），报告 `tmp/e2e-report.md`，`node tools/e2e/peek.mjs <type>` 随手判读。登录等需人工凭据的环节由使用者操作。
+历史取证工具链（E2E 台架 / 事件流判读 / 研究驱动器）已随 v3.9.2 收束清理移除，需要时可从 git 历史恢复。日常验证以 `npm run typecheck && npm run build` + 浏览器装载实测为准（更新 dist 后记得在扩展卡片点「重新加载」）。
 
-配套取证工具（`tools/e2e/`）：`analyze-events.mjs`（事件流离线分析 → 跨标签串号判定）、`rule-probe.mjs`（DNR 规则格式回归探针）、`fix-verify.mjs`（壳激活 + 页面层缓存分区全自动验证）。
+### 专项研究结论（工具链已清理，结论留档）
 
-注意事项：
+四象限泄漏的完整取证链（原 `research/idb-permissions/` 5 份报告 + 驱动器/分析器）已随收束清理移除（git 历史可考），核心结论：
 
-- **品牌 Chrome 137+ 已禁用 `--load-extension`**，台架强制使用 Playwright 自带 Chromium（CFT 构建）；首次运行前 `npx playwright-core install chromium`（国内镜像 `PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright`）；
-- **更新 dist 后扩展卡片点「重新加载」**，必要时清档案 `Default/Service Worker/`（SW 脚本缓存会长期复用旧脚本，见 §5.3）；
-- 临时档案 `tmp/e2e-profile` 与日志均在 `.gitignore` 保护下，不会入库。
-
-### 专项研究：`research/idb-permissions/`（独立于扩展产物）
-
-四象限泄漏的完整取证链与终审结论（5 份报告 + 文件驱动实验驱动器 `driver.mjs` 8 命令 + 参数分析器）：
-
-- **01 参数粒度**：客户端 IDB 仅 4 条目（isAdmin 布尔 / 菜单树 / 页面清单 / 导航入口）——细粒度权限（对象/字段）纯服务端；
-- **02 因素剖析**：权限真边界在服务端（JWT 无 role）；安全短板 = 管理侧读接口未过滤 + 单设备登录未启用；
-- **03 动态覆盖终审**：IDB 为写穿镜像非渲染源，动态覆盖不可行（覆盖必被重取冲掉）；
-- **04 考古复现**：仅关闭第六平面的研究构建下 1:1 复现共享镜像串权（凭据无关，纯启动顺序）；
-- **05 最小能力终审**：被动串权=零能力/零信息（共享镜像+启动顺序）；主动赋权需「接管服务端应答」级能力（客户端篡改 → 白屏，无回退渲染）。
-
-研究构建（第六平面关闭版）存放于 `tmp/dist-research/`（gitignored），与官方 dist 逐文件哈希核验仅 `content/shield-main.js` 一处差异（开关位），官方产物不受影响。
+- 客户端 IDB 仅 4 条目（isAdmin 布尔 / 菜单树 / 页面清单 / 导航入口），细粒度权限纯服务端；IDB 为写穿镜像非渲染源；
+- 串权最小能力终审：被动串权=零能力/零信息（共享镜像+启动顺序）；主动赋权需「接管服务端应答」级能力（客户端篡改 → 白屏，无回退渲染）；
+- 官方 v3.7.2+（第六平面开启）不可复现；给平台侧的整改建议：管理侧读接口按权限过滤、恢复路径强制重取、启用单设备登录。
 
 ## 七、关键文件索引
 
@@ -130,8 +115,6 @@ E2E 台架（`tools/e2e/harness.mjs`）：隔离档案加载 dist、经扩展页
 | `src/content/shield-main.ts` | MAIN 壳六项职责：存储命名空间、Cookie 袋虚拟化、种子直灌、写入上报、SW/CacheStorage 封控、IndexedDB 命名空间 + 页面层 `_qlck` 缓存分区 |
 | `src/content/shield-bridge.ts` | ISOLATED 桥：window.postMessage ↔ chrome.runtime 双向通路 |
 | `src/content/auto-login.ts` | 凭据自动填表（会话级 pending 表驱动） |
-| `src/ui/parallel/*` | 并行管理主页（站点下拉记忆、授权停用、实时徽标、3000ms 轮询） |
+| `src/ui/parallel/*` | 并行管理主页（盒子 chips 含重命名/删除、批量管理、批量导入、实时徽标、3000ms 轮询） |
 | `src/ui/wheel/*` · `src/content/wheel-overlay.ts` | 轮盘双形态（小窗 / 页面浮层） |
-| `tools/e2e/harness.mjs` | E2E 取证台架（交互/自检/文件驱动三模式；CDP IndexedDB 全量取证） |
-| `tools/e2e/peek.mjs` · `analyze-events.mjs` · `rule-probe.mjs` · `fix-verify.mjs` | 事件流判读 / 离线串号分析 / DNR 格式探针 / 修复自动验证 |
-| `research/idb-permissions/` | 专项研究工程（驱动器 + 分析器 + 5 份报告） |
+| `docs/USER-MANUAL.md` | 用户手册（功能点 + 使用说明） |

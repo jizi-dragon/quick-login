@@ -6,7 +6,6 @@ import path from 'node:path';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dist = path.join(root, 'dist');
 const extDir = path.join(root, 'packages', 'extension');
-const engineDir = path.join(root, 'packages', 'engine');
 const watch = process.argv.includes('--watch');
 
 rmSync(dist, { recursive: true, force: true });
@@ -31,20 +30,6 @@ function copyExtensionStatics() {
   copyFileSync(path.join(extDir, 'manifest.json'), path.join(dist, 'manifest.json'));
   copyUiStatics(path.join(extDir, 'src', 'ui'), path.join(dist, 'ui'));
 }
-
-/** 引擎：bundle 为单 js（原生依赖 better-sqlite3/@primno/dpapi 不打包，运行时从 node_modules 解析）。
- * 输出 .cjs：CJS 格式与 packages/engine 的 "type":"module" 声明隔离，避免 Node 误判 */
-const engineOptions = {
-  bundle: true,
-  format: 'cjs',
-  platform: 'node',
-  target: ['node20'],
-  outdir: path.join(engineDir, 'dist'),
-  outExtension: { '.js': '.cjs' },
-  logLevel: 'info',
-  entryPoints: { engine: path.join(engineDir, 'src', 'main.ts') },
-  external: ['better-sqlite3', '@primno/dpapi', 'chrome-remote-interface'],
-};
 
 const extensionOptions = {
   bundle: true,
@@ -73,5 +58,4 @@ if (watch) {
   ctx.watch();
 }
 await build(extensionOptions);
-await build(engineOptions);
-console.log('BUILD_OK → dist/ + packages/engine/dist/');
+console.log('BUILD_OK → dist/');

@@ -20,7 +20,7 @@
 ## 快速开始
 
 ```bash
-npm install        # 安装依赖（workspace；引擎侧 better-sqlite3 为原生模块）
+npm install        # 安装依赖
 npm run build      # esbuild → dist/（三处版本号保持一致）
 npm run typecheck  # tsc --noEmit
 ```
@@ -28,30 +28,16 @@ npm run typecheck  # tsc --noEmit
 装载测试：`chrome://extensions` → 开发者模式 → 「加载已解压的扩展程序」→ 选 `dist/`。
 **更新代码后务必在扩展卡片点「重新加载」**（Chrome 会缓存扩展 Service Worker 脚本，直接重启浏览器也可能复用旧脚本）。
 
-## 验证工具链
-
-```bash
-npm run e2e                        # Playwright 取证台架（交互式，登录环节人工操作）
-QL_E2E_SELFTEST=1 npm run e2e      # 冒烟自检（自动退出）
-QL_E2E_DRIVE=file npm run e2e      # 文件驱动模式（无人值守 stdin；检查点写 tmp/e2e-go 推进）
-node tools/e2e/peek.mjs <type>     # 事件流随手判读（set-cookie / wire-auth / idb-full / resp-hash …）
-node tools/e2e/analyze-events.mjs  # 离线分析 tmp/e2e-events.jsonl → 跨标签串号判定
-node tools/e2e/rule-probe.mjs      # DNR 规则格式回归探针（一次性无头档案）
-node tools/e2e/fix-verify.mjs      # 壳激活 + 页面层缓存分区全自动验证
-```
-
-品牌 Chrome 137+ 已禁用 `--load-extension`，台架自动使用 Playwright 自带 Chromium（首次 `npx playwright-core install chromium`，国内可用 `PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright`）。
-
 ## 文档索引
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) | **现状快照**：六平面架构表、版本里程碑、验证工具链、现存边界 |
+| [`docs/USER-MANUAL.md`](docs/USER-MANUAL.md) | **用户手册**：功能点清单 + 使用说明 |
+| [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) | **现状快照**：六平面架构表、版本里程碑、安全边界 |
 | [`docs/CODEBASE_OVERVIEW.md`](docs/CODEBASE_OVERVIEW.md) | 代码库导读：架构、关键模块、数据流、约定、风险 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本明细（含每轮缺陷的根因定位过程） |
 | [`docs/BROWSER-ONLY-MULTILOGIN-RESEARCH.md`](docs/BROWSER-ONLY-MULTILOGIN-RESEARCH.md) | 历史调研：纯扩展多账号并行的方案论证与先例（v3.4 时代） |
 | [`packages/extension/docs/DESIGN.md`](packages/extension/docs/DESIGN.md) | 历史设计文档（v2.1 免密切换时代；其「无法并行」结论已被推翻） |
-| [`research/idb-permissions/`](research/idb-permissions/README.md) | 专项研究：IndexedDB 权限深度剖析（驱动器 + 5 份报告） |
 
 ## 已知边界
 

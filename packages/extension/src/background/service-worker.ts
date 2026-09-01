@@ -194,6 +194,14 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       const r = await tryRun(() => parallelStore.updateBox(req.id, req.box));
       return { kind: 'par.moveBox', result: r };
     }
+    case 'par.renameBox': {
+      const r = await tryRun(async () => ({ moved: await parallelStore.renameBox(req.from, req.to) }));
+      return { kind: 'par.renameBox', result: r };
+    }
+    case 'par.deleteBox': {
+      const r = await tryRun(async () => ({ moved: await parallelStore.clearBox(req.name) }));
+      return { kind: 'par.deleteBox', result: r };
+    }
     case 'par.update': {
       const r = await tryRun(async () => {
         const account = await parallelStore.updateTabName(req.id, req.patch.tabName ?? '');

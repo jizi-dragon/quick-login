@@ -2,6 +2,22 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.9.2（2026-08-29）
+
+**新功能：盒子管理（重命名 / 删除）：**
+
+- **盒子重命名**：盒子 chips 悬停浮现「✎」——盒内账号随迁到新名；输入已存在的盒子名 = 并入该盒子（二次确认）；当前筛选视图跟随跳转。
+- **盒子删除**：盒子 chips 悬停浮现「✕」——空盒直接删；非空盒删除前确认（提示 N 个账号将回到「默认盒子」），账号自动回归默认盒子。
+- **默认盒子受保护**：作为未归盒账号的回退锚，不提供重命名/删除入口。
+- 新消息 `par.renameBox` / `par.deleteBox`；`parallelStore.renameBox/clearBox`（账号级随迁落库）；盒子 chips 改为 DOM 构建（消除 innerHTML 注名风险）。
+
+**项目收束（不影响扩展产物）：**
+
+- 移除遗留本地引擎时代源码：`packages/engine/`、`packages/shared/nm-protocol.ts`、`src/background/nm-client.ts`（自 v2.4 起无调用方）；`scripts/build.mjs` 不再打包引擎。
+- 移除取证/研究工具链：`tools/e2e/`（harness/peek/analyze-events/rule-probe/fix-verify/ui-check）、`research/idb-permissions/`（驱动器 + 5 份报告）；相关结论已沉淀于 `docs/PROJECT-STATUS.md`，完整历史见 git。
+- 清理陈旧构建包 `QuickLogin-v3.7.2.zip` 与引擎时代设计文档；依赖瘦身（移除 better-sqlite3 / chrome-remote-interface / playwright 相关 devDeps）。
+- 新增用户手册 `docs/USER-MANUAL.md`。
+
 ## 3.9.1（2026-08-29）
 
 **实测缺陷修复：**

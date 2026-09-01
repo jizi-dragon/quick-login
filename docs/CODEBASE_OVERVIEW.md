@@ -52,10 +52,6 @@ SW·CacheStorage 封控 / IndexedDB 命名空间）实现账号间全链路隔�
 │  └─ wheel-overlay.ts 页面内 Shadow DOM 轮盘浮层                            │
 │ ui/  parallel/（管理主页）· wheel/（小窗兜底）· popup/（启动器）             │
 └───────────────────────────────────────────────────────────────────────────┘
-packages/engine/  遗留：NM host + CDP spawn 多开 + SQLite（扩展运行时已不用；build.mjs 仍打包，待清理）
-packages/shared/  nm-protocol.ts（仅遗留代码引用）
-tools/e2e/        harness.mjs（三模式取证台架）+ peek / analyze-events / rule-probe / fix-verify
-research/idb-permissions/  专项研究工程（driver.mjs 8 命令 + analyze-idb.mjs + 5 份报告）
 ```
 
 ## Key modules
@@ -70,13 +66,6 @@ research/idb-permissions/  专项研究工程（driver.mjs 8 命令 + analyze-id
 | `packages/extension/src/content/auto-login.ts` | 自动登录：顶层 frame 直填同源 srcdoc iframe 密码框（React 受控组件原生 setter + input/change 事件） |
 | `packages/extension/src/ui/parallel/parallel.ts` | 并行管理主页：站点授权清单、账号增删开、实时徽标（在线/待登录/未授权·已暂停）、3s 轮询 |
 | `packages/extension/src/ui/wheel/wheel.ts` + `src/content/wheel-overlay.ts` | 账号轮盘双形态：普通页 Shadow DOM 浮层优先，受限页独立小窗，最终降级标签页 |
-| `tools/e2e/harness.mjs` | E2E 取证台架：交互 / `QL_E2E_SELFTEST=1` 冒烟 / `QL_E2E_DRIVE=file` 文件驱动三模式；扩展页评估通道 + 浏览器级 CDP（SW 控制台与目标附着）；CDP `IndexedDB` 域全量取证 |
-| `tools/e2e/peek.mjs` | 事件流按类型随手判读 |
-| `tools/e2e/analyze-events.mjs` | 事件流离线分析：跨标签同体、同体共享、SW 命中、`_qlck` 覆盖、单标签多身份等判定 |
-| `tools/e2e/rule-probe.mjs` | DNR 规则格式回归探针（一次性无头档案；记录 urlTransform 的 Chrome 限制） |
-| `tools/e2e/fix-verify.mjs` | 全自动验证：程序化建号开签 → 壳激活 / fetch·XHR 包装 / `_qlck` 分区实测（DNR 腿需授权档案，由台架复核） |
-| `research/idb-permissions/driver.mjs` | 实验驱动器（SNAP/SETADMIN/COPYENTRY/RELOAD/PROBE/STATUS/LS/APITEST/EDIT） |
-| `packages/engine/*`（遗留） | 旧本地引擎：NM host + CDP 多开 + SQLite；扩展无调用方，`build.mjs` 仍打包（待清理） |
 
 ## Data & control flow
 
@@ -103,8 +92,7 @@ reload 一次强制收敛。
 - 扩展入口：`packages/extension/manifest.json`（MV3；background SW + 4 个内容脚本 +
   `quick-wheel` 命令 + `optional_host_permissions: ["*://*/*"]`）。
 - 后台入口：`packages/extension/src/background/service-worker.ts`（装载监听器；`restore()` 冷启自举）。
-- 构建入口：`scripts/build.mjs`（→ `dist/` + 遗留的 `packages/engine/dist/`）。
-- 测试入口：`tools/e2e/harness.mjs`；研究驱动器 `research/idb-permissions/driver.mjs`。
+- 构建入口：`scripts/build.mjs`（→ `dist/`）。
 
 ## Build, run, and test
 
