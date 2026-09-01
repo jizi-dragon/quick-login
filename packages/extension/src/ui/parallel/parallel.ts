@@ -564,32 +564,45 @@ dataImportFile.addEventListener('change', () => {
     if (!confirm(`导入备份：${total} 个账号、${backup.sites?.length ?? 0} 个授权站点。\n同站同名的账号将跳过，盒子配置以备份为准。继续？`)) {
       return;
     }
+    // 站点授权必须趁用户手势仍有效时最先请求（手势会随后续 await 失效，
+    // v3.10.1 修复：原顺序导致 request 静默失败 → 永远显示「未授权·已暂停」）
+    const hosts = (backup.sites ?? []).map((h) => String(h).trim().toLowerCase()).filter(Boolean);
+    let granted = hosts.length === 0;
+    if (hosts.length) {
+      try {
+        granted = await chrome.permissions.request({ origins: hosts.map((h) => `*://${h}/*`) });
+      } catch {
+        granted = false;
+      }
+      if (granted) {
+        try {
+          const stored = await chrome.storage.local.get(LOCAL_KEYS.siteGrants);
+          const grants = (stored[LOCAL_KEYS.siteGrants] as Array<{ host: string; grantedAt: number }> | undefined) ?? [];
+          const known = new Set(grants.map((g) => g.host.toLowerCase()));
+          const now = Date.now();
+          for (const h of hosts) {
+            if (!known.has(h)) {
+              grants.push({ host: h, grantedAt: now });
+            }
+          }
+          await chrome.storage.local.set({ [LOCAL_KEYS.siteGrants]: grants });
+        } catch {
+          // 清单写入失败不影响已获得的浏览器权限
+        }
+      }
+    }
     const res = await send({ kind: 'data.import', data: backup });
     if (!(res.kind === 'data.import' && res.result.ok)) {
       alert(`导入失败：${res.kind === 'data.import' && !res.result.ok ? res.result.error : '无响应'}`);
       return;
     }
-    const { created, skipped, hosts } = res.result.data;
-    if (hosts.length) {
-      try {
-        // change 事件仍是用户手势链：一次性请求全部站点授权（单个浏览器弹窗）
-        await chrome.permissions.request({ origins: hosts.map((h) => `*://${h}/*`) });
-        const stored = await chrome.storage.local.get(LOCAL_KEYS.siteGrants);
-        const grants = (stored[LOCAL_KEYS.siteGrants] as Array<{ host: string; grantedAt: number }> | undefined) ?? [];
-        const known = new Set(grants.map((g) => g.host.toLowerCase()));
-        const now = Date.now();
-        for (const h of hosts) {
-          if (h && !known.has(h.toLowerCase())) {
-            grants.push({ host: h.toLowerCase(), grantedAt: now });
-          }
-        }
-        await chrome.storage.local.set({ [LOCAL_KEYS.siteGrants]: grants });
-        await send({ kind: 'par.grantChanged' });
-      } catch {
-        // 用户拒绝授权：站点可稍后在「添加授权」中单独补
-      }
-    }
-    alert(`导入完成：新建 ${created} 个账号，跳过 ${skipped} 个。`);
+    // 通知后台刷新授权健康缓存（无论授权成败——缓存需与实际权限对齐）
+    await send({ kind: 'par.grantChanged' });
+    const { created, skipped } = res.result.data;
+    alert(
+      `导入完成：新建 ${created} 个账号，跳过 ${skipped} 个。` +
+        (hosts.length && !granted ? `\n注意：站点授权未完成，账号将显示「未授权·已暂停」——请在「添加授权」中补授站点。` : ''),
+    );
     lastChipsKey = '';
     lastBoxOptions = '';
     lastListKey = '';

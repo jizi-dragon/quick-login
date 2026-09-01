@@ -415,7 +415,9 @@ export const parallelSession = {
   statusOf(account: ParallelAccount): { tabIds: number[]; hasToken: boolean; enforcementOff: boolean } {
     const tabs = boundTabsOf(account.id);
     const host = tabs.length ? bindings.get(tabs[0])?.host : account.siteHost;
-    const enforcementOff = host ? !enforcement.get(host) : true;
+    // 仅「明确缓存为 false」才判未授权；未知（缓存空/SW 冷启未暖）不得误报——
+    // v3.10.1 修复：导入后即使权限已授，缓存未暖也会显示「未授权·已暂停」
+    const enforcementOff = host ? enforcement.get(host) === false : true;
     return { tabIds: tabs, hasToken: Boolean(tokens.get(account.id)?.token), enforcementOff };
   },
 
