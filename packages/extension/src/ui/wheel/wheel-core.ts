@@ -28,7 +28,8 @@ const R_OUT = 240;
 const R_IN = 118;
 const R_ARC = 254;
 const GAP_DEG = 2;
-const DEFAULT_BOX = '默认盒子';
+/** 缺省盒子名（调用方可通过参数传入自定义名） */
+export const DEFAULT_BOX = '默认盒子';
 
 function polar(r: number, deg: number): { x: number; y: number } {
   const a = ((deg - 90) * Math.PI) / 180;
@@ -81,12 +82,15 @@ function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
-/** 按盒子分页（保持账号固有顺序；缺省归「默认盒子」） */
-export function groupPagesByBox(accounts: WheelAccount[]): { label: string; accounts: WheelAccount[] }[] {
+/** 按盒子分页（保持账号固有顺序；缺省归「默认盒子」，可自定义其显示名） */
+export function groupPagesByBox(
+  accounts: WheelAccount[],
+  defaultBoxName: string = DEFAULT_BOX,
+): { label: string; accounts: WheelAccount[] }[] {
   const pages: { label: string; accounts: WheelAccount[] }[] = [];
   const byName = new Map<string, WheelAccount[]>();
   for (const a of accounts) {
-    const name = a.box?.trim() || DEFAULT_BOX;
+    const name = a.box?.trim() || defaultBoxName;
     if (!byName.has(name)) {
       byName.set(name, []);
       pages.push({ label: name, accounts: byName.get(name)! });

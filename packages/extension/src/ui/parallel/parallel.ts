@@ -45,7 +45,10 @@ const boxModalCancel = document.getElementById('box-modal-cancel') as HTMLButton
 const PREFERRED_HOST = 'tonbridge-config.aksoegmp.com';
 const LAST_HOST_KEY = 'ql:lastParHost';
 const LAST_BOX_KEY = 'ql:lastParBox';
-const DEFAULT_BOX = '默认盒子';
+/** 默认盒子回退名（存储中可自定义，见 loadBoxes） */
+const DEFAULT_BOX_FALLBACK = '默认盒子';
+/** 默认盒子当前显示名（未归盒账号的归宿；可被用户重命名） */
+let defaultBox = DEFAULT_BOX_FALLBACK;
 
 /* ==================== 状态 ==================== */
 
@@ -53,7 +56,7 @@ let browserAccounts: BrowserAccount[] = [];
 let grantedHosts: string[] = [];
 let blockedHosts: string[] = [];
 /** 盒子清单（默认盒子恒在 + storage 记忆 + 账号实际归属） */
-let boxes: string[] = [DEFAULT_BOX];
+let boxes: string[] = [DEFAULT_BOX_FALLBACK];
 /** 当前盒子筛选：'全部' 或盒子名 */
 let currentBox: string = '全部';
 /** 批量模式与选中集 */
@@ -75,7 +78,7 @@ function setStat(id: string, value: string | number): void {
 }
 
 function boxOf(a: ParallelAccount): string {
-  return a.box?.trim() || DEFAULT_BOX;
+  return a.box?.trim() || defaultBox;
 }
 
 /* ==================== 加载与渲染（diff 防闪烁） ==================== */
@@ -93,8 +96,7 @@ async function loadBrowserAccounts(): Promise<void> {
     }
   }
 
-  const key = JSON.stringify(
-    browserAccounts.map((a) => [
+  const key = JSON.stringify([defaultBox, browserAccounts.map((a) => [
       a.id,
       a.tabName,
       a.username,
@@ -105,8 +107,7 @@ async function loadBrowserAccounts(): Promise<void> {
       a.hasToken,
       a.enforcementOff ?? false,
       a.box ?? '',
-    ]),
-  );
+    ])]);
   if (key !== lastListKey) {
     lastListKey = key;
     renderBrowserAccounts();
@@ -261,15 +262,16 @@ function renderBrowserAccounts(): void {
 /* ==================== 盒子 ==================== */
 
 async function loadBoxes(): Promise<void> {
-  const stored = await chrome.storage.local.get(LOCAL_KEYS.boxList);
+  const stored = await chrome.storage.local.get([LOCAL_KEYS.boxList, LOCAL_KEYS.defaultBox]);
   const remembered = (stored[LOCAL_KEYS.boxList] as string[] | undefined) ?? [];
+  defaultBox = ((stored[LOCAL_KEYS.defaultBox] as string | undefined) ?? '').trim() || DEFAULT_BOX_FALLBACK;
   const fromAccounts = browserAccounts.map((a) => boxOf(a));
-  boxes = [...new Set([DEFAULT_BOX, ...remembered, ...fromAccounts])];
+  boxes = [...new Set([defaultBox, ...remembered.filter((b) => b !== defaultBox), ...fromAccounts])];
   setStat('stat-boxes', boxes.length);
 }
 
 async function saveBoxes(): Promise<void> {
-  await chrome.storage.local.set({ [LOCAL_KEYS.boxList]: boxes.filter((b) => b !== DEFAULT_BOX) });
+  await chrome.storage.local.set({ [LOCAL_KEYS.boxList]: boxes.filter((b) => b !== defaultBox) });
 }
 
 function renderBoxChips(): void {
@@ -309,15 +311,19 @@ function renderBoxChips(): void {
     n.className = 'chip-n';
     n.textContent = String(countOf(name));
     chip.append(label, n);
-    if (name !== DEFAULT_BOX) {
-      const rename = document.createElement('span');
-      rename.className = 'chip-act';
-      rename.textContent = '✎';
+    const rename = document.createElement('span');
+    rename.className = 'chip-act';
+    rename.textContent = '✎';
+    rename.addEventListener('click', (e) => {
+      e.stopPropagation();
+      void renameBoxFlow(name);
+    });
+    if (name === defaultBox) {
+      rename.title = '修改默认盒子名称（未归盒账号的归宿）';
+      chip.append(rename);
+      chip.title = '默认盒子：未归盒账号的归宿，可重命名，不可删除';
+    } else {
       rename.title = '重命名盒子（盒内账号随迁）';
-      rename.addEventListener('click', (e) => {
-        e.stopPropagation();
-        void renameBoxFlow(name);
-      });
       const remove = document.createElement('span');
       remove.className = 'chip-act chip-act-del';
       remove.textContent = '✕';
@@ -327,8 +333,6 @@ function renderBoxChips(): void {
         void removeBoxFlow(name);
       });
       chip.append(rename, remove);
-    } else {
-      chip.title = '默认盒子：未归盒账号的归宿，不可删除或重命名';
     }
     chip.addEventListener('click', () => {
       currentBox = name;
@@ -365,11 +369,34 @@ async function createBox(): Promise<void> {
   fillBoxOptions();
 }
 
-/** 盒子重命名：账号随迁；目标名已存在 = 并入该盒子 */
+/** 盒子重命名：普通盒 = 账号随迁（目标名已存在则并入）；默认盒 = 仅改显示名（未归盒账号语义不变） */
 async function renameBoxFlow(from: string): Promise<void> {
-  const input = prompt(`重命名盒子「${from}」（盒内账号随迁）`, from);
+  const isDefault = from === defaultBox;
+  const input = prompt(
+    isDefault
+      ? `修改默认盒子名称（当前「${from}」）。未归盒账号将显示在新名称下。`
+      : `重命名盒子「${from}」（盒内账号随迁）`,
+    from,
+  );
   const to = input?.trim();
   if (!to || to === from) {
+    return;
+  }
+  if (isDefault) {
+    if (boxes.includes(to)) {
+      alert(`盒子「${to}」已存在，默认盒子不能与其它盒子重名。`);
+      return;
+    }
+    defaultBox = to;
+    await chrome.storage.local.set({ [LOCAL_KEYS.defaultBox]: to });
+    boxes = boxes.map((b) => (b === from ? to : b));
+    if (currentBox === from) {
+      currentBox = to;
+    }
+    lastChipsKey = '';
+    lastBoxOptions = '';
+    lastListKey = '';
+    await refreshAll();
     return;
   }
   if (boxes.includes(to) && !confirm(`盒子「${to}」已存在，将把「${from}」中的账号并入其中。继续？`)) {
@@ -391,11 +418,14 @@ async function renameBoxFlow(from: string): Promise<void> {
   await refreshAll();
 }
 
-/** 删除盒子：盒内账号回到默认盒子 */
+/** 删除盒子：盒内账号回到默认盒子（默认盒本身不可删除） */
 async function removeBoxFlow(name: string): Promise<void> {
+  if (name === defaultBox) {
+    return;
+  }
   const count = browserAccounts.filter((a) => boxOf(a) === name).length;
   const tip = count
-    ? `删除盒子「${name}」？其中 ${count} 个账号将回到「默认盒子」。`
+    ? `删除盒子「${name}」？其中 ${count} 个账号将回到「${defaultBox}」。`
     : `删除空盒子「${name}」？`;
   if (!confirm(tip)) {
     return;
@@ -470,7 +500,7 @@ selDelete.addEventListener('click', () => {
 /* ==================== 移入盒子：选择弹窗（列出实际存在的盒子 + 可输新名） ==================== */
 
 let pendingMoveIds: string[] = [];
-let modalPick = DEFAULT_BOX;
+let modalPick = DEFAULT_BOX_FALLBACK;
 
 function openBoxChooser(ids: string[]): void {
   if (!ids.length) {
@@ -478,7 +508,7 @@ function openBoxChooser(ids: string[]): void {
   }
   pendingMoveIds = ids;
   const first = browserAccounts.find((a) => a.id === ids[0]);
-  modalPick = currentBox !== '全部' ? currentBox : first ? boxOf(first) : DEFAULT_BOX;
+  modalPick = currentBox !== '全部' ? currentBox : first ? boxOf(first) : DEFAULT_BOX_FALLBACK;
   boxModalNew.value = '';
   renderBoxModalList();
   boxModal.classList.remove('hidden');
@@ -513,7 +543,7 @@ boxModalNew.addEventListener('input', () => {
     renderBoxModalList();
   } else {
     const first = browserAccounts.find((a) => a.id === pendingMoveIds[0]);
-    modalPick = currentBox !== '全部' ? currentBox : first ? boxOf(first) : DEFAULT_BOX;
+    modalPick = currentBox !== '全部' ? currentBox : first ? boxOf(first) : DEFAULT_BOX_FALLBACK;
     renderBoxModalList();
   }
 });
@@ -525,16 +555,17 @@ function hideBoxModal(): void {
 
 boxModalOk.addEventListener('click', () => {
   void (async () => {
-    const target = (boxModalNew.value.trim() || modalPick).trim() || DEFAULT_BOX;
+    const target = (boxModalNew.value.trim() || modalPick).trim() || defaultBox;
     const ids = [...pendingMoveIds];
     hideBoxModal();
     if (!ids.length) {
       return;
     }
     for (const id of ids) {
-      await send({ kind: 'par.moveBox', id, box: target });
+      // 移入默认盒 = 清除 box 字段（保持「未归盒 = 默认盒」不变量）
+      await send({ kind: 'par.moveBox', id, box: target === defaultBox ? '' : target });
     }
-    if (target !== DEFAULT_BOX && !boxes.includes(target)) {
+    if (target !== defaultBox && !boxes.includes(target)) {
       boxes.push(target);
       await saveBoxes();
       lastBoxOptions = '';
@@ -952,7 +983,7 @@ async function fillBoxOptions(): Promise<void> {
   }
   const stored = await chrome.storage.local.get(LAST_BOX_KEY);
   const last = stored[LAST_BOX_KEY] as string | undefined;
-  pBoxSelect.value = currentBox !== '全部' && boxes.includes(currentBox) ? currentBox : last && boxes.includes(last) ? last : DEFAULT_BOX;
+  pBoxSelect.value = currentBox !== '全部' && boxes.includes(currentBox) ? currentBox : last && boxes.includes(last) ? last : defaultBox;
 }
 
 /* ==================== 站点授权表单 ==================== */
@@ -978,9 +1009,10 @@ siteForm.addEventListener('submit', (e) => {
 /* ==================== 统一刷新（轮询与操作后共用；各渲染层自带 diff 防闪烁） ==================== */
 
 async function refreshAll(): Promise<void> {
+  // 先取盒子配置（含默认盒显示名），再渲染账号列表，避免首绘用回退名
+  await loadBoxes();
   await loadBrowserAccounts();
   await loadSites();
-  await loadBoxes();
   renderBoxChips();
   await fillSiteOptions();
   await fillBoxOptions();

@@ -7,7 +7,7 @@
  * 交互：悬停高亮 → 点击切换；Esc / 再次快捷键 / 点击遮罩关闭。无任何窗口控制元素。
  */
 import { LOCAL_KEYS } from '../shared/constants';
-import { buildSectorWheel, groupPagesByBox, type WheelAccount } from '../ui/wheel/wheel-core';
+import { DEFAULT_BOX, buildSectorWheel, groupPagesByBox, type WheelAccount } from '../ui/wheel/wheel-core';
 
 const WIN = window as typeof window & { __QL_WHEEL_ACTIVE__?: boolean };
 const PARALLEL_PAGE = chrome.runtime.getURL('ui/parallel/parallel.html');
@@ -39,17 +39,21 @@ async function fetchAccounts(): Promise<WheelAccount[]> {
 
 /** 轮盘分页 = 账号归属盒子 + 管理页记忆的空盒子（修复「新建空盒子切换不到」） */
 async function fetchPages(): Promise<{ label: string; accounts: WheelAccount[] }[]> {
-  const [accounts, remembered] = await Promise.all([
+  const [accounts, remembered, defaultBoxStore] = await Promise.all([
     fetchAccounts(),
     chrome.storage.local
       .get(LOCAL_KEYS.boxList)
       .then((s) => (s[LOCAL_KEYS.boxList] as string[] | undefined) ?? [])
       .catch(() => [] as string[]),
+    chrome.storage.local
+      .get(LOCAL_KEYS.defaultBox)
+      .then((s) => (s[LOCAL_KEYS.defaultBox] as string | undefined)?.trim() ?? '')
+      .catch(() => ''),
   ]);
-  const pages = groupPagesByBox(accounts);
+  const pages = groupPagesByBox(accounts, defaultBoxStore || DEFAULT_BOX);
   const seen = new Set(pages.map((p) => p.label));
   for (const name of remembered) {
-    if (!seen.has(name)) {
+    if (!seen.has(name) && name !== defaultBoxStore) {
       pages.push({ label: name, accounts: [] });
     }
   }

@@ -6,7 +6,7 @@
  * 中心翻页：滚轮 / 点击 Hub 循环切换盒子，单环显示当前盒子的账号。
  */
 import { LOCAL_KEYS } from '../../shared/constants';
-import { buildSectorWheel, groupPagesByBox, type WheelAccount } from './wheel-core';
+import { DEFAULT_BOX, buildSectorWheel, groupPagesByBox, type WheelAccount } from './wheel-core';
 
 const wheelEl = document.getElementById('wheel') as HTMLDivElement;
 const PARALLEL_PAGE = chrome.runtime.getURL('ui/parallel/parallel.html');
@@ -39,17 +39,21 @@ async function fetchAccounts(): Promise<WheelAccount[]> {
  * 修复：新建的空盒子此前不会出现在轮盘里，导致「切换不到」。
  */
 async function fetchPages(): Promise<{ label: string; accounts: WheelAccount[] }[]> {
-  const [accounts, remembered] = await Promise.all([
+  const [accounts, remembered, defaultBoxStore] = await Promise.all([
     fetchAccounts(),
     chrome.storage.local
       .get(LOCAL_KEYS.boxList)
       .then((s) => (s[LOCAL_KEYS.boxList] as string[] | undefined) ?? [])
       .catch(() => [] as string[]),
+    chrome.storage.local
+      .get(LOCAL_KEYS.defaultBox)
+      .then((s) => (s[LOCAL_KEYS.defaultBox] as string | undefined)?.trim() ?? '')
+      .catch(() => ''),
   ]);
-  const pages = groupPagesByBox(accounts);
+  const pages = groupPagesByBox(accounts, defaultBoxStore || DEFAULT_BOX);
   const seen = new Set(pages.map((p) => p.label));
   for (const name of remembered) {
-    if (!seen.has(name)) {
+    if (!seen.has(name) && name !== defaultBoxStore) {
       pages.push({ label: name, accounts: [] });
     }
   }
