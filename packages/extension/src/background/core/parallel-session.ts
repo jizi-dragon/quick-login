@@ -17,6 +17,8 @@ import { tabRules } from './tab-rules';
 interface ParBinding {
   accountId: string;
   host: string;
+  /** 亲子继承页签（v3.9.6 window.open/_blank）——进入登录页时自动转原始页签（v3.10.4） */
+  adopted?: boolean;
 }
 
 interface TokenSnapshot {
@@ -172,13 +174,15 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
   if (snap.token === token) {
     return; // 去重
   }
-  // 异账号护栏（v3.10.3）：绑定页签内登录了另一个账号（JWT 身份主体不同）→ 不更新本账号
-  // 快照（authHeader 嗅探通道同样拦截），由 storageWrite 通道的叛逃处置统一接管
+  // 异账号护栏（v3.10.3/3.10.4）：绑定页签内登录了另一个账号 → 不更新本账号
+  // 快照（authHeader 嗅探通道同样拦截），由 storageWrite 通道的叛逃处置统一接管。
+  // v3.10.4：改用「剥离时效字段后的整个 payload」比对——不依赖具体 claim 名
+  //（真实平台 token 的身份字段名各异，逐 claim 提取会全部落空导致护栏失效）
   if (snap.token) {
-    const oldId = jwtIdentity(snap.token);
-    const newId = jwtIdentity(token);
+    const oldId = jwtStableIdentity(snap.token);
+    const newId = jwtStableIdentity(token);
     if (oldId && newId && oldId !== newId) {
-      void diag(`captureToken(${accountId}) 拦截异账号 token（${oldId} → ${newId}）`);
+      void diag(`captureToken(${accountId}) 拦截异账号 token（身份主体变更）`);
       return;
     }
   }
@@ -205,8 +209,10 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
  * 重载），B 的会话走真实 jar 天然成立；账号 A 的快照与其它页签零污染。
  */
 
-/** 提取 JWT 载荷中的身份主体（uid/sub/username 等常见 claim），不可解码返回 null */
-function jwtIdentity(token: string): string | null {
+/** 解码 JWT 载荷并剥离时效性字段（exp/iat/nbf/jti/sid 等），返回稳定载荷的规范化串。
+ *  与 jwtIdentity 的逐 claim 提取不同，本函数不依赖任何具体字段名——
+ *  同一账号的 token 轮换（仅时效字段变化）稳定载荷相同，异账号必然不同。 */
+function jwtStableIdentity(token: string): string | null {
   try {
     const part = token.split('.')[1];
     if (!part) {
@@ -215,19 +221,32 @@ function jwtIdentity(token: string): string | null {
     const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
     const json = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4));
     const claims = JSON.parse(json) as Record<string, unknown>;
-    for (const key of ['sub', 'uid', 'userId', 'user_id', 'username', 'loginName', 'account', 'mobile', 'phone', 'email']) {
-      const v = claims[key];
-      if (typeof v === 'string' && v) {
-        return v;
-      }
-      if (typeof v === 'number') {
-        return String(v);
+    if (typeof claims !== 'object' || claims === null) {
+      return null;
+    }
+    const VOLATILE = new Set(['exp', 'iat', 'nbf', 'jti', 'sid', 'auth_time', 'loginTime', 'timestamp', 'nonce']);
+    const stable: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(claims)) {
+      if (!VOLATILE.has(k)) {
+        stable[k] = v;
       }
     }
-    return null;
+    return sortedStringify(stable);
   } catch {
     return null;
   }
+}
+
+/** 键序无关的规范化序列化（载荷键序因签发实现而异，需消除其影响） */
+function sortedStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => sortedStringify(v)).join(',')}]`;
+  }
+  if (typeof value === 'object' && value !== null) {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${sortedStringify(obj[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 /** 提取 __auth_user__ 值中的用户名主体；不可解析时返回原文（两侧同法提取，可稳定比较） */
@@ -532,7 +551,7 @@ export const parallelSession = {
     if (!tokens.get(account.id)?.token) {
       await capturePreJar(account.id, parent.host);
     }
-    bindings.set(tabId, { accountId: account.id, host: parent.host });
+    bindings.set(tabId, { accountId: account.id, host: parent.host, adopted: true });
     await persistBindings();
     await syncAccountRules(account.id, parent.host);
     await pushBind(tabId);
@@ -586,12 +605,12 @@ export const parallelSession = {
           snap.token &&
           payload.value !== snap.token &&
           (() => {
-            const a = jwtIdentity(snap.token!);
-            const b = jwtIdentity(payload.value!);
+            const a = jwtStableIdentity(snap.token!);
+            const b = jwtStableIdentity(payload.value!);
             return a !== null && b !== null && a !== b;
           })()
         ) {
-          // 身份叛逃：绑定页签被用户用于登录另一个账号（JWT 身份主体不同）
+          // 身份叛逃：绑定页签被用户用于登录另一个账号（稳定载荷不同）
           await defectTabToRaw(tabId!, binding.accountId, binding.host, 'token 主体变更');
           return undefined;
         } else {
@@ -683,6 +702,23 @@ export const parallelSession = {
         void diag(`onNavigation 非授权域 ${host}：解除 tab=${tabId} 绑定`);
         await this.unbindTab(tabId);
         return;
+      }
+      // 继承页签进入登录页（v3.10.4）：用户把它当独立浏览器用了——在输入账密之前
+      // 转回原始页签（解绑+重载），B 的登录从原生状态开始，与账号 A 互不干扰。
+      // 仅限亲子继承页签；账号自己的页签会话过期重登不受影响。
+      if (binding.adopted) {
+        let path = '';
+        try {
+          path = new URL(url).pathname.toLowerCase();
+        } catch {
+          path = '';
+        }
+        if (path.includes('login')) {
+          void diag(`onNavigation 继承页签 tab=${tabId} 进入登录页 ${path}：转原始页签`);
+          await this.unbindTab(tabId);
+          void chrome.tabs.reload(tabId).catch(() => undefined);
+          return;
+        }
       }
     }
     const account = await parallelStore.get(binding.accountId).catch(() => undefined);
