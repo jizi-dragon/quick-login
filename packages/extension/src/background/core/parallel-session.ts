@@ -172,6 +172,16 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
   if (snap.token === token) {
     return; // 去重
   }
+  // 异账号护栏（v3.10.3）：绑定页签内登录了另一个账号（JWT 身份主体不同）→ 不更新本账号
+  // 快照（authHeader 嗅探通道同样拦截），由 storageWrite 通道的叛逃处置统一接管
+  if (snap.token) {
+    const oldId = jwtIdentity(snap.token);
+    const newId = jwtIdentity(token);
+    if (oldId && newId && oldId !== newId) {
+      void diag(`captureToken(${accountId}) 拦截异账号 token（${oldId} → ${newId}）`);
+      return;
+    }
+  }
   const isFirstCapture = !snap.token; // 首次捕获 = 登录刚完成：此刻真实 jar 即该账号会话
   snap.token = token;
   tokens.set(accountId, snap);
@@ -182,6 +192,88 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
     await snapshotLoginCookies(accountId, host);
   }
   await syncAccountRules(accountId, host);
+}
+
+/* ---------------- 身份叛逃检测与处置（v3.10.3） ----------------
+ * 场景：用户在轮盘登录账号 A（绑定页签），随后新开页签（低代码平台 window.open 或
+ * target=_blank 带 opener → 被 v3.9.6 亲子继承绑定为 A）手输网址登录账号 B——
+ * B 的登录发生在 A 的绑定/命名空间内：token/user 写进 A 的命名空间（持久化，关页签
+ * 不清），captureToken 还会把 A 的快照 token 换成 B 的 → 双向身份污染（A 页显示 B 的
+ * 名字/A 的权限等乱象），且关光页签重开也无法恢复。
+ * 原则（与 3.10.2 一致）：原始登录与快速登录互不冲突——用户在页签里登录了别的账号，
+ * 说明该页签被用户「征用」为原始浏览器：转为原始页签（回滚其命名空间写入 → 解绑 →
+ * 重载），B 的会话走真实 jar 天然成立；账号 A 的快照与其它页签零污染。
+ */
+
+/** 提取 JWT 载荷中的身份主体（uid/sub/username 等常见 claim），不可解码返回 null */
+function jwtIdentity(token: string): string | null {
+  try {
+    const part = token.split('.')[1];
+    if (!part) {
+      return null;
+    }
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    const json = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4));
+    const claims = JSON.parse(json) as Record<string, unknown>;
+    for (const key of ['sub', 'uid', 'userId', 'user_id', 'username', 'loginName', 'account', 'mobile', 'phone', 'email']) {
+      const v = claims[key];
+      if (typeof v === 'string' && v) {
+        return v;
+      }
+      if (typeof v === 'number') {
+        return String(v);
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 提取 __auth_user__ 值中的用户名主体；不可解析时返回原文（两侧同法提取，可稳定比较） */
+function authUserIdentity(value: string): string {
+  try {
+    const obj = JSON.parse(value) as Record<string, unknown>;
+    for (const key of ['username', 'userName', 'loginName', 'account', 'name', 'mobile', 'phone', 'email', 'uid', 'userId', 'id']) {
+      const v = obj[key];
+      if (typeof v === 'string' && v) {
+        return v;
+      }
+      if (typeof v === 'number') {
+        return String(v);
+      }
+    }
+    return value;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * 身份叛逃处置：把「被用户用于登录另一账号」的绑定页签转回原始页签。
+ * 1. 回滚该页签本页会话对命名空间的全部写入（journalRollback，含 Cookie 袋）；
+ * 2. 清扫该账号命名空间的 IDB/CacheStorage（叛逃会话写入的他人缓存）；
+ * 3. 治愈账号快照（清除可能被叛逃写入的 authUser；token 由护栏保证未被替换）；
+ * 4. 给该账号其余绑定页签重灌种子（覆盖种子键，防御性）；
+ * 5. 解绑 + 重载 → 页签成为原始页签，B 的会话在真实 jar 中原生成立。
+ */
+async function defectTabToRaw(tabId: number, accountId: string, host: string, reason: string): Promise<void> {
+  void diag(`defect(${tabId}) 账号=${accountId} @${host} 身份叛逃（${reason}）→ 转为原始页签`);
+  await pushDown(tabId, { op: 'journalRollback' });
+  await pushDown(tabId, { op: 'nsWipeShared' });
+  const snap = tokens.get(accountId);
+  if (snap) {
+    delete snap.authUser;
+    tokens.set(accountId, snap);
+    await persistTokens();
+  }
+  for (const other of boundTabsOf(accountId)) {
+    if (other !== tabId) {
+      await pushBind(other); // 防御性重灌：种子键恢复为本账号值
+    }
+  }
+  await parallelSession.unbindTab(tabId);
+  void chrome.tabs.reload(tabId).catch(() => undefined);
 }
 
 /**
@@ -358,6 +450,16 @@ export const parallelSession = {
       // 登录前基线：记录打开时刻的真实 jar，快照首捕时按差集清扫（v3.10.2 会话卫生）
       await capturePreJar(account.id, account.siteHost);
       const hasToken = Boolean(tokens.get(accountId)?.token);
+      if (hasToken) {
+        // 打开即愈（v3.10.3）：authUser 是页面写入的派生状态——历史污染（或叛逃残留）
+        // 的用户身份在每次免密直达时清零，种子同步清空命名空间键，由页面鉴权后重写
+        const snap = tokens.get(accountId);
+        if (snap?.authUser) {
+          delete snap.authUser;
+          tokens.set(accountId, snap);
+          await persistTokens();
+        }
+      }
       // 已有登录态直达站点根路径；否则进登录页自动填表
       const url = `https://${account.siteHost}${hasToken ? '/' : '/login'}`;
       const tab = await chrome.tabs.create({ url });
@@ -480,11 +582,36 @@ export const parallelSession = {
           tokens.set(binding.accountId, snap);
           await persistTokens();
           await syncAccountRules(binding.accountId, binding.host);
+        } else if (
+          snap.token &&
+          payload.value !== snap.token &&
+          (() => {
+            const a = jwtIdentity(snap.token!);
+            const b = jwtIdentity(payload.value!);
+            return a !== null && b !== null && a !== b;
+          })()
+        ) {
+          // 身份叛逃：绑定页签被用户用于登录另一个账号（JWT 身份主体不同）
+          await defectTabToRaw(tabId!, binding.accountId, binding.host, 'token 主体变更');
+          return undefined;
         } else {
           await captureToken(binding.accountId, binding.host, payload.value);
           // 快照触发已内聚到 captureToken（首捕可能来自 authHeader 嗅探通道）
         }
       } else if (payload.key === '__auth_user__') {
+        if (
+          payload.value !== null &&
+          snap.authUser &&
+          (() => {
+            const a = authUserIdentity(snap.authUser!);
+            const b = authUserIdentity(payload.value!);
+            return a !== b;
+          })()
+        ) {
+          // 身份叛逃（用户信息主体变更；user 写入可能先于 token 写入到达）
+          await defectTabToRaw(tabId!, binding.accountId, binding.host, '用户主体变更');
+          return undefined;
+        }
         snap.authUser = payload.value ?? undefined;
         tokens.set(binding.accountId, snap);
         await persistTokens();
@@ -529,6 +656,7 @@ export const parallelSession = {
     return {
       bindings: Array.from(bindings.entries()).map(([t, b]) => ({ t, accountId: b.accountId, host: b.host })),
       tokenAccounts: Array.from(tokens.keys()),
+      tokens: Array.from(tokens.entries()).map(([id, t]) => ({ id, hasToken: Boolean(t.token), authUser: t.authUser ?? null })),
       enforcement: Array.from(enforcement.entries()).map(([h, ok]) => `${h}=${ok}`),
     };
   },
@@ -600,16 +728,15 @@ async function tabStillAlive(tabId: number): Promise<boolean> {
   }
 }
 
-/** 构造带种子快照的绑定载荷（hello 应答与主动推送共用） */
+/** 构造带种子快照的绑定载荷（hello 应答与主动推送共用）。
+ *  authUser 恒输出：有值写值、无值输出 ''（种子空值 = 壳显式清除命名空间残留键） */
 function buildBindPayload(accountId: string, tabId?: number): BridgeDownPayload {
   const snap = tokens.get(accountId);
   const seed: Record<string, string> = {};
   if (snap?.token) {
     seed['__auth_token__'] = snap.token;
   }
-  if (snap?.authUser) {
-    seed['__auth_user__'] = snap.authUser;
-  }
+  seed['__auth_user__'] = snap?.authUser ?? '';
   if (snap?.deviceFp) {
     seed['__device_fp__'] = snap.deviceFp;
   }

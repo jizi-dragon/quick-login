@@ -65,11 +65,16 @@ export interface ParallelAccountStatus {
 export type BridgeUpPayload =
   | { op: 'hello'; url: string }
   | { op: 'storageWrite'; key: string; value: string | null }
-  | { op: 'authHeader'; value: string };
+  | { op: 'authHeader'; value: string }
+  | { op: 'journalRollbackDone' };
 
 /** background → ISOLATED 桥的下行载荷 */
 export type BridgeDownPayload =
   /** 绑定账号并附带初始快照种子（token 等，用于壳激活瞬间同步灌入命名空间）；
    *  tabId 供壳做页面层缓存分区（_qlck=t<tabId>，DNR urlTransform Chrome 不支持） */
   | { op: 'bind'; accountId: string; tabId?: number; seed?: Record<string, string> }
-  | { op: 'unbound' };
+  | { op: 'unbound' }
+  /** 身份叛逃处置：回滚本页会话对命名空间的全部写入（含 Cookie 袋），恢复到页签打开前状态 */
+  | { op: 'journalRollback' }
+  /** 清扫本账号命名空间的 IDB / CacheStorage 共享缓存（叛逃页签写入的他人数据） */
+  | { op: 'nsWipeShared' };

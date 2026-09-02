@@ -74,6 +74,7 @@
 
   function saveBag(): void {
     try {
+      journalWrite(window.localStorage, ns + COOKIE_BAG_KEY);
       origSetItem.call(window.localStorage, ns + COOKIE_BAG_KEY, JSON.stringify(loadBag()));
     } catch {
       // 存储满等极端场景忽略；袋与 LS 短暂不一致优于崩溃
@@ -137,6 +138,85 @@
       { src: SRC_PAGE_TO_BRIDGE, payload: { op: 'storageWrite', key, value } },
       '*',
     );
+  }
+
+  /* ---- 写入日志（身份叛逃回滚的依据，v3.10.3） ----
+   * 绑定页签若被用户用于登录另一个账号（低代码平台「新开页签手输网址」场景），
+   * 叛逃会话的写入会污染共享命名空间（token/user/缓存 → 其它同账号页签读错身份）。
+   * 本日志记录「本页会话对命名空间的每一次写入前的原始值」，回滚时逐键恢复，
+   * 使命名空间回到页签打开前的状态——叛逃页签转为原始页签，账号数据零污染。 */
+
+  const journal = new Map<string, string | null>(); // rawKey → 写入前的原始值（null = 原不存在）
+  let journalFrozen = false; // 回滚后冻结（页签即将重载）
+
+  function journalWrite(storage: Storage, rawKey: string): void {
+    if (journalFrozen || journal.has(rawKey)) {
+      return; // 只记首次：保留「页签打开前」的原始状态
+    }
+    try {
+      journal.set(rawKey, origGetItem.call(storage, rawKey));
+    } catch {
+      // 读失败不阻断写入
+    }
+  }
+
+  function journalRollback(): void {
+    if (journalFrozen) {
+      return;
+    }
+    journalFrozen = true;
+    try {
+      for (const [rawKey, prev] of journal) {
+        try {
+          if (prev === null) {
+            origRemoveItem.call(window.localStorage, rawKey);
+          } else {
+            origSetItem.call(window.localStorage, rawKey, prev);
+          }
+        } catch {
+          // 单键失败不阻断其余回滚
+        }
+      }
+    } finally {
+      journal.clear();
+      bag = null; // 袋内存缓存作废，下次读取从已恢复的存储重载
+      window.postMessage(
+        { src: SRC_PAGE_TO_BRIDGE, payload: { op: 'journalRollbackDone' } },
+        '*',
+      );
+    }
+  }
+
+  /** 清扫本账号命名空间的 IDB 库与 CacheStorage 缓存（叛逃会话写入的他人数据） */
+  async function nsWipeShared(): Promise<void> {
+    try {
+      if (typeof indexedDB?.databases === 'function') {
+        const dbs = (await indexedDB.databases()) ?? [];
+        for (const info of dbs) {
+          if (typeof info.name === 'string' && info.name.startsWith(ns)) {
+            try {
+              indexedDB.deleteDatabase(info.name);
+            } catch {
+              // 单库失败不阻断
+            }
+          }
+        }
+      }
+      if (typeof caches !== 'undefined' && typeof caches.keys === 'function') {
+        const names = await caches.keys();
+        for (const name of names) {
+          if (name.startsWith(ns)) {
+            try {
+              await caches.delete(name);
+            } catch {
+              // 单缓存失败不阻断
+            }
+          }
+        }
+      }
+    } catch {
+      // 清扫失败不阻断叛逃处置
+    }
   }
 
   function reportAuthHeader(value: string): void {
@@ -303,6 +383,7 @@
         const bare = String(key);
         const raw = ns + bare;
         const val = String(value);
+        journalWrite(this, raw);
         origSetItem.call(this, raw, val);
         onNamespaceWrite(this, bare, raw, val);
       },
@@ -313,6 +394,7 @@
       value: function (this: Storage, key: string): void {
         const bare = String(key);
         const raw = ns + bare;
+        journalWrite(this, raw);
         origRemoveItem.call(this, raw);
         onNamespaceWrite(this, bare, raw, null);
       },
@@ -543,16 +625,29 @@
     applySeed(seed);
   }
 
-  /** 种子直灌：不经补丁层静默写入命名空间（并同步 token 进 Cookie 袋） */
+  /** 种子直灌：不经补丁层静默写入命名空间（并同步 token 进 Cookie 袋）。
+   *  值为空字符串 = 显式清除该键（打开时清掉可能被叛逃会话污染的持久化身份键） */
   function applySeed(seed?: Record<string, string>): void {
     if (!seed) {
       return;
     }
     for (const [key, value] of Object.entries(seed)) {
-      if (typeof value !== 'string' || !value) {
+      if (typeof value !== 'string') {
         continue;
       }
       try {
+        if (value === '') {
+          journalWrite(window.localStorage, ns + key);
+          origRemoveItem.call(window.localStorage, ns + key);
+          if (key === TOKEN_KEY) {
+            bagSet(TOKEN_KEY, '');
+          }
+          continue;
+        }
+        if (!value) {
+          continue;
+        }
+        journalWrite(window.localStorage, ns + key);
         origSetItem.call(window.localStorage, ns + key, value);
         if (key === TOKEN_KEY) {
           bagSet(TOKEN_KEY, value);
@@ -568,8 +663,12 @@
       tabIdForCache = tabId;
     }
     if (settled) {
-      // 已绑定其它路径：仍允许把种子补进当前命名空间（幂等）
-      applySeed(seed);
+      if (mode === 'active') {
+        // 已激活：幂等重灌种子（覆盖命名空间键，防御性）
+        applySeed(seed);
+      }
+      // passthrough（已判 unbound）收到迟到的旧 bind 应答：必须忽略——
+      // 此时 ns 未定，灌种子会把账号身份写进真实裸层（原始页签泄漏账号会话）
       return;
     }
     settled = true;
@@ -606,6 +705,10 @@
       handleBind(payload.accountId, payload.seed, typeof payload.tabId === 'number' ? payload.tabId : undefined);
     } else if (payload && payload.op === 'unbound') {
       settled = true; // 显式未绑定：保持直通，不再等待
+    } else if (payload && payload.op === 'journalRollback') {
+      journalRollback(); // 身份叛逃处置：恢复命名空间到页签打开前
+    } else if (payload && payload.op === 'nsWipeShared') {
+      void nsWipeShared();
     }
   });
 
