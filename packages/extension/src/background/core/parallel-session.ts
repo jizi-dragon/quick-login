@@ -192,6 +192,95 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
  */
 const IDENTITY_COOKIE_BLACKLIST = new Set(['__auth_token__', '__auth_user__', '__device_fp__']);
 
+/* ---------------- 会话卫生（v3.10.2）：真实 jar 永不留存扩展账号的会话 Cookie ----------------
+ * 冲突机制：绑定页签登录时响应 Set-Cookie 不经拦截直接落入真实 jar；此后用户 Ctrl+T 的
+ * 原始页签出站时带着的就是扩展账号的会话 Cookie——站点按会话轮换逻辑「新登录作废旧会话」，
+ * 快速登录的账号被顶掉（原始登录与快速登录互相冲突）。
+ * 对策：扩展账号页签完全依赖快照回放（与真实 jar 无关），因此 jar 中的扩展会话 Cookie 可
+ * 安全移除——原始页签从此天然匿名，原始登录 = 全新会话，互不顶号。
+ * 三层防线：
+ *  1. preJar 基线：open() 建页签前记录 jar；
+ *  2. 差集清扫：快照首捕时移除「本次登录新写入」的 Cookie（不动登录前已存在的，如原始会话）；
+ *  3. onChanged 持续驱逐：凡是 (name,value) 命中任一账号快照对（或 __auth_token__ 命中任一
+ *     账号 token）的写 jar 行为，立即移除——覆盖后续请求重新 Set-Cookie 的重入。
+ */
+
+interface JarCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  secure: boolean;
+}
+
+/** 登录前 jar 基线（按账号；SW 重启丢失则跳过清扫，保守不误杀） */
+const preJarMap = new Map<string, JarCookie[]>();
+
+async function capturePreJar(accountId: string, host: string): Promise<void> {
+  try {
+    preJarMap.set(accountId, (await chrome.cookies.getAll({ url: `https://${host}/` })) as JarCookie[]);
+  } catch {
+    preJarMap.delete(accountId);
+  }
+}
+
+function cookieUrl(c: { domain: string; path: string; secure: boolean }): string {
+  const host = c.domain.startsWith('.') ? c.domain.slice(1) : c.domain;
+  return `${c.secure ? 'https' : 'http'}://${host}${c.path || '/'}`;
+}
+
+/** 从真实 jar 移除一枚 Cookie（幂等；失败静默——可能已被站点的过期指令处理） */
+async function removeJarCookie(c: { name: string; domain: string; path: string; secure: boolean }): Promise<void> {
+  try {
+    await chrome.cookies.remove({ url: cookieUrl(c), name: c.name });
+  } catch {
+    // 幂等目标，失败忽略
+  }
+}
+
+/** 快照首捕后按差集清扫：只移除「本次登录新写入」的 Cookie，保留登录前已存在的（如原始会话） */
+async function sweepLoginCookiesFromJar(accountId: string, host: string, captured: Array<{ name: string; value: string }>): Promise<void> {
+  const pre = preJarMap.get(accountId);
+  if (!pre) {
+    void diag(`sweep(${accountId}) 跳过：无登录前基线（SW 重启）——依赖 onChanged 驱逐兜底`);
+    return;
+  }
+  const preKeys = new Set(pre.map((c) => `${c.name}|${c.value}`));
+  const jarNow = (await chrome.cookies.getAll({ url: `https://${host}/` }).catch(() => [])) as JarCookie[];
+  let removed = 0;
+  for (const c of jarNow) {
+    // 差集成员：在 jar 中、被快照捕获、但登录前不存在 → 本会话写入的扩展 Cookie
+    if (!preKeys.has(`${c.name}|${c.value}`) && captured.some((k) => k.name === c.name && k.value === c.value)) {
+      await removeJarCookie(c);
+      removed++;
+    }
+  }
+  preJarMap.delete(accountId);
+  void diag(`sweep(${accountId}) 差集清扫 ${removed} 枚（jar 现存 ${jarNow.length}）`);
+}
+
+/** onChanged 持续驱逐：命中任一账号快照对（或身份 token）的写 jar 行为立即移除 */
+async function evictJarCookie(change: chrome.cookies.CookieChangeInfo): Promise<void> {
+  const c = change.cookie;
+  if (!c.value) {
+    return; // 移除事件本身
+  }
+  const known = new Set<string>();
+  for (const snap of tokens.values()) {
+    for (const k of snap.cookies ?? []) {
+      known.add(`${k.name}|${k.value}`);
+    }
+    if (snap.token) {
+      known.add(`__auth_token__|${snap.token}`);
+    }
+  }
+  if (!known.has(`${c.name}|${c.value}`)) {
+    return;
+  }
+  await removeJarCookie(c);
+  void diag(`evict jar cookie ${c.name}（命中账号快照）@ ${c.domain}`);
+}
+
 /** 登录时点快照该账号的站内 Cookie（含 HttpOnly，剔除身份类黑名单）进账号档案 */
 async function snapshotLoginCookies(accountId: string, host: string): Promise<void> {
   const snap = tokens.get(accountId);
@@ -207,6 +296,8 @@ async function snapshotLoginCookies(accountId: string, host: string): Promise<vo
     tokens.set(accountId, snap);
     await persistTokens();
     void diag(`snapshotLoginCookies(${accountId}) 快照 ${snap.cookies.length} 条（jar 共 ${before}，剔身份类 ${before - snap.cookies.length}）`);
+    // 会话卫生：把本次登录写入真实 jar 的差集 Cookie 移除（原始页签从此匿名登录，不顶号）
+    await sweepLoginCookiesFromJar(accountId, host, snap.cookies);
   } catch (e) {
     void diag(`snapshotLoginCookies(${accountId}) 失败：${e instanceof Error ? e.message : String(e)}`);
   }
@@ -264,6 +355,8 @@ export const parallelSession = {
     }
 
     if (tabId === null) {
+      // 登录前基线：记录打开时刻的真实 jar，快照首捕时按差集清扫（v3.10.2 会话卫生）
+      await capturePreJar(account.id, account.siteHost);
       const hasToken = Boolean(tokens.get(accountId)?.token);
       // 已有登录态直达站点根路径；否则进登录页自动填表
       const url = `https://${account.siteHost}${hasToken ? '/' : '/login'}`;
@@ -332,6 +425,10 @@ export const parallelSession = {
     const account = await parallelStore.get(parent.accountId).catch(() => undefined);
     if (!account) {
       return;
+    }
+    // 弹窗继承页签的登录若发生在绑定之后，其 Set-Cookie 属于差集，可被清扫（best-effort 基线）
+    if (!tokens.get(account.id)?.token) {
+      await capturePreJar(account.id, parent.host);
     }
     bindings.set(tabId, { accountId: account.id, host: parent.host });
     await persistBindings();
@@ -558,6 +655,11 @@ export function registerParallelHandlers(): void {
     if (changeInfo.status === 'loading') {
       void parallelSession.onNavigation(tabId);
     }
+  });
+
+  // 会话卫生：持续驱逐重入真实 jar 的扩展账号 Cookie（v3.10.2）
+  chrome.cookies.onChanged.addListener((change) => {
+    void evictJarCookie(change);
   });
 
   void cleanupStaleBindings();
