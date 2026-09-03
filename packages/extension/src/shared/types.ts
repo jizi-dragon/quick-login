@@ -66,7 +66,11 @@ export type BridgeUpPayload =
   | { op: 'hello'; url: string }
   | { op: 'storageWrite'; key: string; value: string | null }
   | { op: 'authHeader'; value: string }
-  | { op: 'journalRollbackDone' };
+  | { op: 'journalRollbackDone' }
+  /** 页内 document.cookie 写入的 Cookie 袋全量视图（v3.10.6 袋→快照回流）：
+   *  绑定页签的 Cookie 写入被 MAIN 壳虚拟化进袋子，永不落真实 jar——服务端登录后
+   *  由页内 JS 写入的票据/凭据若不回流快照，网络平面回放永远缺失 */
+  | { op: 'bagChanged'; bag: Record<string, string> };
 
 /** background → ISOLATED 桥的下行载荷 */
 export type BridgeDownPayload =

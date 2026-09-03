@@ -3,7 +3,7 @@ import type { BridgeDownPayload, BridgeUpPayload, ParallelAccount } from '../../
 import { credentials } from './credentials';
 import { setTabTitle } from '../tabs/tab-title';
 import { parallelStore } from './parallel-store';
-import { tabRules } from './tab-rules';
+import { tabRules, parentDomainOf, hostNoPortOf } from './tab-rules';
 
 /**
  * 「多平面隔离」运行时编排（纯扩展多账号并行，见 docs/BROWSER-ONLY-MULTILOGIN-RESEARCH.md §4）：
@@ -38,6 +38,8 @@ const bindings = new Map<number, ParBinding>();
 const tokens = new Map<string, TokenSnapshot>();
 /** 授权健康缓存：host → 是否可执行（已授权且未被手动停用） */
 const enforcement = new Map<string, boolean>();
+/** MAIN 壳 Cookie 袋的命名空间键名（与 shield-main.ts 的 COOKIE_BAG_KEY 一致） */
+const COOKIE_BAG_KEY = '__ql_cookies__';
 
 /** 诊断埋点：写入 storage.local['ql:diag']（环形 60 条），供 E2E 台架经扩展页读取 */
 async function diag(msg: string): Promise<void> {
@@ -392,7 +394,8 @@ async function evictJarCookie(change: chrome.cookies.CookieChangeInfo): Promise<
   void diag(`evict jar cookie ${c.name}（命中账号快照）@ ${c.domain}`);
 }
 
-/** 登录时点快照该账号的站内 Cookie（含 HttpOnly，剔除身份类黑名单）进账号档案 */
+/** 登录时点快照该账号的站内 Cookie（含 HttpOnly，剔除身份类黑名单）进账号档案。
+ *  v3.10.6：与登录前暂存的页内袋值合并（页内 JS 在 token 捕获前写入的 Cookie 不丢）。 */
 async function snapshotLoginCookies(accountId: string, host: string): Promise<void> {
   const snap = tokens.get(accountId);
   if (!snap?.token) {
@@ -401,17 +404,177 @@ async function snapshotLoginCookies(accountId: string, host: string): Promise<vo
   try {
     const list = await chrome.cookies.getAll({ url: `https://${host}/` });
     const before = list.length;
-    snap.cookies = list
-      .filter((c) => !IDENTITY_COOKIE_BLACKLIST.has(c.name))
-      .map((c) => ({ name: c.name, value: c.value }));
+    const jarCookies = list.filter((c) => !IDENTITY_COOKIE_BLACKLIST.has(c.name));
+    if (snap.cookies?.length) {
+      // 合并：登录时点 jar 全量为权威，登录前页内写入的暂存袋值保留补充（jar 同名以 jar 为准）
+      const merged = new Map(snap.cookies.map((c) => [c.name, c.value]));
+      for (const c of jarCookies) {
+        merged.set(c.name, c.value);
+      }
+      snap.cookies = [...merged.entries()].map(([name, value]) => ({ name, value }));
+    } else {
+      snap.cookies = jarCookies.map((c) => ({ name: c.name, value: c.value }));
+    }
     tokens.set(accountId, snap);
     await persistTokens();
-    void diag(`snapshotLoginCookies(${accountId}) 快照 ${snap.cookies.length} 条（jar 共 ${before}，剔身份类 ${before - snap.cookies.length}）`);
+    void diag(`snapshotLoginCookies(${accountId}) 快照 ${snap.cookies.length} 条（jar 共 ${before}，剔身份类 ${before - jarCookies.length}）`);
     // 会话卫生：把本次登录写入真实 jar 的差集 Cookie 移除（原始页签从此匿名登录，不顶号）
     await sweepLoginCookiesFromJar(accountId, host, snap.cookies);
   } catch (e) {
     void diag(`snapshotLoginCookies(${accountId}) 失败：${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/* ---------------- 快照动态化（v3.10.6）：登录后 Cookie 实时进回放 ----------------
+ * 静态快照的缺陷：登录后服务端 Set-Cookie（会话轮换/下载票据）与页内 JS 写入
+ * （袋虚拟化，jar 不可见）都进不了回放——绑定页签下载等「依赖登录后凭据」的请求
+ * 被服务端当旧会话拒绝（虚拟环境无法下载、正常环境可以）。两条实时通道：
+ *  1. webRequest 响应捕获：按 tabId 归属账号，Set-Cookie 增量并入快照 + 规则热更新；
+ *  2. 袋回流：MAIN 壳的 document.cookie 写入（袋全量）经桥上报并入快照。
+ * 合并引擎：变化才 persist + syncAccountRules（applyBinding 值不变不重建规则）。 */
+
+/** 快照合并：updates 覆盖/新增，removals 删除（服务端作废指令）。返回是否有变化 */
+async function mergeCookieSnapshot(
+  accountId: string,
+  host: string,
+  updates: { name: string; value: string }[],
+  removals: Set<string>,
+): Promise<boolean> {
+  const snap = tokens.get(accountId);
+  if (!snap?.token) {
+    return false; // 未登录账号不维护网络回放快照（避免登录前杂音）
+  }
+  const next = new Map((snap.cookies ?? []).map((c) => [c.name, c.value]));
+  let changed = false;
+  for (const name of removals) {
+    if (IDENTITY_COOKIE_BLACKLIST.has(name) || !next.has(name)) {
+      continue;
+    }
+    next.delete(name);
+    changed = true;
+  }
+  for (const u of updates) {
+    if (IDENTITY_COOKIE_BLACKLIST.has(u.name)) {
+      continue;
+    }
+    if (next.get(u.name) !== u.value) {
+      next.set(u.name, u.value);
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return false;
+  }
+  snap.cookies = [...next.entries()].map(([name, value]) => ({ name, value }));
+  tokens.set(accountId, snap);
+  await persistTokens();
+  void diag(`mergeCookieSnapshot(${accountId}) +${updates.length} -${removals.size} → ${snap.cookies.length} 条，热更新回放`);
+  await syncAccountRules(accountId, host);
+  return true;
+}
+
+/** 解析 Set-Cookie 头：取首段 k=v；Max-Age<=0 或 expires 过期 → 服务端作废指令 */
+function parseSetCookie(raw: string): { name: string; value: string; remove: boolean } | null {
+  const first = raw.split(';')[0] ?? '';
+  const eq = first.indexOf('=');
+  if (eq <= 0) {
+    return null;
+  }
+  const name = first.slice(0, eq).trim();
+  const value = first.slice(eq + 1).trim();
+  if (!name) {
+    return null;
+  }
+  let remove = false;
+  for (const attr of raw.split(';').slice(1)) {
+    const [k, v] = attr.split('=');
+    const key = (k ?? '').trim().toLowerCase();
+    if (key === 'max-age' && Number.parseInt(v?.trim() ?? '', 10) <= 0) {
+      remove = true;
+    } else if (key === 'expires') {
+      const t = Date.parse((v ?? '').trim());
+      if (!Number.isNaN(t) && t <= Date.now()) {
+        remove = true;
+      }
+    }
+  }
+  return { name, value, remove };
+}
+
+/** 绑定页签收到的响应 Set-Cookie → 归属账号并入快照（观察型 webRequest，不改写） */
+async function captureResponseCookies(
+  details: { tabId: number; url: string; responseHeaders?: { name: string; value?: string }[] },
+): Promise<void> {
+  if (details.tabId <= 0) {
+    return; // 无页签请求（下载管理器重试等）无法归属，文档化为已知边界
+  }
+  const binding = bindings.get(details.tabId);
+  if (!binding) {
+    return;
+  }
+  let urlHostname = '';
+  try {
+    urlHostname = new URL(details.url).hostname;
+  } catch {
+    return;
+  }
+  const bindHostname = hostNoPortOf(binding.host);
+  const parent = parentDomainOf(bindHostname);
+  if (urlHostname !== bindHostname && !urlHostname.endsWith(`.${parent}`)) {
+    return; // 仅吸收本站响应；第三方 iframe 的 Cookie 不入账号快照
+  }
+  const sets = (details.responseHeaders ?? []).filter((h) => h.name.toLowerCase() === 'set-cookie');
+  if (!sets.length) {
+    return;
+  }
+  const updates: { name: string; value: string }[] = [];
+  const removals = new Set<string>();
+  for (const h of sets) {
+    const parsed = parseSetCookie(h.value ?? '');
+    if (!parsed || IDENTITY_COOKIE_BLACKLIST.has(parsed.name)) {
+      continue;
+    }
+    if (parsed.remove) {
+      removals.add(parsed.name);
+    } else {
+      removals.delete(parsed.name);
+      updates.push({ name: parsed.name, value: parsed.value });
+    }
+  }
+  if (!updates.length && !removals.size) {
+    return;
+  }
+  try {
+    await mergeCookieSnapshot(binding.accountId, binding.host, updates, removals);
+  } catch (e) {
+    void diag(`captureResponseCookies(tab=${details.tabId}) 异常：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** 处理 MAIN 壳上报的 Cookie 袋全量（页内 document.cookie 写入的虚拟视图） */
+async function mergeBagIntoSnapshot(accountId: string, host: string, bag: Record<string, string>): Promise<void> {
+  const updates: { name: string; value: string }[] = [];
+  for (const [name, value] of Object.entries(bag)) {
+    if (name === COOKIE_BAG_KEY || IDENTITY_COOKIE_BLACKLIST.has(name) || !value) {
+      continue;
+    }
+    updates.push({ name, value });
+  }
+  if (!updates.length) {
+    return;
+  }
+  const snap = tokens.get(accountId);
+  if (!snap?.token) {
+    // token 捕获前的页内写入：暂存进快照，snapshotLoginCookies 时与 jar 全量合并
+    const merged = new Map((snap?.cookies ?? []).map((c) => [c.name, c.value]));
+    for (const u of updates) {
+      merged.set(u.name, u.value);
+    }
+    tokens.set(accountId, { ...(snap ?? {}), cookies: [...merged.entries()].map(([name, value]) => ({ name, value })) });
+    await persistTokens();
+    return;
+  }
+  await mergeCookieSnapshot(accountId, host, updates, new Set());
 }
 
 function cookieHeaderOf(accountId: string): string | null {
@@ -646,6 +809,15 @@ export const parallelSession = {
       await captureToken(binding.accountId, binding.host, payload.value);
       return undefined;
     }
+    if (payload.op === 'bagChanged') {
+      // 袋→快照回流（v3.10.6）：页内 document.cookie 写入的实时并入
+      try {
+        await mergeBagIntoSnapshot(binding.accountId, binding.host, payload.bag ?? {});
+      } catch (e) {
+        void diag(`bagChanged(tab=${tabId}) 异常：${e instanceof Error ? e.message : String(e)}`);
+      }
+      return undefined;
+    }
     return undefined;
   },
 
@@ -824,6 +996,19 @@ export function registerParallelHandlers(): void {
   chrome.cookies.onChanged.addListener((change) => {
     void evictJarCookie(change);
   });
+
+  // 快照动态化（v3.10.6）：绑定页签收到的响应 Set-Cookie 实时并入账号快照。
+  // 观察型 webRequest（MV3 允许；无 host 权限的站点不产生事件——授权门控天然成立）。
+  if (chrome.webRequest?.onHeadersReceived) {
+    chrome.webRequest.onHeadersReceived.addListener(
+      (details: { tabId: number; url: string; responseHeaders?: { name: string; value?: string }[] }) => {
+        void captureResponseCookies(details);
+      },
+      { urls: ['*://*/*'] },
+      // extraHeaders：Set-Cookie 头需显式请求可见性（Chrome 72+）
+      ['responseHeaders', 'extraHeaders'],
+    );
+  }
 
   void cleanupStaleBindings();
 }

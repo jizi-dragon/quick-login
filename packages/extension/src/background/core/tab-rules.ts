@@ -64,9 +64,15 @@ function asRule(raw: unknown): chrome.declarativeNetRequest.Rule {
 }
 
 /** 父域（aksoegmp.com）：DNR requestDomains 语义为「该域及其全部子域」，覆盖网关/接口子域 */
-function parentDomainOf(host: string): string {
+export function parentDomainOf(host: string): string {
   const parts = host.split('.');
   return parts.length > 2 ? parts.slice(-2).join('.') : host;
+}
+
+/** DNR requestDomains 不含端口；siteHost 带 ":port" 时剥离（v3.10.6 加固） */
+export function hostNoPortOf(host: string): string {
+  const idx = host.indexOf(':');
+  return idx >= 0 ? host.slice(0, idx) : host;
 }
 
 function buildAuthRule(ruleId: number, host: string, tabId: number, token: string): chrome.declarativeNetRequest.Rule {
@@ -81,7 +87,7 @@ function buildAuthRule(ruleId: number, host: string, tabId: number, token: strin
       // API 调用、WS 握手，以及 iframe 内嵌文档（低代码平台的「管理端」控制台常以
       // iframe 承载：只带命名空间存储、无 Bearer 的子框架会被服务端当匿名拒入）
       resourceTypes: ['xmlhttprequest', 'websocket', 'sub_frame'],
-      requestDomains: [host, parentDomainOf(host)],
+      requestDomains: [hostNoPortOf(host), parentDomainOf(hostNoPortOf(host))],
       tabIds: [tabId],
     },
   });
@@ -111,7 +117,7 @@ function buildCookieRule(
     condition: {
       // 全类型覆盖：绑定标签页的出站 Cookie 完全由本规则决定，与真实 jar 无关
       resourceTypes: ALL_MATCH_TYPES,
-      requestDomains: [host, parentDomainOf(host)],
+      requestDomains: [hostNoPortOf(host), parentDomainOf(hostNoPortOf(host))],
       tabIds: [tabId],
     },
   });
