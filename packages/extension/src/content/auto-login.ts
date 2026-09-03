@@ -84,17 +84,23 @@ function findSubmit(): HTMLButtonElement | null {
   return buttons.find((b) => /登录|登\s*录|login|submit/i.test(b.textContent || '')) || null;
 }
 
-/** 顶层：填用户名 + 密码（iframe）+ 勾选协议；自愈式提交（v3.10.5）。
- *  首次点击可能落在框架未就绪/表单状态未落地的时刻而「无反应」——点击后仍在登录页
- *  就重填再点（最多 4 次）；用户一旦手动改写凭据字段立即让位，绝不与用户抢表单。
- *  接管判定只认凭据输入框：勾选协议是自动流程自身动作（其 input 事件 isTrusted 可为
- *  true，Chrome 对扩展上下文的 element.click() 如此），绝不能当成用户键入。 */
+/** 顶层：填用户名 + 密码（iframe）+ 勾选协议；自愈式提交（v3.10.7 节奏门控）。
+ *  提交五重门控：①字段齐备（任一填充失败绝不点击——密码 iframe 未就绪时空密码提交
+ *  即「密码错误」报错的根因）；②提交前回读凭据与 DOM 值一致（受控组件状态落地）；
+ *  ③按钮可用；④用户未接管（trusted 键入凭据框 / trusted 点击按钮都算接管）；
+ *  ⑤服务端未连续拒绝（点击后观察期出现 antd 风格错误提示 → 容忍一次重填重试，
+ *  再错即停止让位——盲目重试会与用户点击竞争并可能触发验证码/锁定）。
+ *  节奏：MutationObserver + iframe load 即时触发 attempt（密码框挂载即填，压缩
+ *  用户手动点击撞上未填充状态的窗口），800ms 轮询兜底。 */
 function runTopFrameFlow(): void {
   const deadline = Date.now() + 30_000;
   let attempts = 0;
   let lastClickAt = 0;
   let userTouched = false;
   let absentStreak = 0;
+  let errorSeen = 0; // 提交后观察期内的服务端拒绝次数（错误提示出现）
+  let errorFlagged = false; // 本次点击观察期是否已标记过错误（防重复计数）
+  let errorsAtLastClick = 0;
 
   /** 用户已改写字段值（trusted 键入或手动清空）= 接管；预期值非空才可比对 */
   const detectUserEdit = (el: HTMLInputElement | null, expected: string): void => {
@@ -116,10 +122,53 @@ function runTopFrameFlow(): void {
     { capture: true },
   );
 
+  // 用户点击任何按钮 = 接管意图：自动流程立即停止（自动点击自身的 click 事件
+  // isTrusted=false 不会触发；勾选协议同理由 checkAgreement 内部处理）
+  window.addEventListener(
+    'click',
+    (e) => {
+      const t = e.target as HTMLElement | null;
+      if (e.isTrusted && t?.closest?.('button')) {
+        userTouched = true;
+        console.debug('[ql-auto] user clicks a button, stand down');
+      }
+    },
+    { capture: true },
+  );
+
+  /** 错误提示元素计数（antd 系登录平台的失败反馈：message/alert/表单校验错误） */
+  const countErrors = (): number =>
+    document.querySelectorAll(
+      '.ant-message-error, .ant-message-notice-error, .ant-alert-error, .ant-form-item-explain-error',
+    ).length;
+
+  /** 读回 iframe 内密码框当前值（提交前回读用） */
+  const readPasswordValue = (): string | null => {
+    for (const iframe of document.querySelectorAll<HTMLIFrameElement>('iframe')) {
+      try {
+        const p = iframe.contentDocument?.querySelector<HTMLInputElement>('input[type="password"]');
+        if (p) {
+          return p.value;
+        }
+      } catch {
+        // 跨域 iframe 读不到
+      }
+    }
+    return null;
+  };
+
+  /** 填充并校验齐备：用户名或密码任一字段未就绪 → false（本轮不进点击流程） */
+  const fillAll = (): boolean => {
+    const uOk = fillUsername();
+    const pOk = fillPasswordInIframes();
+    checkAgreement();
+    return uOk && pOk;
+  };
+
   const timer = window.setInterval(attempt, 800);
 
   function attempt(): void {
-    if (userTouched || !credentials || Date.now() > deadline) {
+    if (userTouched || !credentials || Date.now() > deadline || attempts >= 4 || errorSeen >= 2) {
       window.clearInterval(timer);
       return;
     }
@@ -142,34 +191,68 @@ function runTopFrameFlow(): void {
       window.clearInterval(timer);
       return;
     }
-    fillUsername();
-    fillPasswordInIframes();
-    checkAgreement();
+    const now = Date.now();
+    if (lastClickAt) {
+      if (now - lastClickAt < 3500) {
+        // 观察期：检测服务端拒绝反馈（错误提示出现）
+        if (!errorFlagged && countErrors() > errorsAtLastClick) {
+          errorFlagged = true;
+          errorSeen++;
+          console.debug('[ql-auto] submit rejected by server', { errorSeen });
+          if (errorSeen >= 2) {
+            window.clearInterval(timer);
+            return;
+          }
+        }
+        return; // 点击观察期：给登录请求时间，避免连点
+      }
+      errorFlagged = false; // 观察期结束
+    }
     if ((submit as HTMLButtonElement).disabled) {
       return; // 表单校验未过（按钮禁用），等待
     }
-    const now = Date.now();
-    if (lastClickAt && now - lastClickAt < 3500) {
-      return; // 点击观察期：给登录请求时间，避免连点
-    }
-    if (attempts >= 4) {
-      window.clearInterval(timer);
+    // 齐备门槛：任一字段未就绪（iframe 未挂载等）绝不点击——空密码提交即「密码错误」
+    if (!fillAll()) {
       return;
     }
     attempts++;
     lastClickAt = now;
+    errorsAtLastClick = countErrors();
     window.setTimeout(() => {
       if (userTouched) {
         return; // 点击落地前用户已接管
       }
-      fillUsername();
-      fillPasswordInIframes();
-      checkAgreement();
-      findSubmit()?.click();
+      if (!fillAll()) {
+        return; // 点击落地前字段被重渲染清掉/移除 → 放弃本轮，等下轮重填后再点
+      }
+      const btn = findSubmit();
+      // 提交前回读：受控组件的 DOM 值必须与凭证一致（状态未落地则推迟）
+      const u = document.querySelector<HTMLInputElement>('input[placeholder="请输入用户名"]') ||
+        document.querySelector<HTMLInputElement>('input[type="text"]');
+      if (!btn || !u || u.value !== credentials!.username || readPasswordValue() !== credentials!.password) {
+        return;
+      }
+      btn.click();
     }, 500);
   }
 
   attempt();
+
+  // 节奏加速：密码 iframe 挂载（元素插入 / srcdoc 文档 load 完成）即时触发填充，
+  // 不等 800ms 轮询——压缩「表单可见但未填完」的窗口
+  let pending = 0;
+  const scheduleAttempt = (): void => {
+    if (pending) {
+      return;
+    }
+    pending = window.setTimeout(() => {
+      pending = 0;
+      attempt();
+    }, 100);
+  };
+  const observer = new MutationObserver(scheduleAttempt);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  window.addEventListener('load', scheduleAttempt, true); // iframe srcdoc 文档加载完成
 }
 
 /** 子 frame：仅兜底填自身 frame 内的密码（srcdoc iframe 不注入，此分支主要服务跨域外链 iframe） */
