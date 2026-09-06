@@ -85,7 +85,8 @@
   /* ---- 袋→快照回流（v3.10.6）：页内 Cookie 写入实时并入账号网络平面快照 ----
    * 绑定页签的 document.cookie 写入只进袋子（jar 隐身、DNR 回放不可见）——平台
    * 登录后由页内 JS 写入的下载票据/凭据若不回流，出站回放永远缺失（下载被拒）。
-   * 300ms 尾沿节流；叛逃回滚冻结后不再上报（回滚值不得覆盖账号快照）。 */
+   * 尾沿节流 120ms（v3.10.8：300ms 的竞态窗口足够让「写票据→立刻下载」的请求
+   * 带着旧回放值出站而被拒）；叛逃回滚冻结后不再上报（回滚值不得覆盖账号快照）。 */
   let bagReportTimer = 0;
   function scheduleBagReport(): void {
     if (journalFrozen || bagReportTimer) {
@@ -100,7 +101,7 @@
         { src: SRC_PAGE_TO_BRIDGE, payload: { op: 'bagChanged', bag: { ...loadBag() } } },
         '*',
       );
-    }, 300);
+    }, 120);
   }
 
   function bagSet(key: string, value: string): void {

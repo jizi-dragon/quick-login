@@ -440,10 +440,11 @@ async function mergeCookieSnapshot(
   updates: { name: string; value: string }[],
   removals: Set<string>,
 ): Promise<boolean> {
-  const snap = tokens.get(accountId);
-  if (!snap?.token) {
-    return false; // 未登录账号不维护网络回放快照（避免登录前杂音）
-  }
+  // v3.10.8：移除「未登录不维护快照」的 token 门禁。登出清空快照后进入登录前窗口，
+  // 站点下发的 WAF 会话/防机器人 Cookie 若被丢弃，登录 POST 将以「完全无 Cookie」的
+  // 裸态发出而被 WAF/服务端拒绝（快捷登录登出后失败的根因）。登录前窗口同样维护
+  // 快照（身份键过滤已有，无跨账号风险），使登录请求与原生浏览器等价。
+  const snap = tokens.get(accountId) ?? {};
   const next = new Map((snap.cookies ?? []).map((c) => [c.name, c.value]));
   let changed = false;
   for (const name of removals) {
@@ -468,7 +469,7 @@ async function mergeCookieSnapshot(
   snap.cookies = [...next.entries()].map(([name, value]) => ({ name, value }));
   tokens.set(accountId, snap);
   await persistTokens();
-  void diag(`mergeCookieSnapshot(${accountId}) +${updates.length} -${removals.size} → ${snap.cookies.length} 条，热更新回放`);
+  void diag(`mergeCookieSnapshot(${accountId}) +${updates.length} -${removals.size} → ${snap.cookies.length} 条${snap.token ? '' : '（登录前窗口）'}，热更新回放`);
   await syncAccountRules(accountId, host);
   return true;
 }
@@ -505,11 +506,27 @@ function parseSetCookie(raw: string): { name: string; value: string; remove: boo
 async function captureResponseCookies(
   details: { tabId: number; url: string; responseHeaders?: { name: string; value?: string }[] },
 ): Promise<void> {
-  if (details.tabId <= 0) {
-    return; // 无页签请求（下载管理器重试等）无法归属，文档化为已知边界
+  let accountId: string | undefined;
+  let bindHost: string | undefined;
+  if (details.tabId > 0) {
+    const binding = bindings.get(details.tabId);
+    accountId = binding?.accountId;
+    bindHost = binding?.host;
+  } else if (details.tabId <= 0) {
+    // v3.10.8 归属优化：无页签请求（Service Worker 内 fetch / 下载管理器重试 / 预取）
+    // 此前直接丢弃——下载票据恰好经此通道获得时即「下载被拒」。仅当当前恰好只有
+    // 一个已绑定账号时才可唯一归属；多账号并存仍无法判定，维持丢弃。
+    const unique = new Set([...bindings.values()].map((b) => b.accountId));
+    if (unique.size === 1) {
+      const only = [...bindings.values()][0];
+      accountId = only.accountId;
+      bindHost = only.host;
+      void diag(`captureResponseCookies：无页签响应(${new URL(details.url, 'https://x').host})归属唯一绑定账号 ${accountId}`);
+    } else {
+      return;
+    }
   }
-  const binding = bindings.get(details.tabId);
-  if (!binding) {
+  if (!accountId || !bindHost) {
     return;
   }
   let urlHostname = '';
@@ -518,10 +535,20 @@ async function captureResponseCookies(
   } catch {
     return;
   }
-  const bindHostname = hostNoPortOf(binding.host);
+  const bindHostname = hostNoPortOf(bindHost);
   const parent = parentDomainOf(bindHostname);
   if (urlHostname !== bindHostname && !urlHostname.endsWith(`.${parent}`)) {
-    return; // 仅吸收本站响应；第三方 iframe 的 Cookie 不入账号快照
+    // 覆盖域之外：Cookie 回放与剥离均不作用。下载类响应在此域被拒时即为根因——
+    // 诊断记录（现场可定位）；不自动扩展覆盖域，避免向第三方域回放账号 Cookie。
+    const headers = details.responseHeaders ?? [];
+    const cd = headers.find((h) => h.name.toLowerCase() === 'content-disposition');
+    const ct = headers.find((h) => h.name.toLowerCase() === 'content-type');
+    if (cd && /attachment/i.test(cd.value ?? '')) {
+      void diag(`⚠ 绑定页签的下载响应来自未覆盖域 ${urlHostname}（attachment）——账号 Cookie 不回放到该域，需平台侧确认或扩展覆盖策略`);
+    } else if (ct && /octet-stream|application\/pdf/i.test(ct.value ?? '')) {
+      void diag(`ℹ 绑定页签的文件类响应来自未覆盖域 ${urlHostname}（${ct.value?.slice(0, 40)}）`);
+    }
+    return;
   }
   const sets = (details.responseHeaders ?? []).filter((h) => h.name.toLowerCase() === 'set-cookie');
   if (!sets.length) {
@@ -545,7 +572,7 @@ async function captureResponseCookies(
     return;
   }
   try {
-    await mergeCookieSnapshot(binding.accountId, binding.host, updates, removals);
+    await mergeCookieSnapshot(accountId, bindHost, updates, removals);
   } catch (e) {
     void diag(`captureResponseCookies(tab=${details.tabId}) 异常：${e instanceof Error ? e.message : String(e)}`);
   }
@@ -563,17 +590,7 @@ async function mergeBagIntoSnapshot(accountId: string, host: string, bag: Record
   if (!updates.length) {
     return;
   }
-  const snap = tokens.get(accountId);
-  if (!snap?.token) {
-    // token 捕获前的页内写入：暂存进快照，snapshotLoginCookies 时与 jar 全量合并
-    const merged = new Map((snap?.cookies ?? []).map((c) => [c.name, c.value]));
-    for (const u of updates) {
-      merged.set(u.name, u.value);
-    }
-    tokens.set(accountId, { ...(snap ?? {}), cookies: [...merged.entries()].map(([name, value]) => ({ name, value })) });
-    await persistTokens();
-    return;
-  }
+  // v3.10.8：pre-token 分支已并入 mergeCookieSnapshot（登录前窗口同样热更新回放）
   await mergeCookieSnapshot(accountId, host, updates, new Set());
 }
 
