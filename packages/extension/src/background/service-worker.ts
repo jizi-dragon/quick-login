@@ -4,6 +4,7 @@ import { CONTENT_MESSAGE, EXT_VERSION, LOCAL_KEYS } from '../shared/constants';
 import { accountRegistry } from './core/account-registry';
 import { credentials } from './core/credentials';
 import { navigation, registerNavigationHandlers } from './core/navigation';
+import { pageMonitor } from './core/page-monitor';
 import { siteAuth, probeScheme } from './core/site-auth';
 import {
   handleOpenError,
@@ -325,6 +326,11 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       });
       return { kind: 'data.import', result: r };
     }
+    case 'pages.recent':
+      // 实际处理在 onMessage（需要 sender.tab 定位 host）；此处仅满足穷尽性
+      return { kind: 'pages.recent', result: ok([]) };
+    case 'pages.jump':
+      return { kind: 'pages.jump', result: ok({ jumped: false }) };
   }
 }
 
@@ -354,6 +360,19 @@ chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
       return true;
     }
     void navigation.getPendingAutoLogin(tabId).then((creds) => sendResponse(creds));
+    return true;
+  }
+
+  // 1.5 v3.11 最近配置页：需要 sender.tab，先于通用分流处理
+  if (req && typeof req === 'object' && (req as { kind?: string }).kind === 'pages.recent') {
+    void pageMonitor.recentForTab(sender.tab?.id).then((list) => sendResponse({ kind: 'pages.recent', result: ok(list) }));
+    return true;
+  }
+  if (req && typeof req === 'object' && (req as { kind?: string }).kind === 'pages.jump') {
+    const url = (req as { url?: string }).url ?? '';
+    void pageMonitor
+      .jumpCurrentTab(sender.tab?.id, url)
+      .then((jumped) => sendResponse({ kind: 'pages.jump', result: ok({ jumped }) }));
     return true;
   }
 
@@ -455,7 +474,28 @@ chrome.commands.onCommand.addListener((command) => {
     void flashBadge('→');
     void toggleAccountWheel();
   }
+  if (command === 'quick-pages') {
+    void flashBadge('⇢');
+    void togglePagesOverlay();
+  }
 });
+
+/** v3.11 最近配置页轮盘：页面内无框浮层（再次触发 = 脚本自关闭，与账号轮盘同机制） */
+async function togglePagesOverlay(): Promise<void> {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id || !tab.url || !/^https?:/i.test(tab.url)) {
+      return;
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/pages-overlay.js'],
+      world: 'ISOLATED',
+    });
+  } catch {
+    // 受限页/权限收回：静默
+  }
+}
 
 /** 角标临时显示文本后恢复 */
 async function flashBadge(text: string): Promise<void> {
@@ -472,6 +512,7 @@ async function flashBadge(text: string): Promise<void> {
 
 registerNavigationHandlers();
 registerParallelHandlers();
+pageMonitor.registerPageMonitorListeners();
 
 // 打开失败自学习（v3.10.9）：绑定页签加载失败时按错误类型翻转协议并原页签重开。
 // 优先并行账号（par.* 主流程），未命中再试旧会话模型（session.* 轮盘路径）。

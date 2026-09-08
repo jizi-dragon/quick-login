@@ -3,6 +3,7 @@ import type { Scheme } from './site-auth';
 import type { BridgeDownPayload, BridgeUpPayload, ParallelAccount } from '../../shared/types';
 import { credentials } from './credentials';
 import { setTabTitle } from '../tabs/tab-title';
+import { pageMonitor } from './page-monitor';
 import { parallelStore } from './parallel-store';
 import { tabRules, parentDomainOf, hostNoPortOf } from './tab-rules';
 
@@ -848,6 +849,11 @@ export const parallelSession = {
       } catch (e) {
         void diag(`bagChanged(tab=${tabId}) 异常：${e instanceof Error ? e.message : String(e)}`);
       }
+      return undefined;
+    }
+    if (payload.op === 'pageNames') {
+      // v3.11 名称嗅探上行：交页面监视器建 guid→名称 表（host 由监视器自查）
+      void pageMonitor.ingestNames(tabId, payload.names ?? [], payload.src ?? '');
       return undefined;
     }
     return undefined;

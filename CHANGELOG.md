@@ -2,6 +2,17 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.11.0（2026-08-28）
+
+**新增：配置页监听 · 最近 5 个 · 主体名页签标注 · 跳转轮盘**（可行性调研 `docs/FEASIBILITY-RECENT-PAGES.md` 五类页面映射实测闭环后落地）。
+
+- **名称仓库**：MAIN 壳嗅探白名单名称型 API（`BasicObjectDetail`/`GetWorkflowBasic*`/`GetUserMenuPermission`/`MenuGroup/QueryList`/`UserView/GetView`）响应，抽取 `名称↔ID` 对经桥上行；background 合并进 `storage.session` 的 `ql:pageNames`（host → guid→name 扁平表；fetch 走 clone 异步读、XHR 挂 load，只读不阻塞）。
+- **页面分类器（L1）**：`tabs.onUpdated` 解析五类路由 → `{页面类型, 后缀, guid}`：`/web?display=`（对象工作区）、`/web/view?mid=&cid=`（业务菜单）、`/admin/config/basic-objects/edit/*?id=`（对象配置）、`/admin/config/lifecycle/<guid>`（生命周期配置）、`/admin/config/workflow/edit?id=`（工作流配置）。
+- **主体名解析**：guid 精确命中（含工作流列表 API 全量预缓存）；生命周期页走「加载窗口候选」（详情类 API 最新名称，60s TTL）；未命中先显示 `<类型> · <guid 前 8 位>` 占位，名称到达**原地升级标题**。
+- **页签标题**：复合形态 `账号别名 · 主体名·类型`（如 `lyl · 项目号·对象`），经既有 title 管线（executeScript 权威写 + title-hook MutationObserver 维持）。
+- **最近 5 MRU**：`storage.local` `ql:recentPages` 按 host 分组、容量 5、同页面去重置顶；条目带来源账号别名（仅展示，不影响账号决策）。
+- **跳转轮盘**：新命令 `quick-pages`（建议 `Alt+W`），页面内无框浮层（与账号轮盘同机制：Shadow DOM + 幂等开关），竖排列表（类型徽标配色 + 主体名 + 来源账号 + 相对时间），点击 / 数字键 1-5 = **当前标签页跳转**（tabId 不变 → 账号绑定、六平面隔离规则无缝延续）。
+
 ## 3.10.9（2026-09）
 
 **修复：内网 http 站点（VPN/aTrust 环境）打开即失败——scheme 硬编码 + 失败零感知双重缺陷。**

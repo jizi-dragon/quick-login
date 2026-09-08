@@ -46,6 +46,7 @@ const extensionOptions = {
     'content/title-hook': path.join(extDir, 'src', 'content', 'title-hook.ts'),
     'content/auto-login': path.join(extDir, 'src', 'content', 'auto-login.ts'),
     'content/wheel-overlay': path.join(extDir, 'src', 'content', 'wheel-overlay.ts'),
+    'content/pages-overlay': path.join(extDir, 'src', 'content', 'pages-overlay.ts'),
     'ui/popup/popup': path.join(extDir, 'src', 'ui', 'popup', 'popup.ts'),
     'ui/parallel/parallel': path.join(extDir, 'src', 'ui', 'parallel', 'parallel.ts'),
     'ui/wheel/wheel': path.join(extDir, 'src', 'ui', 'wheel', 'wheel.ts'),
