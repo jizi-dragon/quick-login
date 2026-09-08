@@ -1,7 +1,28 @@
 # 可行性调研：配置页监听 · 最近 5 个 · 主体名 · 跳转轮盘
 
-> 调研基线：代码 3.10.8（轮盘 Hub 切盒版）· 站点 tonbridge-config.aksoegmp.com 实测语料（E2E 事件流 264+ 条真实请求）
-> 结论先行：**可行，且大部分基础设施已存在**。主体名提取有三层来源兜底，唯一需要现场确认的是「四类配置页的 DOM/路由→主体对应关系」，约 15 分钟合作探针即可定案。
+> 调研基线：代码 3.10.9 · 站点实测语料（E2E + 交互式 DOM/API 探针 `tools/e2e/probe-page.mjs`）
+> 结论先行：**可行，映射表已实测闭环（五类页面），实现方案定稿**。
+
+## 〇、探针实测结果（2026-08-28，替代「待现场确认」项）
+
+用户实测导航五类页面，探针抓取 URL/DOM/名称 API，映射表全部闭环：
+
+| 页面类型 | 路由形态（实测） | 屏显名称 | 主体名来源（实测 API） |
+|---|---|---|---|
+| 对象工作区 | `/web?display=<objectId>` | （未采样屏显名） | `BasicObjectDetail?id=<同 guid>` ✅ |
+| 业务菜单页 | `/web/view?mid=<menuId>&cid=<groupId>` | `CAPA·菜单`、`偏差·菜单` | 菜单树（`GetUserMenuPermission` 24 项全量）`mid`→名称 ✅ |
+| 对象配置页 | `/admin/config/basic-objects/edit/base?id=<objectId>&__edit=2` | `项目号·对象`、`国家代码·对象` | `BasicObjectDetail?id=<同 guid>` ✅ |
+| 生命周期配置页 | `/admin/config/lifecycle/<lifecycleGuid>?__edit=2` | `项目号·生命周期`、`计量设备管理·生命周期` | 页面加载窗口内的对象详情 API（所属对象名；路径 guid 与对象 guid 前两段同族但不同）✅ |
+| 工作流配置页 | `/admin/config/workflow/edit?id=<workflowId>&__edit=2` | （屏显名待认，形式同上） | `Workflow/GetWorkflowBasic?id=<同 guid>` ✅ + `GetWorkflowBasicPageViewList` **一次返回 20 个工作流全量名称表**（预缓存零等待） |
+
+实测附带发现：
+
+- **`document.title` 不可用**（恒为用户名「李渝龙」）；通用面包屑选择器不命中该站——主体名完全依赖 L1 路由解析 + L2 API 嗅探，L3 DOM 兜底降级为可选。
+- 生命周期页**不发独立详情请求**（走 IDB 缓存/内嵌对象详情），命名须走「加载窗口内候选」通用规则。
+- 通用命名规则：**每次导航收集加载窗口内全部名称型 API 的 `名称↔ID`，按「guid 与 URL 参数一致 > 加载窗口内最具体详情 API」取主体名**，屏显名 = `{主体名}·{页面类型}`。
+- 菜单配置页：**需求方明确排除**，不做。
+- 名称 API 补充捕获：`Layout/GetFormInstance`、`ListlayoutRecord/DetailWithColumn`、`WorkflowInstance/GetWorkflowStartLayout`、`Workflow/GetWorkflowSteps`（流程节点名）——二期深度命名可用。
+
 
 ## 一、需求拆解
 
@@ -65,8 +86,12 @@
 | 跨账号误跳 | 记录带来源账号徽标；跳转永远发生在当前账号标签页 |
 | 代码基线漂移 | 本次调研基于 3.10.8 实读；实现前重读并行页/轮盘现状 |
 
-## 七、下一步（建议顺序）
+## 七、实现方案（定稿）
 
-1. **探针定案（约 15 分钟，需你配合）**：E2E 台架加三个探针（document.title 变化记录 / 面包屑候选 DOM 摘取 / 白名单 API 响应字段 dump），你依次打开菜单、对象、工作流、生命周期各一个配置页 → 产出「路由 slug ↔ 页面类型 ↔ 主体字段」映射表；
-2. 实现（预估一个版本周期）：L1+L2 为主、L3 视探针结果取舍 → 新轮盘 + 复合标题 + 最近 5 存储；
-3. 回归：六平面 E2E 全套 + 新功能探针；版本号 3.11.0 三处同步 + CHANGELOG（惯例）。
+1. **名称仓库（background）**：内容脚本嗅探白名单 API（`BasicObjectDetail`/`GetWorkflowBasic*`/`GetUserMenuPermission`/`MenuGroup/QueryList` 等）→ `名称↔ID` 对经桥上报 → `storage.session` 键 `ql:pageNames:<host>`（guid→name + menuId→name + groupId→name）。
+2. **页面分类器（L1，background）**：`tabs.onUpdated`（pushState 也触发，无需新权限）解析 URL → `{pageType, suffix, subjectGuid}`，按上表五条规则。
+3. **主体名解析**：guid 精确匹配（含列表预缓存）→ 加载窗口内最新详情 API 名称；未命中先显示 `<类型> · <guid 前 8 位>`，名称到达后**原地升级**。
+4. **页签标题**：现有管线升级为复合标题 `账号别名 · 主体名·类型`（title-hook MutationObserver 天然维持）。
+5. **最近 5 记录**：主体名解析成功即写入 MRU（`storage.local`，按 host 分组，容量 5，去重+置顶），条目 `{url, pageType, subject, accountAlias, ts}`。
+6. **新轮盘**：command `quick-pages`（建议 `Alt+W`），复用 wheel-overlay 注入模式，竖排列表（类型图标 + 主体名 + 来源账号徽标），点击 `chrome.tabs.update(当前tab, {url})` —— 账号绑定与六平面规则无缝延续。
+7. **验证**：E2E 台架加标题/最近列表探针 + 六平面隔离回归；版本 3.11.0 三处同步 + CHANGELOG。
