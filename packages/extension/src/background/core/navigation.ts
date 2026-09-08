@@ -1,5 +1,6 @@
 import { SESSION_KEYS, CONTENT_MESSAGE } from '../../shared/constants';
 import { accountRegistry } from './account-registry';
+import { sessionManager } from './session-manager';
 import { setTabTitle } from '../tabs/tab-title';
 import type { Session } from '../../shared/types';
 
@@ -135,7 +136,8 @@ export const navigation = {
     session: Session,
     credentials?: { username: string; password: string },
   ): Promise<{ tabId: number; reused: boolean }> {
-    const loginUrl = `https://${session.siteHost}/login`;
+    const scheme = session.scheme ?? 'https';
+    const loginUrl = `${scheme}://${session.siteHost}/login`;
     const existingTabId = findOpenTab(session.id);
 
     let tabId: number;
@@ -164,6 +166,24 @@ export const navigation = {
 
   /** 内容脚本（含 iframe frame）就绪后主动索取自动登录凭证（只读共享，超时失效） */
   getPendingAutoLogin,
+
+  /** 旧会话模型的打开失败自学习（v3.10.9）：session.scheme 翻转写回并原页签重开 */
+  async handleSessionOpenError(tabId: number): Promise<boolean> {
+    const binding = bindings.get(tabId);
+    if (!binding) {
+      return false;
+    }
+    const session = await sessionManager.get(binding.sessionId);
+    if (!session) {
+      return false;
+    }
+    const current = session.scheme ?? 'https';
+    const flipped = current === 'https' ? 'http' : 'https';
+    await sessionManager.updateScheme(binding.sessionId, flipped);
+    const url = `${flipped}://${session.siteHost}/login`;
+    await chrome.tabs.update(tabId, { url });
+    return true;
+  },
 };
 
 /** 装载事件监听，由 service-worker 调用一次 */

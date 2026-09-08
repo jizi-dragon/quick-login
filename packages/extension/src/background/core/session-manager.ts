@@ -49,6 +49,15 @@ export const sessionManager = {
     return next;
   },
 
+  /** 打开失败自学习（v3.10.9）：session.scheme 翻转写回 */
+  async updateScheme(id: string, scheme: 'http' | 'https'): Promise<void> {
+    const session = await db.sessions.get(id);
+    if (!session) {
+      return;
+    }
+    await db.sessions.put({ ...session, scheme, updatedAt: Date.now() });
+  },
+
   /** 保存/更新加密后的账号密码 */
   async updateCredentials(id: string, credentials: EncryptedCredentials): Promise<Session> {
     const session = await db.sessions.get(id);

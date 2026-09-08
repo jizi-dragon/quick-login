@@ -12,7 +12,8 @@ export type RuntimeRequest =
   | { kind: 'site.grants.list' }
   | { kind: 'site.grant.add'; host: string }
   | { kind: 'par.list' }
-  | { kind: 'par.create'; siteHost: string; tabName: string; username: string; password: string; open: boolean; box?: string }
+  | { kind: 'par.create'; siteHost: string; tabName: string; username: string; password: string; open: boolean; box?: string; scheme?: 'http' | 'https' }
+  | { kind: 'par.probeScheme'; host: string }
   | { kind: 'par.update'; id: string; patch: Partial<Pick<ParallelAccount, 'tabName'>> }
   | { kind: 'par.moveBox'; id: string; box: string }
   | { kind: 'par.renameBox'; from: string; to: string }
@@ -59,6 +60,7 @@ export type RuntimeResponse =
   | { kind: 'site.grant.add'; result: Result<SiteGrant> }
   | { kind: 'par.list'; result: Result<Array<ParallelAccount & ParallelAccountStatus & { password: boolean }>> }
   | { kind: 'par.create'; result: Result<ParallelAccount> }
+  | { kind: 'par.probeScheme'; result: Result<'http' | 'https'> }
   | { kind: 'par.update'; result: Result<ParallelAccount> }
   | { kind: 'par.moveBox'; result: Result<ParallelAccount> }
   | { kind: 'par.renameBox'; result: Result<{ moved: number }> }

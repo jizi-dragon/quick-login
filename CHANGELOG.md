@@ -2,6 +2,17 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.10.9（2026-09）
+
+**修复：内网 http 站点（VPN/aTrust 环境）打开即失败——scheme 硬编码 + 失败零感知双重缺陷。**
+
+- **根因（真实环境实测实锤：aTrust VPN + `http://10.100.0.105`，实测网络层完全正常、手动登录流畅）**：`open()` 与 `switchAccount()` 硬编码 `https://${siteHost}`——内网 http 站点（443 不开放）打开即落 chrome-error 页 → content script 不可注入 → 自动登录全流程死亡；且扩展无失败感知（无 `webNavigation.onErrorOccurred`），`par.open` 仍返回 ok:true——「系统装死」。**暴露原因**：内部验证套件的模拟平台全部为 https 形态，http 形态从未进过测试矩阵。
+- **修复一（scheme 数据化，用户零维护）**：`ParallelAccount`/`Session` 增加 `scheme` 字段（缺省 https 兼容存量）；打开 URL、`cookies.getAll`（preJar 基线/差集清扫/登录快照）全部跟随账号协议。scheme 的确定全自动三层：①添加站点支持**粘贴完整 URL**（解析 scheme 存 hint）；②无 hint 时 **SW 自动探测**（fetch https 3s → http 3s，安全偏好 https）；③**打开失败自学习**——`webNavigation.onErrorOccurred` 捕获 scheme 类错误（SSL_PROTOCOL_ERROR/CONNECTION_REFUSED/RESET/EMPTY_RESPONSE）→ 翻转协议写回账号档案 → 原页签重开（15s 防抖防循环，新增 `webNavigation` 权限，纯观察）。用户全程无感，管理页可查看。
+- **修复二（真实环境验证闭环）**：以真实内网环境完成三段式体验——网络侦察（80 通/443 不通）→ 扩展失败复现（chrome-error + diag「完成」）→ patch 验证（自动登录一次成功、token 捕获、快照/回放体系在 http 站点全部正常）。
+
+> 验证：tmp/verify-httpscheme.mjs **10/10**（双服务器模拟：http://127.0.0.1:80 + https://qllocal.test:443@127.0.0.2 构造「纯 http 站点 443 无服务」真实形态——A 探测直选/B 默认 https 失败自学习翻转+写回/C https 不误伤）+ 七套回归全绿（v310/impgrant/jarhygiene/defect/autologin/dynsnap/fillrhythm）。
+> 测试基建坑：node https 的 SNI 拒绝未阻断握手（默认证书兜底应答），改用双地址绑定（127.0.0.2:443）才构造出「443 无服务」；模拟 token 必须为 JWT 三段式（captureToken 拒收非 JWT）。
+
 ## 3.10.8（2026-08-29）
 
 **实测缺陷修复两则（Cookie 快照的登录前窗口与归属盲区）：**

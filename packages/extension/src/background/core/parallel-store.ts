@@ -27,6 +27,7 @@ export const parallelStore = {
     username: string;
     password: string;
     box?: string;
+    scheme?: 'http' | 'https';
   }): Promise<ParallelAccount> {
     const now = Date.now();
     const existing = await db.accounts.list();
@@ -34,6 +35,7 @@ export const parallelStore = {
     const account: ParallelAccount = {
       id: newId(),
       siteHost: input.siteHost,
+      ...(input.scheme ? { scheme: input.scheme } : {}),
       tabName: input.tabName || input.username,
       username: input.username,
       color: SESSION_COLORS[existing.length % SESSION_COLORS.length],
@@ -44,6 +46,14 @@ export const parallelStore = {
     };
     await db.accounts.put(account);
     return account;
+  },
+
+  /** 打开失败自学习（v3.10.9）：scheme 翻转写回账号档案 */
+  async updateScheme(id: string, scheme: 'http' | 'https'): Promise<ParallelAccount> {
+    const account = await this.get(id);
+    const next: ParallelAccount = { ...account, scheme, updatedAt: Date.now() };
+    await db.accounts.put(next);
+    return next;
   },
 
   async updateTabName(id: string, tabName: string): Promise<ParallelAccount> {

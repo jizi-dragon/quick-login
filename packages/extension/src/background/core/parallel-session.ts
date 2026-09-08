@@ -1,4 +1,5 @@
 import { CONTENT_MESSAGE, LOCAL_KEYS, SESSION_KEYS } from '../../shared/constants';
+import type { Scheme } from './site-auth';
 import type { BridgeDownPayload, BridgeUpPayload, ParallelAccount } from '../../shared/types';
 import { credentials } from './credentials';
 import { setTabTitle } from '../tabs/tab-title';
@@ -329,9 +330,20 @@ interface JarCookie {
 /** 登录前 jar 基线（按账号；SW 重启丢失则跳过清扫，保守不误杀） */
 const preJarMap = new Map<string, JarCookie[]>();
 
+/** 账号站点的协议（v3.10.9）：缺省 = https（兼容存量账号）。打开 URL 与 Cookie 查询跟随 */
+async function schemeOfAccount(accountId: string): Promise<Scheme> {
+  try {
+    const account = await parallelStore.get(accountId);
+    return account.scheme ?? 'https';
+  } catch {
+    return 'https';
+  }
+}
+
 async function capturePreJar(accountId: string, host: string): Promise<void> {
   try {
-    preJarMap.set(accountId, (await chrome.cookies.getAll({ url: `https://${host}/` })) as JarCookie[]);
+    const scheme = await schemeOfAccount(accountId);
+    preJarMap.set(accountId, (await chrome.cookies.getAll({ url: `${scheme}://${host}/` })) as JarCookie[]);
   } catch {
     preJarMap.delete(accountId);
   }
@@ -358,8 +370,9 @@ async function sweepLoginCookiesFromJar(accountId: string, host: string, capture
     void diag(`sweep(${accountId}) 跳过：无登录前基线（SW 重启）——依赖 onChanged 驱逐兜底`);
     return;
   }
+  const scheme = await schemeOfAccount(accountId);
   const preKeys = new Set(pre.map((c) => `${c.name}|${c.value}`));
-  const jarNow = (await chrome.cookies.getAll({ url: `https://${host}/` }).catch(() => [])) as JarCookie[];
+  const jarNow = (await chrome.cookies.getAll({ url: `${scheme}://${host}/` }).catch(() => [])) as JarCookie[];
   let removed = 0;
   for (const c of jarNow) {
     // 差集成员：在 jar 中、被快照捕获、但登录前不存在 → 本会话写入的扩展 Cookie
@@ -402,7 +415,8 @@ async function snapshotLoginCookies(accountId: string, host: string): Promise<vo
     return;
   }
   try {
-    const list = await chrome.cookies.getAll({ url: `https://${host}/` });
+    const scheme = await schemeOfAccount(accountId);
+    const list = await chrome.cookies.getAll({ url: `${scheme}://${host}/` });
     const before = list.length;
     const jarCookies = list.filter((c) => !IDENTITY_COOKIE_BLACKLIST.has(c.name));
     if (snap.cookies?.length) {
@@ -659,8 +673,9 @@ export const parallelSession = {
           await persistTokens();
         }
       }
-      // 已有登录态直达站点根路径；否则进登录页自动填表
-      const url = `https://${account.siteHost}${hasToken ? '/' : '/login'}`;
+      // 已有登录态直达站点根路径；否则进登录页自动填表。scheme 跟随账号档案（v3.10.9）
+      const scheme = account.scheme ?? 'https';
+      const url = `${scheme}://${account.siteHost}${hasToken ? '/' : '/login'}`;
       const tab = await chrome.tabs.create({ url });
       tabId = tab.id!;
       void diag(`open(${accountId}) 新建 tab=${tabId} url=${url}`);
@@ -1028,6 +1043,48 @@ export function registerParallelHandlers(): void {
   }
 
   void cleanupStaleBindings();
+}
+
+/* ---------------- 打开失败自学习（v3.10.9） ----------------
+ * 探测歧义的兜底：内网 https 自签证书会被 SW fetch 误判为「无 https」，或存量账号
+ * 默认 https 而站点实为纯 http——打开落 chrome-error 页时，scheme 类网络错误触发
+ * 协议翻转写回账号档案并原页签重开（用户无感；15s 防抖避免循环翻转）。 */
+
+const SCHEME_FLIP_ERRORS = new Set([
+  'net::ERR_SSL_PROTOCOL_ERROR',
+  'net::ERR_CONNECTION_REFUSED',
+  'net::ERR_CONNECTION_RESET',
+  'net::ERR_EMPTY_RESPONSE',
+]);
+const schemeFlipAt = new Map<string, number>();
+
+/** scheme 类网络错误判定（ERR_SSL_PROTOCOL_ERROR = 443 无 TLS；REFUSED/RESET/EMPTY_RESPONSE = 端口未服务） */
+export function isSchemeFlipError(error: string): boolean {
+  return SCHEME_FLIP_ERRORS.has(error);
+}
+
+export async function handleOpenError(tabId: number, error: string): Promise<boolean> {
+  const binding = bindings.get(tabId);
+  if (!binding || !SCHEME_FLIP_ERRORS.has(error)) {
+    return false;
+  }
+  const account = await parallelStore.get(binding.accountId).catch(() => null);
+  if (!account) {
+    return false;
+  }
+  const now = Date.now();
+  if (now - (schemeFlipAt.get(binding.accountId) ?? 0) < 15_000) {
+    return false; // 翻转冷却中：让当前重开结果先落地
+  }
+  const current = account.scheme ?? 'https';
+  const flipped: Scheme = current === 'https' ? 'http' : 'https';
+  schemeFlipAt.set(binding.accountId, now);
+  await parallelStore.updateScheme(binding.accountId, flipped);
+  const hasToken = Boolean(tokens.get(binding.accountId)?.token);
+  const url = `${flipped}://${account.siteHost}${hasToken ? '/' : '/login'}`;
+  void diag(`handleOpenError(${binding.accountId}) ${error} → scheme 自学习 ${current}→${flipped}，重开 ${url}`);
+  await chrome.tabs.update(tabId, { url });
+  return true;
 }
 
 /** 恢复时清理指向已不存在标签页的陈旧绑定 */

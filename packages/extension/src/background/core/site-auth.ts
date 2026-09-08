@@ -63,6 +63,72 @@ function extractHost(url: string | undefined): string | null {
   }
 }
 
+/* ---------------- scheme（v3.10.9）：站点协议的探测 / hint / 解析 ---------------- */
+
+export type Scheme = 'http' | 'https';
+
+const SCHEME_HINTS_KEY = LOCAL_KEYS.siteSchemes;
+
+/** 站点 scheme hint（添加站点时从用户输入 URL 解析而来；账号创建时优先采用） */
+export async function getSchemeHint(host: string): Promise<Scheme | undefined> {
+  const stored = await chrome.storage.local.get(SCHEME_HINTS_KEY);
+  const map = (stored[SCHEME_HINTS_KEY] as Record<string, Scheme> | undefined) ?? {};
+  return map[siteKey(host)];
+}
+
+export async function setSchemeHint(host: string, scheme: Scheme): Promise<void> {
+  const stored = await chrome.storage.local.get(SCHEME_HINTS_KEY);
+  const map = (stored[SCHEME_HINTS_KEY] as Record<string, Scheme> | undefined) ?? {};
+  map[siteKey(host)] = scheme;
+  await chrome.storage.local.set({ [SCHEME_HINTS_KEY]: map });
+}
+
+/** 从用户输入解析 host 与 scheme：支持粘贴完整 URL（http://host[:port]/path）或纯 host */
+export function parseSiteInput(raw: string): { host: string; scheme?: Scheme } {
+  const trimmed = raw.trim();
+  const m = trimmed.match(/^(https?):\/\/([^/]+)(\/.*)?$/i);
+  if (m) {
+    return { host: m[2].toLowerCase(), scheme: m[1].toLowerCase() as Scheme };
+  }
+  return { host: trimmed.replace(/\/.*$/, '').toLowerCase() };
+}
+
+const PROBE_TIMEOUT_MS = 3000;
+
+async function probeOnce(url: string): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+    // HEAD 优先；部分服务器不支持 HEAD 时退 GET（404/405 也算「可达」——网络层通即可）
+    const res = await fetch(url, { method: 'HEAD', signal: ctrl.signal, credentials: 'omit' }).catch(() =>
+      fetch(url, { method: 'GET', signal: ctrl.signal, credentials: 'omit' }),
+    ).finally(() => clearTimeout(timer));
+    void res;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 探测站点可用协议：https 优先（安全偏好）。
+ * 注意：SW fetch 无法忽略证书错误——自签 https 会被误判为不可用而落到 http；
+ * 该歧义由「打开失败自学习」兜底纠正（handleOpenError）。
+ */
+export async function probeScheme(host: string): Promise<Scheme> {
+  const hint = await getSchemeHint(host);
+  if (hint) {
+    return hint;
+  }
+  if (await probeOnce(`https://${host}/favicon.ico`)) {
+    return 'https';
+  }
+  if (await probeOnce(`http://${host}/favicon.ico`)) {
+    return 'http';
+  }
+  return 'https';
+}
+
 export function registerAuthHandlers(): void {
   chrome.contextMenus.create(
     {

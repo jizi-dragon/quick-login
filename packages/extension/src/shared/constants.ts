@@ -1,5 +1,5 @@
 /** 扩展版本号（与根 package.json / manifest.json 保持同步；UI 中显性展示以区分构建） */
-export const EXT_VERSION = '3.10.8';
+export const EXT_VERSION = '3.10.9';
 
 export const IDB_NAME = 'sessionbox-reborn';
 export const IDB_VERSION = 2;
@@ -27,6 +27,8 @@ export const LOCAL_KEYS = {
   defaultBox: 'ql:defaultBox',
   /** 被禁用的盒子名单（轮盘跳过切换；空默认盒自动禁用） */
   disabledBoxes: 'ql:disabledBoxes',
+  /** 站点协议 hint（v3.10.9：授权时从用户输入 URL 解析；账号创建时优先采用） */
+  siteSchemes: 'ql:siteSchemes',
 } as const;
 
 /** background 向内容脚本下发的消息 type */

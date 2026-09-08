@@ -821,6 +821,7 @@ importRun.addEventListener('click', () => {
     }
     let okCount = 0;
     let failCount = 0;
+    const scheme = await resolveSchemeForHost(siteHost);
     for (const row of rows) {
       try {
         const res = await send({
@@ -831,6 +832,7 @@ importRun.addEventListener('click', () => {
           password: row.password,
           open: false,
           box,
+          scheme,
         });
         if (res.result.ok) {
           okCount += 1;
@@ -862,6 +864,46 @@ async function ensureHostPermission(host: string): Promise<boolean> {
   }
 }
 
+/* ==================== scheme（v3.10.9）：协议 hint 与解析 ==================== */
+
+type Scheme = 'http' | 'https';
+
+/** 从用户输入解析 host 与 scheme：支持粘贴完整 URL 或纯 host */
+function parseSiteInput(raw: string): { host: string; scheme?: Scheme } {
+  const trimmed = raw.trim();
+  const m = trimmed.match(/^(https?):\/\/([^/]+)(\/.*)?$/i);
+  if (m) {
+    return { host: m[2].toLowerCase(), scheme: m[1].toLowerCase() as Scheme };
+  }
+  return { host: trimmed.replace(/\/.*$/, '').toLowerCase() };
+}
+
+async function readSchemeHint(host: string): Promise<Scheme | undefined> {
+  const stored = await chrome.storage.local.get(LOCAL_KEYS.siteSchemes);
+  const map = (stored[LOCAL_KEYS.siteSchemes] as Record<string, Scheme> | undefined) ?? {};
+  return map[host.toLowerCase()];
+}
+
+async function writeSchemeHint(host: string, scheme: Scheme): Promise<void> {
+  const stored = await chrome.storage.local.get(LOCAL_KEYS.siteSchemes);
+  const map = (stored[LOCAL_KEYS.siteSchemes] as Record<string, Scheme> | undefined) ?? {};
+  map[host.toLowerCase()] = scheme;
+  await chrome.storage.local.set({ [LOCAL_KEYS.siteSchemes]: map });
+}
+
+/** 账号创建时确定站点协议：授权时用户输入的 hint 优先，否则 SW 自动探测（https 优先） */
+async function resolveSchemeForHost(host: string): Promise<Scheme | undefined> {
+  const hint = await readSchemeHint(host);
+  if (hint) {
+    return hint;
+  }
+  const res = await send({ kind: 'par.probeScheme', host }).catch(() => null);
+  if (res && res.result.ok && (res.result.data === 'http' || res.result.data === 'https')) {
+    return res.result.data;
+  }
+  return undefined;
+}
+
 async function openAccount(id: string, forceNewTab: boolean): Promise<void> {
   const account = browserAccounts.find((x) => x.id === id);
   if (!account) {
@@ -891,6 +933,7 @@ async function createAccount(open: boolean): Promise<void> {
   if (!username || !password) {
     return;
   }
+  const scheme = await resolveSchemeForHost(siteHost);
   const res = await send({
     kind: 'par.create',
     siteHost,
@@ -899,6 +942,7 @@ async function createAccount(open: boolean): Promise<void> {
     password,
     open,
     box: pBoxSelect.value,
+    scheme,
   });
   if (!res.result.ok) {
     alert(`添加失败：${res.result.error}`);
@@ -1154,11 +1198,16 @@ async function fillBoxOptions(): Promise<void> {
 
 siteForm.addEventListener('submit', (e) => {
   e.preventDefault();
-  const host = sHost.value.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  // v3.10.9：支持粘贴完整 URL——scheme 解析存 hint（账号创建时采用），host 用于授权
+  const parsed = parseSiteInput(sHost.value);
+  const host = parsed.host;
   if (!host) {
     return;
   }
   void (async () => {
+    if (parsed.scheme) {
+      await writeSchemeHint(host, parsed.scheme);
+    }
     const ok = await chrome.permissions.request({ origins: [patternOfHost(host)] }).catch(() => false);
     if (!ok) {
       alert(`未完成授权：${host}`);

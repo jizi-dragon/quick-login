@@ -7,6 +7,8 @@ export interface Session {
   color: string;
   /** 绑定的站点 host，例如 example.com */
   siteHost: string;
+  /** 站点协议（v3.10.9）：缺省 = https（兼容存量）；打开 URL 与 Cookie 查询跟随 */
+  scheme?: 'http' | 'https';
   /** 加密存储的账号密码（可选） */
   credentials?: EncryptedCredentials;
   createdAt: number;
@@ -40,6 +42,9 @@ export interface ParallelAccount {
   id: string;
   /** 绑定的站点 host */
   siteHost: string;
+  /** 站点协议（v3.10.9）：缺省 = https（兼容存量）；打开 URL 与 Cookie 查询跟随。
+   *  来源：添加时解析用户输入/自动探测（https 优先），打开失败时自学习翻转。 */
+  scheme?: 'http' | 'https';
   /** 自定义页签名 —— 该账号标签页的标题 */
   tabName: string;
   /** 账号名（登录用户名） */

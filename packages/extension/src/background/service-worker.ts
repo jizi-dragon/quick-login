@@ -4,9 +4,11 @@ import { CONTENT_MESSAGE, EXT_VERSION, LOCAL_KEYS } from '../shared/constants';
 import { accountRegistry } from './core/account-registry';
 import { credentials } from './core/credentials';
 import { navigation, registerNavigationHandlers } from './core/navigation';
-import { siteAuth } from './core/site-auth';
+import { siteAuth, probeScheme } from './core/site-auth';
 import {
+  handleOpenError,
   invalidateEnforcementCache,
+  isSchemeFlipError,
   parallelSession,
   registerParallelHandlers,
   warmEnforcementCache,
@@ -183,6 +185,7 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
           username: req.username,
           password: req.password,
           box: req.box,
+          scheme: req.scheme,
         });
         if (req.open) {
           await parallelSession.open(account.id, false);
@@ -190,6 +193,10 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
         return account;
       });
       return { kind: 'par.create', result: r };
+    }
+    case 'par.probeScheme': {
+      const r = await tryRun(() => probeScheme(req.host));
+      return { kind: 'par.probeScheme', result: r };
     }
     case 'par.moveBox': {
       const r = await tryRun(() => parallelStore.updateBox(req.id, req.box));
@@ -465,6 +472,20 @@ async function flashBadge(text: string): Promise<void> {
 
 registerNavigationHandlers();
 registerParallelHandlers();
+
+// 打开失败自学习（v3.10.9）：绑定页签加载失败时按错误类型翻转协议并原页签重开。
+// 优先并行账号（par.* 主流程），未命中再试旧会话模型（session.* 轮盘路径）。
+chrome.webNavigation.onErrorOccurred.addListener((details) => {
+  if (details.frameId !== 0 || !isSchemeFlipError(details.error)) {
+    return; // 仅主 frame 的 scheme 类导航失败才触发协议翻转
+  }
+  void (async () => {
+    if (await handleOpenError(details.tabId, details.error)) {
+      return;
+    }
+    await navigation.handleSessionOpenError(details.tabId);
+  })();
+});
 
 /* 启动即短显版本号：重新加载扩展后，无需打开任何界面即可确认新代码已生效 */
 void flashBadge(`v${EXT_VERSION.split('.').slice(0, 2).join('.')}`).finally(() => {
