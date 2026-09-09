@@ -55,6 +55,24 @@ async function diag(msg: string): Promise<void> {
   }
 }
 
+/** 登录失败现场取证（v3.12.2）：结构化事件写入 storage.local['ql:forensics']（环形 120 条）。
+ *  与 diag（人读文本）并行；管理页「导出诊断包」一键取走。 */
+export async function forensics(ev: string, detail: Record<string, unknown> = {}): Promise<void> {
+  try {
+    const key = LOCAL_KEYS.forensics;
+    const cur = (await chrome.storage.local.get(key))[key] as
+      | { t: number; ev: string; [k: string]: unknown }[]
+      | undefined;
+    const next = [
+      ...(cur ?? []).slice(-119),
+      { t: Date.now(), ev, ...detail },
+    ];
+    await chrome.storage.local.set({ [key]: next });
+  } catch {
+    // 取证失败不影响业务
+  }
+}
+
 async function readBlockedHosts(): Promise<Set<string>> {
   const stored = await chrome.storage.local.get(LOCAL_KEYS.blockedHosts);
   return new Set((stored[LOCAL_KEYS.blockedHosts] as string[] | undefined) ?? []);
@@ -194,6 +212,12 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
   snap.token = token;
   tokens.set(accountId, snap);
   await persistTokens();
+  void forensics('token-captured', {
+    accountId,
+    first: isFirstCapture,
+    tokenLen: token.length,
+    cookieCount: snap.cookies?.length ?? 0,
+  });
   // 快照触发必须在 captureToken 内部：token 首捕可能来自 authHeader 嗅探（早于
   // storageWrite 事件），两条通道都必须覆盖，否则错过登录时点（v3.6.1 修复）
   if (isFirstCapture) {
@@ -284,6 +308,7 @@ function authUserIdentity(value: string): string | null {
  */
 async function defectTabToRaw(tabId: number, accountId: string, host: string, reason: string): Promise<void> {
   void diag(`defect(${tabId}) 账号=${accountId} @${host} 身份叛逃（${reason}）→ 转为原始页签`);
+  void forensics('defect', { tabId, accountId, reason });
   await pushDown(tabId, { op: 'journalRollback' });
   await pushDown(tabId, { op: 'nsWipeShared' });
   const snap = tokens.get(accountId);
@@ -436,6 +461,11 @@ async function terminateLoginState(accountId: string, host: string): Promise<voi
   if (!snap || (!snap.token && !snap.cookies?.length && !snap.authUser)) {
     return; // 无登录态可终结
   }
+  void forensics('terminate', {
+    accountId,
+    hadToken: Boolean(snap.token),
+    cookieCount: snap.cookies?.length ?? 0,
+  });
   void diag(
     `terminateLoginState(${accountId}) 最后页签关闭：终结登录态（token=${snap.token ? '有' : '无'} cookie=${snap.cookies?.length ?? 0}）`,
   );
@@ -743,6 +773,13 @@ export const parallelSession = {
         tabId = existing;
       }
     }
+    void forensics('open', {
+      accountId,
+      forceNewTab,
+      reused: tabId !== null,
+      hasCredentials: Boolean(account.credentials),
+      box: account.box ?? null,
+    });
 
     if (tabId === null) {
       // 登录前基线：记录打开时刻的真实 jar，快照首捕时按差集清扫（v3.10.2 会话卫生）
@@ -751,7 +788,8 @@ export const parallelSession = {
       // 快照已清）——此刻残留的 token/Cookie 属于「已死凭证」，一律废弃并从登录页重新
       // 开始（自动填表免输入）。彻底消灭「过期凭证免密直达 → 登录 POST 带旧身份」的丑态。
       const stale = tokens.get(accountId);
-      if (stale && (stale.token || stale.cookies?.length || stale.authUser)) {
+      const staleCleared = Boolean(stale && (stale.token || stale.cookies?.length || stale.authUser));
+      if (stale && staleCleared) {
         delete stale.token;
         delete stale.cookies;
         delete stale.authUser;
@@ -767,6 +805,15 @@ export const parallelSession = {
       const tab = await chrome.tabs.create({ url });
       tabId = tab.id!;
       void diag(`open(${accountId}) 新建 tab=${tabId} url=${url}`);
+      void forensics('open-tab', {
+        accountId,
+        tabId,
+        url,
+        hasLiveSibling,
+        staleCleared,
+        cookieSnapshot: stale?.cookies?.length ?? 0,
+        hadToken: Boolean(stale?.token),
+      });
     } else {
       await chrome.tabs.update(tabId, { active: true });
       void diag(`open(${accountId}) 复用 tab=${tabId}`);
@@ -889,6 +936,7 @@ export const parallelSession = {
           tokens.set(binding.accountId, snap);
           await persistTokens();
           await syncAccountRules(binding.accountId, binding.host);
+          void forensics('logout', { accountId: binding.accountId, tabId });
         } else if (
           snap.token &&
           payload.value !== snap.token &&

@@ -7,6 +7,7 @@ import { navigation, registerNavigationHandlers } from './core/navigation';
 import { pageMonitor } from './core/page-monitor';
 import { siteAuth, probeScheme } from './core/site-auth';
 import {
+  forensics,
   handleOpenError,
   invalidateEnforcementCache,
   isSchemeFlipError,
@@ -360,6 +361,18 @@ chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
       return true;
     }
     void navigation.getPendingAutoLogin(tabId).then((creds) => sendResponse(creds));
+    return true;
+  }
+
+  // 1.2 自动填表取证事件（v3.12.2）：填充/点击/让位/被拒逐事件入 forensics 环形缓冲
+  if (
+    req &&
+    typeof req === 'object' &&
+    (req as { type?: string }).type === CONTENT_MESSAGE.autoLoginEvent
+  ) {
+    const p = (req as { event?: Record<string, unknown> }).event ?? {};
+    void forensics('autoLogin', { tabId: sender.tab?.id, ...p });
+    sendResponse({ ok: true });
     return true;
   }
 
