@@ -253,8 +253,10 @@ function sortedStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/** 提取 __auth_user__ 值中的用户名主体；不可解析时返回原文（两侧同法提取，可稳定比较） */
-function authUserIdentity(value: string): string {
+/** 提取 __auth_user__ 值中的用户名主体；**不可解析/无标准字段时返回 null**（护栏放行）。
+ *  v3.12.0 防误判：旧实现返回 JSON 原文——原文里的时间戳/字段序差异会让同账号的
+ *  两次写入被判「主体变更」→ defectTabToRaw 解绑重载 → 登录成功即被踢回登录页。 */
+function authUserIdentity(value: string): string | null {
   try {
     const obj = JSON.parse(value) as Record<string, unknown>;
     for (const key of ['username', 'userName', 'loginName', 'account', 'name', 'mobile', 'phone', 'email', 'uid', 'userId', 'id']) {
@@ -266,9 +268,9 @@ function authUserIdentity(value: string): string {
         return String(v);
       }
     }
-    return value;
+    return null;
   } catch {
-    return value;
+    return null;
   }
 }
 
@@ -424,6 +426,39 @@ function trackCookieAttribution(details: { tabId: number; responseHeaders?: { na
     }
     cookieAttribution.delete(oldest);
   }
+}
+
+/** 登录态终结（v3.12.0）：账号最后一个绑定页签关闭时调用。
+ *  快照清空（token/Cookie/authUser）；jar 中由绑定页签写入的该账号 Cookie 按
+ *  attribution 门控清扫（原生页签写入的不动）。下次打开 = 干净登录页 + 自动填表。 */
+async function terminateLoginState(accountId: string, host: string): Promise<void> {
+  const snap = tokens.get(accountId);
+  if (!snap || (!snap.token && !snap.cookies?.length && !snap.authUser)) {
+    return; // 无登录态可终结
+  }
+  void diag(
+    `terminateLoginState(${accountId}) 最后页签关闭：终结登录态（token=${snap.token ? '有' : '无'} cookie=${snap.cookies?.length ?? 0}）`,
+  );
+  try {
+    const scheme = await schemeOfAccount(accountId).catch(() => 'https' as const);
+    const jarNow = (await chrome.cookies.getAll({ url: `${scheme}://${hostNoPortOf(host)}/` }).catch(() => [])) as JarCookie[];
+    for (const c of jarNow) {
+      if (IDENTITY_COOKIE_BLACKLIST.has(c.name)) {
+        continue;
+      }
+      const attr = cookieAttribution.get(`${c.name}|${c.value}`);
+      if (attr?.bound && (snap.cookies ?? []).some((k) => k.name === c.name && k.value === c.value)) {
+        await removeJarCookie(c);
+      }
+    }
+  } catch {
+    // 清扫失败不影响快照终结
+  }
+  delete snap.token;
+  delete snap.cookies;
+  delete snap.authUser;
+  tokens.set(accountId, snap);
+  await persistTokens();
 }
 
 /** onChanged 持续驱逐：命中任一账号快照对（或身份 token）的写 jar 行为立即移除 */
@@ -712,20 +747,23 @@ export const parallelSession = {
     if (tabId === null) {
       // 登录前基线：记录打开时刻的真实 jar，快照首捕时按差集清扫（v3.10.2 会话卫生）
       await capturePreJar(account.id, account.siteHost);
-      const hasToken = Boolean(tokens.get(accountId)?.token);
-      if (hasToken) {
-        // 打开即愈（v3.10.3）：authUser 是页面写入的派生状态——历史污染（或叛逃残留）
-        // 的用户身份在每次免密直达时清零，种子同步清空命名空间键，由页面鉴权后重写
-        const snap = tokens.get(accountId);
-        if (snap?.authUser) {
-          delete snap.authUser;
-          tokens.set(accountId, snap);
-          await persistTokens();
-        }
+      // v3.12.0 登录态生命周期跟随页签：无活绑定页签 = 登录态已终结（最后页签关闭时
+      // 快照已清）——此刻残留的 token/Cookie 属于「已死凭证」，一律废弃并从登录页重新
+      // 开始（自动填表免输入）。彻底消灭「过期凭证免密直达 → 登录 POST 带旧身份」的丑态。
+      const stale = tokens.get(accountId);
+      if (stale && (stale.token || stale.cookies?.length || stale.authUser)) {
+        delete stale.token;
+        delete stale.cookies;
+        delete stale.authUser;
+        tokens.set(accountId, stale);
+        await persistTokens();
+        void diag(`open(${accountId}) 无活页签：废弃残留登录态（v3.12.0 生命周期），走登录页自动填表`);
       }
-      // 已有登录态直达站点根路径；否则进登录页自动填表。scheme 跟随账号档案（v3.10.9）
+      // 唯一例外（复制语义）：已有活页签但用户强制新开（forceNewTab）→ 视为「同账号
+      // 复制页签」，token 活性由活页签背书，直达根路径保持身份稳定。
+      const hasLiveSibling = boundTabsOf(accountId).length > 0;
       const scheme = account.scheme ?? 'https';
-      const url = `${scheme}://${account.siteHost}${hasToken ? '/' : '/login'}`;
+      const url = `${scheme}://${account.siteHost}${hasLiveSibling ? '/' : '/login'}`;
       const tab = await chrome.tabs.create({ url });
       tabId = tab.id!;
       void diag(`open(${accountId}) 新建 tab=${tabId} url=${url}`);
@@ -760,8 +798,9 @@ export const parallelSession = {
     return { tabId, reused: false };
   },
 
-  /** 解绑单个标签页（不动账号数据） */
+  /** 解绑单个标签页（不动账号数据）；最后一个绑定页签关闭 = 该账号登录态终结（v3.12.0） */
   async unbindTab(tabId: number): Promise<void> {
+    const binding = bindings.get(tabId);
     if (bindings.delete(tabId)) {
       await persistBindings();
     }
@@ -770,6 +809,10 @@ export const parallelSession = {
       await pushDown(tabId, { op: 'unbound' });
     } catch {
       // 页面可能已关闭
+    }
+    if (binding && boundTabsOf(binding.accountId).length === 0) {
+      // 登录态生命周期跟随页签：无活页签 = 凭证视为已死，终结快照并清扫 jar 残留
+      await terminateLoginState(binding.accountId, binding.host);
     }
   },
 
@@ -869,7 +912,9 @@ export const parallelSession = {
           (() => {
             const a = authUserIdentity(snap.authUser!);
             const b = authUserIdentity(payload.value!);
-            return a !== b;
+            // v3.12.0：两侧都成功提取才可比对——任一侧提取失败（非标准字段/原文）
+            // 一律放行（原文比对会因时间戳差异把同账号误判为叛逃）
+            return a !== null && b !== null && a !== b;
           })()
         ) {
           // 身份叛逃（用户信息主体变更；user 写入可能先于 token 写入到达）
