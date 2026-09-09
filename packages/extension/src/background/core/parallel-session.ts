@@ -37,6 +37,10 @@ interface TokenSnapshot {
 }
 
 const bindings = new Map<number, ParBinding>();
+/** 亲子继承候选（v3.13 加固）：URL 未确认授权前不发种子/不装规则；
+ *  expires 超时未导航（如停留在 about:blank）则自动放弃并通知壳回直通。 */
+const pendingAdoptions = new Map<number, { accountId: string; host: string; expires: number }>();
+const PENDING_ADOPT_TTL = 30_000;
 const tokens = new Map<string, TokenSnapshot>();
 /** 授权健康缓存：host → 是否可执行（已授权且未被手动停用） */
 const enforcement = new Map<string, boolean>();
@@ -883,8 +887,10 @@ export const parallelSession = {
 
   /**
    * 站点自开的新页签亲子继承（window.open / target=_blank）：opener 已绑定账号 A
-   * → 新页签自动绑定为 A 的第二个页签（AUTH/COOKIE 规则、种子、命名空间、标题全随 A）。
-   * 手动 Ctrl+T（无 openerTabId）不继承，保留有意脱离的口子。
+   * → 新页签登记为**收编候选**（v3.13 加固：此时 URL 尚未落地，不立即绑定）。
+   * 首次导航 URL 由 onNavigation 确认：授权域内 → 正式收编（种子/规则此时才下发）；
+   * 授权域之外或登录页 → 丢弃候选，页签保持原生（根本原则：外部链接零接触）。
+   * 手动 Ctrl+T（无 openerTabId）连候选都不是。
    */
   async adoptFromOpener(tab: chrome.tabs.Tab): Promise<void> {
     const openerId = tab.openerTabId;
@@ -900,16 +906,13 @@ export const parallelSession = {
     if (!account) {
       return;
     }
-    // 弹窗继承页签的登录若发生在绑定之后，其 Set-Cookie 属于差集，可被清扫（best-effort 基线）
-    if (!tokens.get(account.id)?.token) {
-      await capturePreJar(account.id, parent.host);
-    }
-    bindings.set(tabId, { accountId: account.id, host: parent.host, adopted: true });
-    await persistBindings();
-    await syncAccountRules(account.id, parent.host);
-    await pushBind(tabId);
-    await applyTitle(tabId, account.tabName);
-    void diag(`adopt tab=${tabId} ← opener=${openerId} 账号=${account.id}（亲子继承）`);
+    pendingAdoptions.set(tabId, {
+      accountId: account.id,
+      host: parent.host,
+      expires: Date.now() + PENDING_ADOPT_TTL,
+    });
+    void forensics('adopt-candidate', { tabId, accountId: account.id, host: parent.host });
+    void diag(`adopt-candidate tab=${tabId} ← opener=${openerId} 账号=${account.id}（候选，待 URL 确认）`);
   },
 
   /** 删除账号：关闭其全部绑定标签页、摘除规则、清 token */
@@ -933,6 +936,11 @@ export const parallelSession = {
         const binding = bindings.get(tabId);
         if (binding) {
           return buildBindPayload(binding.accountId, tabId);
+        }
+        if (pendingAdoptions.has(tabId)) {
+          // v3.13 收编候选：URL 未确认前不灌种子/不置 settled——壳保持等待（hold），
+          // URL 确认授权后再正式收编（防止候选期的种子流入外部域）
+          return { op: 'hold' };
         }
       }
       return { op: 'unbound' };
@@ -1054,6 +1062,72 @@ export const parallelSession = {
 
   /** 标签页导航开始：重新推绑定种子与标题（SPA/整页刷新都会重置） */
   async onNavigation(tabId: number): Promise<void> {
+    // v3.13 收编加固：候选页签的首个真实导航落地 → 按目标 URL 决定收编或放弃。
+    // 授权域内（host 或 *.父域）→ 正式收编（此刻才发种子/装规则）；
+    // 授权域之外 / 登录页 → 丢弃候选（页签保持原生，种子/规则零接触）。
+    const pending = pendingAdoptions.get(tabId);
+    if (pending) {
+      if (Date.now() > pending.expires) {
+        // 候选超时（30s 内未发生真实导航）：放弃并让壳回直通
+        pendingAdoptions.delete(tabId);
+        void pushDown(tabId, { op: 'unbound' });
+        return;
+      }
+      let url = '';
+      try {
+        url = (await chrome.tabs.get(tabId)).url ?? '';
+      } catch {
+        pendingAdoptions.delete(tabId);
+        return;
+      }
+      if (!/^https?:\/\//i.test(url)) {
+        return; // 尚未发生真实导航（about:blank 等），继续等待
+      }
+      pendingAdoptions.delete(tabId);
+      let urlHost = '';
+      let path = '';
+      try {
+        const u = new URL(url);
+        urlHost = u.hostname;
+        path = u.pathname.toLowerCase();
+      } catch {
+        void diag(`adopt-candidate tab=${tabId} URL 不可解析：丢弃候选`);
+        void pushDown(tabId, { op: 'unbound' });
+        return;
+      }
+      const pendingHost = hostNoPortOf(pending.host);
+      const parent = parentDomainOf(pendingHost);
+      const sameSite = urlHost === pendingHost || urlHost.endsWith(`.${parent}`);
+      if (!sameSite) {
+        void diag(`adopt-candidate tab=${tabId} 目标 ${urlHost} 非授权域：丢弃候选（根本原则）`);
+        void forensics('adopt-dropped', { tabId, accountId: pending.accountId, host: urlHost, reason: 'external-domain' });
+        void pushDown(tabId, { op: 'unbound' });
+        return;
+      }
+      if (path.includes('login')) {
+        // v3.10.4 语义：继承页签进登录页 = 用户当独立浏览器用 → 保持原生（丢弃候选）
+        void diag(`adopt-candidate tab=${tabId} 进入登录页：丢弃候选（转原始）`);
+        void pushDown(tabId, { op: 'unbound' });
+        return;
+      }
+      const account = await parallelStore.get(pending.accountId).catch(() => undefined);
+      if (!account) {
+        void pushDown(tabId, { op: 'unbound' });
+        return;
+      }
+      if (!tokens.get(account.id)?.token) {
+        await capturePreJar(account.id, pending.host);
+      }
+      bindings.set(tabId, { accountId: account.id, host: pending.host, adopted: true });
+      await persistBindings();
+      await syncAccountRules(account.id, pending.host);
+      await pushBind(tabId);
+      await applyTitle(tabId, account.tabName);
+      void forensics('adopt', { tabId, accountId: account.id, host: pending.host, url });
+      void diag(`adopt tab=${tabId} ← 账号=${account.id}（URL 确认后正式收编）`);
+      return;
+    }
+
     const binding = bindings.get(tabId);
     if (!binding) {
       return;
@@ -1119,6 +1193,7 @@ export const parallelSession = {
   },
 
   async handleTabRemoved(tabId: number): Promise<void> {
+    pendingAdoptions.delete(tabId); // 候选页签关闭：清理（未正式收编无残留）
     if (bindings.has(tabId)) {
       await this.unbindTab(tabId);
     }

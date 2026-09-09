@@ -1,5 +1,5 @@
 /** 扩展版本号（与根 package.json / manifest.json 保持同步；UI 中显性展示以区分构建） */
-export const EXT_VERSION = '3.12.3';
+export const EXT_VERSION = '3.13.0';
 export const IDB_NAME = 'sessionbox-reborn';
 export const IDB_VERSION = 2;
 export const IDB_STORE_SESSIONS = 'sessions';
@@ -28,7 +28,7 @@ export const LOCAL_KEYS = {
   disabledBoxes: 'ql:disabledBoxes',
   /** 站点协议 hint（v3.10.9：授权时从用户输入 URL 解析；账号创建时优先采用） */
   siteSchemes: 'ql:siteSchemes',
-  /** 最近配置页 MRU（v3.11：按 host 分组，每组至多 RECENT_PAGES_MAX 条） */
+  /** 最近配置页 MRU（v3.13：按 host 分组，每组至多 RECENT_PAGES_MAX 条；**仅记录绑定页签**） */
   recentPages: 'ql:recentPages',
   /** 登录失败现场取证环形缓冲（v3.12.2：生命周期 + 自动填表逐事件） */
   forensics: 'ql:forensics',

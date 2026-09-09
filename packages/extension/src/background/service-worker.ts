@@ -377,6 +377,7 @@ chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
   }
 
   // 1.5 v3.11 最近配置页：需要 sender.tab，先于通用分流处理
+  // 1.8 最近配置页（v3.13 收敛：仅绑定页签有数据，未绑定页签返回空——根本原则）
   if (req && typeof req === 'object' && (req as { kind?: string }).kind === 'pages.recent') {
     void pageMonitor.recentForTab(sender.tab?.id).then((list) => sendResponse({ kind: 'pages.recent', result: ok(list) }));
     return true;
@@ -493,7 +494,7 @@ chrome.commands.onCommand.addListener((command) => {
   }
 });
 
-/** v3.11 最近配置页轮盘：页面内无框浮层（再次触发 = 脚本自关闭，与账号轮盘同机制） */
+/** 最近配置页轮盘（v3.13 收敛：仅绑定页签可唤起——页面监视只记录绑定页签） */
 async function togglePagesOverlay(): Promise<void> {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
