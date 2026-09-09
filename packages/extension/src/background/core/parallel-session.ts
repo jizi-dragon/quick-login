@@ -364,7 +364,9 @@ async function removeJarCookie(c: { name: string; domain: string; path: string; 
   }
 }
 
-/** 快照首捕后按差集清扫：只移除「本次登录新写入」的 Cookie，保留登录前已存在的（如原始会话） */
+/** 快照首捕后按差集清扫：只移除「本次登录新写入」的 Cookie，保留登录前已存在的（如原始会话）。
+ *  v3.11.1 归属门控：候选还必须是「绑定页签写入」（webRequest 归属）——同账号原生登录
+ *  写入的同值 Cookie 属于原生会话，受根本原则保护，不清扫。 */
 async function sweepLoginCookiesFromJar(accountId: string, host: string, captured: Array<{ name: string; value: string }>): Promise<void> {
   const pre = preJarMap.get(accountId);
   if (!pre) {
@@ -375,15 +377,53 @@ async function sweepLoginCookiesFromJar(accountId: string, host: string, capture
   const preKeys = new Set(pre.map((c) => `${c.name}|${c.value}`));
   const jarNow = (await chrome.cookies.getAll({ url: `${scheme}://${host}/` }).catch(() => [])) as JarCookie[];
   let removed = 0;
+  let protectedCount = 0;
   for (const c of jarNow) {
     // 差集成员：在 jar 中、被快照捕获、但登录前不存在 → 本会话写入的扩展 Cookie
     if (!preKeys.has(`${c.name}|${c.value}`) && captured.some((k) => k.name === c.name && k.value === c.value)) {
+      const attr = cookieAttribution.get(`${c.name}|${c.value}`);
+      if (!attr || !attr.bound) {
+        protectedCount++;
+        continue; // 非绑定页签写入：原生会话，受根本原则保护
+      }
       await removeJarCookie(c);
       removed++;
     }
   }
   preJarMap.delete(accountId);
-  void diag(`sweep(${accountId}) 差集清扫 ${removed} 枚（jar 现存 ${jarNow.length}）`);
+  void diag(`sweep(${accountId}) 差集清扫 ${removed} 枚（jar 现存 ${jarNow.length}，原生保护 ${protectedCount}）`);
+}
+
+/* ---------------- 写入者归属（v3.11.1 根本原则）----------------
+ * 根本原则：扩展只能影响扩展打开的网页，不得以规则/能力影响原有网页。会话卫生
+ * （驱逐/清扫）此前不区分写入者——同账号「原生登录」（原始页签手输登录）写入真实
+ * jar 的会话 Cookie 会与快照对撞而被驱逐/清扫 → 扩展破坏原生会话。
+ * 对策：观察型 webRequest 记录每条 Set-Cookie 的写入者（所在响应的 tabId 是否绑定）；
+ * 驱逐/清扫只作用于「绑定页签写入」的 Cookie。原生页签的网络写入归属为 unbound；
+ * 原生页签的 JS document.cookie 写入不产生网络事件（无归属）——同样保留。 */
+const cookieAttribution = new Map<string, { bound: boolean; at: number }>();
+const ATTRIBUTION_LIMIT = 800;
+
+function trackCookieAttribution(details: { tabId: number; responseHeaders?: { name: string; value?: string }[] }): void {
+  const sets = (details.responseHeaders ?? []).filter((h) => h.name.toLowerCase() === 'set-cookie');
+  if (!sets.length) {
+    return;
+  }
+  const bound = bindings.has(details.tabId);
+  for (const h of sets) {
+    const parsed = parseSetCookie(h.value ?? '');
+    if (!parsed || parsed.remove) {
+      continue; // 作废指令不是「写入」
+    }
+    cookieAttribution.set(`${parsed.name}|${parsed.value}`, { bound, at: Date.now() });
+  }
+  while (cookieAttribution.size > ATTRIBUTION_LIMIT) {
+    const oldest = cookieAttribution.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    cookieAttribution.delete(oldest);
+  }
 }
 
 /** onChanged 持续驱逐：命中任一账号快照对（或身份 token）的写 jar 行为立即移除 */
@@ -392,6 +432,7 @@ async function evictJarCookie(change: chrome.cookies.CookieChangeInfo): Promise<
   if (!c.value) {
     return; // 移除事件本身
   }
+  const key = `${c.name}|${c.value}`;
   const known = new Set<string>();
   for (const snap of tokens.values()) {
     for (const k of snap.cookies ?? []) {
@@ -401,11 +442,19 @@ async function evictJarCookie(change: chrome.cookies.CookieChangeInfo): Promise<
       known.add(`__auth_token__|${snap.token}`);
     }
   }
-  if (!known.has(`${c.name}|${c.value}`)) {
+  if (!known.has(key)) {
+    return;
+  }
+  // v3.11.1 根本原则归属门控：仅驱逐「绑定页签写入」的 Cookie。写入者归属来自
+  // webRequest 响应观察（Set-Cookie 所在响应的 tabId 是否绑定）——同账号原生登录、
+  // 原始页签的任何写 jar 行为一律保留（扩展不得影响原有网页）。
+  const attr = cookieAttribution.get(key);
+  if (!attr || !attr.bound) {
+    void diag(`evict 跳过 ${c.name}（写入者非绑定页签——原生会话受保护）`);
     return;
   }
   await removeJarCookie(c);
-  void diag(`evict jar cookie ${c.name}（命中账号快照）@ ${c.domain}`);
+  void diag(`evict jar cookie ${c.name}（命中账号快照·绑定页签写入）@ ${c.domain}`);
 }
 
 /** 登录时点快照该账号的站内 Cookie（含 HttpOnly，剔除身份类黑名单）进账号档案。
@@ -1035,11 +1084,13 @@ export function registerParallelHandlers(): void {
     void evictJarCookie(change);
   });
 
-  // 快照动态化（v3.10.6）：绑定页签收到的响应 Set-Cookie 实时并入账号快照。
+  // 快照动态化（v3.10.6）+ 写入者归属（v3.11.1）：绑定页签收到的响应 Set-Cookie
+  // 实时并入账号快照，并记录写入者归属（根本原则：原生页签写入不受卫生机制影响）。
   // 观察型 webRequest（MV3 允许；无 host 权限的站点不产生事件——授权门控天然成立）。
   if (chrome.webRequest?.onHeadersReceived) {
     chrome.webRequest.onHeadersReceived.addListener(
       (details: { tabId: number; url: string; responseHeaders?: { name: string; value?: string }[] }) => {
+        trackCookieAttribution(details);
         void captureResponseCookies(details);
       },
       { urls: ['*://*/*'] },

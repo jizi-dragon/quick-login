@@ -2,6 +2,16 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.11.1（2026-08-29）
+
+**根本原则落地：扩展只能影响扩展打开的网页，不得以规则/能力影响原有网页。** 全量审计后修复三处违规：
+
+- **会话卫生归属化（核心修复）**：v3.10.2 的 Cookie 驱逐/清扫此前**不区分写入者**——同账号「原生登录」（原始页签手输登录）写入真实 jar 的会话 Cookie 与快照对撞即被驱逐/清扫，**扩展破坏了原生登录态**。现引入**写入者归属追踪**：观察型 `webRequest` 记录每条 `Set-Cookie` 所在响应的 tabId 是否绑定（`cookieAttribution`，上限 800 条修剪）；`evictJarCookie` 与 `sweepLoginCookiesFromJar` 仅作用于「绑定页签写入」的 Cookie——原生页签的网络写入归属为 unbound、原生页签的 JS 写入不产生网络事件（无归属），一律保留。
+- **遗留免密切换路径不再清空真实 jar**：`clearLoginState` 移除 `chrome.cookies.remove({domain: host})` 全 host 清除（连带杀死原始页签原生登录态）；仅保留扩展打开页签内的 localStorage 清理。
+- 保持不变（设计确认）：DNR 规则全部带 `tabIds` 作用域（天然不影响其它页签）；亲子继承（v3.9.6，用户明确要求）保留——继承页签进入登录页自动转原始的护栏（v3.10.4）继续兜底。
+
+> 决策点（保留现状，待定夺）：亲子继承使「平台自己 window.open 的页签」也进入账号隔离作用域。若按最严格解释（只有 par.open 打开的页签才受影响）需移除继承，将回退 v3.9.6 修复的弹窗编辑串号。
+
 ## 3.11.0（2026-08-28）
 
 **新增：配置页监听 · 最近 5 个 · 主体名页签标注 · 跳转轮盘**（可行性调研 `docs/FEASIBILITY-RECENT-PAGES.md` 五类页面映射实测闭环后落地）。
