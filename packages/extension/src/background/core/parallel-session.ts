@@ -1080,7 +1080,16 @@ function buildBindPayload(accountId: string, tabId?: number): BridgeDownPayload 
   if (snap?.deviceFp) {
     seed['__device_fp__'] = snap.deviceFp;
   }
-  return { op: 'bind', accountId, tabId, seed };
+  // 账号 Cookie 快照的权威视图（非身份键；v3.12.1）：绑定时壳把袋整体同步到该视图。
+  // 无 token（登录前窗口）时为空对象 = 清空上一会话残留的陈旧袋值——
+  // 否则陈旧 Cookie 会经页内读取/袋回流毒化登录 POST（快捷登录登出后失败的根因）。
+  const bag: Record<string, string> = {};
+  for (const c of snap?.cookies ?? []) {
+    if (!IDENTITY_COOKIE_BLACKLIST.has(c.name)) {
+      bag[c.name] = c.value;
+    }
+  }
+  return { op: 'bind', accountId, tabId, seed, bag };
 }
 
 async function pushBind(tabId: number): Promise<void> {

@@ -83,8 +83,10 @@ export type BridgeUpPayload =
 /** background → ISOLATED 桥的下行载荷 */
 export type BridgeDownPayload =
   /** 绑定账号并附带初始快照种子（token 等，用于壳激活瞬间同步灌入命名空间）；
-   *  tabId 供壳做页面层缓存分区（_qlck=t<tabId>，DNR urlTransform Chrome 不支持） */
-  | { op: 'bind'; accountId: string; tabId?: number; seed?: Record<string, string> }
+   *  tabId 供壳做页面层缓存分区（_qlck=t<tabId>，DNR urlTransform Chrome 不支持）；
+   *  bag = 账号 Cookie 快照的权威视图（非身份键）——绑定时袋整体同步到该视图
+   *  （v3.12.1：修复登出/过期后重开时命名空间陈旧袋复活并毒化登录 POST） */
+  | { op: 'bind'; accountId: string; tabId?: number; seed?: Record<string, string>; bag?: Record<string, string> }
   | { op: 'unbound' }
   /** 身份叛逃处置：回滚本页会话对命名空间的全部写入（含 Cookie 袋），恢复到页签打开前状态 */
   | { op: 'journalRollback' }
