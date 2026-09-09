@@ -239,7 +239,11 @@ async function captureToken(accountId: string, host: string, rawToken: string): 
 
 /** 解码 JWT 载荷并剥离时效性字段（exp/iat/nbf/jti/sid 等），返回稳定载荷的规范化串。
  *  与 jwtIdentity 的逐 claim 提取不同，本函数不依赖任何具体字段名——
- *  同一账号的 token 轮换（仅时效字段变化）稳定载荷相同，异账号必然不同。 */
+ *  同一账号的 token 轮换（仅时效字段变化）稳定载荷相同，异账号必然不同。
+ *  v3.12.3：**`authcode` 加入时效集**——实测平台（Akso eGMP）token 载荷含每次签发
+ *  都重新生成的 `AuthCode`（GUID），不在排除集时同账号的「登录轮换」会被身份护栏
+ *  误判为异账号 token 而拒绝记录 → 快照卡死旧 token → API 全 401 → 反复登录失败
+ *  （用户实测「退出→关页→再快捷登录登不上，第二次重开才好」的根因，现场实锤）。 */
 function jwtStableIdentity(token: string): string | null {
   try {
     const part = token.split('.')[1];
@@ -252,7 +256,21 @@ function jwtStableIdentity(token: string): string | null {
     if (typeof claims !== 'object' || claims === null) {
       return null;
     }
-    const VOLATILE = new Set(['exp', 'iat', 'nbf', 'jti', 'sid', 'auth_time', 'loginTime', 'timestamp', 'nonce']);
+    const VOLATILE = new Set([
+      'exp',
+      'iat',
+      'nbf',
+      'jti',
+      'sid',
+      'auth_time',
+      'loginTime',
+      'timestamp',
+      'nonce',
+      // 每次签发都变化的平台自定义字段（实测 AuthCode = 每次登录/轮换重新生成的 GUID）
+      'authcode',
+      'authCode',
+      'AuthCode',
+    ]);
     const stable: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(claims)) {
       if (!VOLATILE.has(k)) {
@@ -1123,6 +1141,12 @@ function buildBindPayload(accountId: string, tabId?: number): BridgeDownPayload 
   const seed: Record<string, string> = {};
   if (snap?.token) {
     seed['__auth_token__'] = snap.token;
+  } else {
+    // v3.12.3：无快照 token = 登录前窗口——**显式清空命名空间残留的上一会话 token**。
+    // 否则平台登录页读到残留 token 自动续用（authHeader 嗅探捕为「首捕」），用户
+    // 再次登录签发的新 token（AuthCode 已变）会被身份护栏误判为异账号而拦截，
+    // 快照卡死旧 token → API 全 401 → 反复登录失败（用户实测链路实锤）。
+    seed['__auth_token__'] = '';
   }
   seed['__auth_user__'] = snap?.authUser ?? '';
   if (snap?.deviceFp) {
