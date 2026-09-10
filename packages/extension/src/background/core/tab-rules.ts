@@ -63,9 +63,14 @@ function asRule(raw: unknown): chrome.declarativeNetRequest.Rule {
   return raw as unknown as chrome.declarativeNetRequest.Rule;
 }
 
-/** 父域（aksoegmp.com）：DNR requestDomains 语义为「该域及其全部子域」，覆盖网关/接口子域 */
+/** 父域（aksoegmp.com）：DNR requestDomains 语义为「该域及其全部子域」，覆盖网关/接口子域。
+ *  IP 字面量（全数字段，内网站点）没有父域概念，返回原 host（在 requestDomains 里重复无害），
+ *  避免把 10.100.0.105 拼出 '0.105' 这类无意义域。 */
 export function parentDomainOf(host: string): string {
   const parts = host.split('.');
+  if (parts.length > 2 && parts.every((p) => /^\d+$/.test(p))) {
+    return host;
+  }
   return parts.length > 2 ? parts.slice(-2).join('.') : host;
 }
 
@@ -84,9 +89,13 @@ function buildAuthRule(ruleId: number, host: string, tabId: number, token: strin
       requestHeaders: [{ header: 'Authorization', operation: 'set', value: `Bearer ${token}` }],
     },
     condition: {
-      // API 调用、WS 握手，以及 iframe 内嵌文档（低代码平台的「管理端」控制台常以
-      // iframe 承载：只带命名空间存储、无 Bearer 的子框架会被服务端当匿名拒入）
-      resourceTypes: ['xmlhttprequest', 'websocket', 'sub_frame'],
+      // API 调用、WS 握手、iframe 内嵌文档（低代码平台的「管理端」控制台常以
+      // iframe 承载：只带命名空间存储、无 Bearer 的子框架会被服务端当匿名拒入），
+      // 以及 main_frame（v3.13.1：顶层下载导航——纯 Bearer 鉴权的平台把导出接口
+      // 做成主框架请求，缺失 Authorization 即 401「请先登录相关网站再尝试下载」。
+      // 作用域仍被 tabIds + requestDomains 双重锁死：跨域 SSO 跳转不在 requestDomains
+      // 内不会被附加头，同域静态资源带 Bearer 无副作用）
+      resourceTypes: ['main_frame', 'xmlhttprequest', 'websocket', 'sub_frame'],
       requestDomains: [hostNoPortOf(host), parentDomainOf(hostNoPortOf(host))],
       tabIds: [tabId],
     },

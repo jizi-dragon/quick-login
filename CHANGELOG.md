@@ -2,6 +2,10 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.13.1（2026-09-10）
+
+**修复：纯 Bearer 鉴权平台（内网/VPN 站）的文件下载 401。** 用户诊断包实锤（10.100.0.105）：该平台登录不写任何身份 Cookie（jar 共 0，快照仅 12B cookietest），身份完全走 Authorization Bearer——而 AUTH 改头规则的 resourceTypes 不含 `main_frame`，低代码平台的导出接口是**主框架下载导航**（Chrome 下载管理器直启），请求不带 Bearer → 401 → Chrome 显示「请先登录相关网站再尝试下载」。云端平台下载接口认 Cookie 会话（回放覆盖）故无此症。修复：AUTH 规则 resourceTypes 增加 `main_frame`——作用域仍被 `tabIds + requestDomains` 双重锁死（跨域 SSO 跳转不在 requestDomains 内不会被附加头；同域静态资源带 Bearer 无副作用）。顺带加固：`parentDomainOf` 对 IP 字面量（全数字段内网站点）返回原 host，不再拼出 `'0.105'` 这类无意义父域。
+
 ## 3.13.0（2026-09-09）
 
 **根本原则加固：亲子继承收编推迟到 URL 确认 + 「最近页面」收敛到绑定页签。**
