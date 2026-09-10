@@ -653,8 +653,40 @@ function parseSetCookie(raw: string): { name: string; value: string; remove: boo
   return { name, value, remove };
 }
 
-/** 绑定页签收到的响应 Set-Cookie → 归属账号并入快照（观察型 webRequest，不改写） */
-async function captureResponseCookies(
+/** v3.13.2 下载/请求失败取证：绑定页签的 401/403/5xx 响应全量留痕（URL/host/归型/覆盖域），
+ *  让「下载失败类」问题在下一次诊断包里直接可读，不再依赖症状猜测。 */
+async function reportFailureStatus(details: {
+  tabId: number;
+  url: string;
+  statusCode?: number;
+  type?: string;
+}): Promise<void> {
+  const status = details.statusCode ?? 0;
+  if (status < 400) {
+    return;
+  }
+  const binding = details.tabId > 0 ? bindings.get(details.tabId) : undefined;
+  if (!binding) {
+    return; // 未绑定页签的失败与本扩展无关
+  }
+  let urlHostname = '';
+  try {
+    urlHostname = new URL(details.url).hostname;
+  } catch {
+    return;
+  }
+  const bindHostname = hostNoPortOf(binding.host);
+  const parent = parentDomainOf(bindHostname);
+  const covered = urlHostname === bindHostname || urlHostname.endsWith(`.${parent}`);
+  // 全量记录：401/403 任何类型；其余 4xx/5xx 仅主框架/下载类（避免 favicon 404 噪声）
+  if (status === 401 || status === 403 || details.type === 'main_frame' || details.type === 'other') {
+    void diag(
+      `⚠ 页签请求失败 status=${status} type=${details.type ?? '?'} covered=${covered} host=${urlHostname} url=${details.url.slice(0, 180)}`,
+    );
+  }
+}
+
+/** 绑定页签收到的响应 Set-Cookie → 归属账号并入快照（观察型 webRequest，不改写） */async function captureResponseCookies(
   details: { tabId: number; url: string; responseHeaders?: { name: string; value?: string }[] },
 ): Promise<void> {
   let accountId: string | undefined;
@@ -1290,9 +1322,16 @@ export function registerParallelHandlers(): void {
   // 观察型 webRequest（MV3 允许；无 host 权限的站点不产生事件——授权门控天然成立）。
   if (chrome.webRequest?.onHeadersReceived) {
     chrome.webRequest.onHeadersReceived.addListener(
-      (details: { tabId: number; url: string; responseHeaders?: { name: string; value?: string }[] }) => {
+      (details: {
+        tabId: number;
+        url: string;
+        statusCode?: number;
+        type?: string;
+        responseHeaders?: { name: string; value?: string }[];
+      }) => {
         trackCookieAttribution(details);
         void captureResponseCookies(details);
+        void reportFailureStatus(details);
       },
       { urls: ['*://*/*'] },
       // extraHeaders：Set-Cookie 头需显式请求可见性（Chrome 72+）

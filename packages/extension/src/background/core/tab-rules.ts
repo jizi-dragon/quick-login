@@ -89,13 +89,15 @@ function buildAuthRule(ruleId: number, host: string, tabId: number, token: strin
       requestHeaders: [{ header: 'Authorization', operation: 'set', value: `Bearer ${token}` }],
     },
     condition: {
-      // API 调用、WS 握手、iframe 内嵌文档（低代码平台的「管理端」控制台常以
-      // iframe 承载：只带命名空间存储、无 Bearer 的子框架会被服务端当匿名拒入），
-      // 以及 main_frame（v3.13.1：顶层下载导航——纯 Bearer 鉴权的平台把导出接口
-      // 做成主框架请求，缺失 Authorization 即 401「请先登录相关网站再尝试下载」。
-      // 作用域仍被 tabIds + requestDomains 双重锁死：跨域 SSO 跳转不在 requestDomains
-      // 内不会被附加头，同域静态资源带 Bearer 无副作用）
-      resourceTypes: ['main_frame', 'xmlhttprequest', 'websocket', 'sub_frame'],
+      // 全资源类型（与 COOKIE 规则同宽，v3.13.2）：
+      // - xmlhttprequest/websocket：API 与 WS 握手；
+      // - sub_frame：iframe 内嵌文档（低代码平台「管理端」控制台常以 iframe 承载，
+      //   无 Bearer 的子框架会被服务端当匿名拒入）；
+      // - main_frame：顶层下载导航（纯 Bearer 鉴权平台的导出接口，缺头即 401）；
+      // - other：`<a download>` 属性发起的下载请求在 DNR 里常归为此型（3.13.1 只补
+      //   main_frame 仍 401 的教训——下载归型因发起方式而异，与 COOKIE 规则同宽才算到位）。
+      // 安全边界不变：tabIds + requestDomains 双重锁死，跨域 SSO 跳转不会被附加头。
+      resourceTypes: ALL_MATCH_TYPES,
       requestDomains: [hostNoPortOf(host), parentDomainOf(hostNoPortOf(host))],
       tabIds: [tabId],
     },
