@@ -49,6 +49,16 @@
         <span class="launch-arrow" aria-hidden="true">→</span>
       </button>
 
+      <!-- 云端账号库入口。**只负责把用户送到官网** —— 登录、注册、账号管理都在那边，
+           扩展本身不碰登录表单（口令不该经过扩展的 DOM）。见 EXTENSION-SPLIT-PLAN §7。 -->
+      <button id="open-vault" class="launch secondary" type="button">
+        <span class="launch-text">
+          <b>登录云端账号库</b>
+          <i>在浏览器里登录 · 跨设备同步站点与账号</i>
+        </span>
+        <span class="launch-arrow" aria-hidden="true">↗</span>
+      </button>
+
       <footer class="foot">
         <span><kbd>Alt+Q</kbd> 呼出账号轮盘</span>
         <i></i>

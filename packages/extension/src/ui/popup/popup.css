@@ -159,6 +159,19 @@ body {
   transform: translateX(3px);
 }
 
+/* 次级入口（云端账号库）：与主操作同一个形状，但**刻意不带阴影与悬浮位移** ——
+   两个同等重量的按钮会让"我该点哪个"变成一道题。 */
+.launch.secondary {
+  box-shadow: none;
+  background: transparent;
+  padding: 10px 13px;
+}
+.launch.secondary:hover {
+  box-shadow: none;
+  transform: none;
+  background: var(--sb-surface);
+}
+
 /* ---- 底部提示 ---- */
 .foot {
   display: flex;

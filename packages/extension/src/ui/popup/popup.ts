@@ -14,6 +14,21 @@ function openParallelPage(): void {
 
 document.getElementById('open-parallel')!.addEventListener('click', openParallelPage);
 
+/* ---- 云端账号库（Akso Vault） ----
+ * 登录、注册与账号管理**都在浏览器官网上完成**，扩展只负责把用户送过去。
+ * ★ 扩展刻意**不内置登录表单**：口令一旦流经扩展的 DOM，就多了一个必须被信任的界面，
+ *   而扩展的职责是"执行面"，不是"凭据收集面"。
+ * ⚠️ 地址暂时写死；接入服务器时应改为可配置（见项目根的 EXTENSION-SPLIT-PLAN §7）。
+ */
+const VAULT_URL = 'https://www.dragonrain.top:8443/';
+
+function openVault(): void {
+  chrome.tabs.create({ url: VAULT_URL });
+  window.close();
+}
+
+document.getElementById('open-vault')?.addEventListener('click', openVault);
+
 /* ---- 实时统计：账号 / 在线 / 授权站点 ---- */
 function setStat(id: string, value: string | number): void {
   const el = document.getElementById(id);
