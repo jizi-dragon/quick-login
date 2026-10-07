@@ -23,21 +23,22 @@ export type WheelAccount = Pick<ParallelAccount, 'id' | 'tabName' | 'username' |
 export const WHEEL_MAX = 10;
 
 const NS = 'http://www.w3.org/2000/svg';
-const SIZE = 520;
-const C = SIZE / 2;
-const R_OUT = 240;
-const R_IN = 118;
+/** 几何常量对外导出：状态轮盘（status-core）复用同一套视觉契约 */
+export const SIZE = 520;
+export const C = SIZE / 2;
+export const R_OUT = 240;
+export const R_IN = 118;
 const R_ARC = 254;
 const GAP_DEG = 2;
 /** 缺省盒子名（调用方可通过参数传入自定义名） */
 export const DEFAULT_BOX = '默认盒子';
 
-function polar(r: number, deg: number): { x: number; y: number } {
+export function polar(r: number, deg: number): { x: number; y: number } {
   const a = ((deg - 90) * Math.PI) / 180;
   return { x: C + r * Math.cos(a), y: C + r * Math.sin(a) };
 }
 
-function sectorPath(a0: number, a1: number): string {
+export function sectorPath(a0: number, a1: number): string {
   const s = a0 + GAP_DEG / 2;
   const e = a1 - GAP_DEG / 2;
   const large = e - s > 180 ? 1 : 0;
@@ -54,7 +55,7 @@ function sectorPath(a0: number, a1: number): string {
   ].join(' ');
 }
 
-function el(name: string, attrs: Record<string, string | number>): SVGElement {
+export function el(name: string, attrs: Record<string, string | number>): SVGElement {
   const node = document.createElementNS(NS, name);
   for (const [k, v] of Object.entries(attrs)) {
     node.setAttribute(k, String(v));
@@ -63,7 +64,7 @@ function el(name: string, attrs: Record<string, string | number>): SVGElement {
 }
 
 /** 径向排布的文本（左半侧翻转 180° 保证可读） */
-function radialText(cls: string, mid: number, r: number, content: string): SVGElement {
+export function radialText(cls: string, mid: number, r: number, content: string): SVGElement {
   const p = polar(r, mid);
   const flip = mid > 90 && mid < 270;
   const rot = flip ? mid + 180 : mid;
@@ -79,7 +80,7 @@ function radialText(cls: string, mid: number, r: number, content: string): SVGEl
   return t;
 }
 
-function truncate(s: string, max: number): string {
+export function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 

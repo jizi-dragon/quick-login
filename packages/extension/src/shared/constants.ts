@@ -1,5 +1,5 @@
 /** 扩展版本号（与根 package.json / manifest.json 保持同步；UI 中显性展示以区分构建） */
-export const EXT_VERSION = '3.13.2';
+export const EXT_VERSION = '3.17.1';
 export const IDB_NAME = 'sessionbox-reborn';
 export const IDB_VERSION = 2;
 export const IDB_STORE_SESSIONS = 'sessions';
@@ -28,8 +28,8 @@ export const LOCAL_KEYS = {
   disabledBoxes: 'ql:disabledBoxes',
   /** 站点协议 hint（v3.10.9：授权时从用户输入 URL 解析；账号创建时优先采用） */
   siteSchemes: 'ql:siteSchemes',
-  /** 最近配置页 MRU（v3.13：按 host 分组，每组至多 RECENT_PAGES_MAX 条；**仅记录绑定页签**） */
-  recentPages: 'ql:recentPages',
+  /** 常用页面书签（v3.16：轮盘 Alt+1 展示；[{name,path}]，空 = 用内置默认 7 条） */
+  favorites: 'ql:favorites',
   /** 登录失败现场取证环形缓冲（v3.12.2：生命周期 + 自动填表逐事件） */
   forensics: 'ql:forensics',
   /** 数据源：'local' | 'cloud'，缺省 'local'（切换不改动任何本地账号数据） */
@@ -44,8 +44,18 @@ export const LOCAL_KEYS = {
   skipSwitchConfirm: 'ql:skipSwitchConfirm',
 } as const;
 
-/** 最近配置页每组容量（需求：最近 5 个） */
-export const RECENT_PAGES_MAX = 5;
+/** 常用页面书签的默认列表（v3.16：平台常用管理页；用户可在管理页改写） */
+export const DEFAULT_FAVORITES: ReadonlyArray<{ name: string; path: string }> = [
+  { name: '用户管理', path: '/admin/user-mgmt/users/list' },
+  { name: '角色列表', path: '/admin/user-mgmt/role-mgmt/list' },
+  { name: '工作流', path: '/admin/config/workflow' },
+  { name: '菜单', path: '/admin/config/menu-mgmt?__edit=2' },
+  { name: '视图', path: '/admin/config/view-management' },
+  { name: 'TraceLog', path: '/admin/secret-page/trace-log' },
+];
+
+/** 常用页面书签上限（轮盘一环的上限；超出提示去管理页精简） */
+export const FAVORITES_MAX = 10;
 
 /** background 向内容脚本下发的消息 type */
 export const CONTENT_MESSAGE = {

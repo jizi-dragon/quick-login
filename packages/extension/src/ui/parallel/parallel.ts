@@ -6,7 +6,7 @@ import type {
   RuntimeRequest,
   RuntimeResponse,
 } from '../../shared/messages';
-import { EXT_VERSION, LOCAL_KEYS } from '../../shared/constants';
+import { DEFAULT_FAVORITES, EXT_VERSION, LOCAL_KEYS } from '../../shared/constants';
 import { send } from '../send';
 
 type BrowserAccount = ParallelAccount & ParallelAccountStatus & { password: boolean };
@@ -46,6 +46,10 @@ const dataExportBtn = document.getElementById('data-export') as HTMLButtonElemen
 const dataImportBtn = document.getElementById('data-import') as HTMLButtonElement;
 const dataImportFile = document.getElementById('data-import-file') as HTMLInputElement;
 const exportDiagBtn = document.getElementById('export-diag') as HTMLButtonElement;
+const favText = document.getElementById('fav-text') as HTMLTextAreaElement;
+const favSave = document.getElementById('fav-save') as HTMLButtonElement;
+const favReset = document.getElementById('fav-reset') as HTMLButtonElement;
+const favTip = document.getElementById('fav-tip') as HTMLSpanElement;
 
 const boxModal = document.getElementById('box-modal') as HTMLDivElement;
 const boxModalList = document.getElementById('box-modal-list') as HTMLDivElement;
@@ -1978,12 +1982,83 @@ exportDiagBtn.addEventListener('click', () => {
   })();
 });
 
+/* ==================== 常用页面书签（v3.16：Alt+1 轮盘的数据源） ====================
+ * ★ 刻意**不进 3 秒轮询**：这是用户正在编辑的输入框，轮询回写会把正在敲的内容冲掉。
+ *   只在启动时装载一次 + 保存后回填。
+ */
+
+function parseFavoriteLines(text: string): Array<{ name: string; path: string }> {
+  const out: Array<{ name: string; path: string }> = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
+    // 分隔符：英文逗号 / 中文逗号 / 制表符（与批量导入的口径一致）
+    const m = /^(.+?)\s*[,，\t]\s*(.+)$/.exec(line);
+    if (!m) {
+      continue; // 没有分隔符的行直接跳过（不猜「整行是名称还是路径」）
+    }
+    const name = m[1].trim();
+    const path = m[2].trim();
+    if (name && path) {
+      out.push({ name, path });
+    }
+  }
+  return out;
+}
+
+function renderFavoriteLines(items: Array<{ name: string; path: string }>): void {
+  favText.value = items.map((f) => `${f.name}, ${f.path}`).join('\n');
+}
+
+async function loadFavoritesEditor(): Promise<void> {
+  const stored = await chrome.storage.local.get(LOCAL_KEYS.favorites).catch(() => ({}) as Record<string, unknown>);
+  const raw = stored[LOCAL_KEYS.favorites];
+  const items = Array.isArray(raw)
+    ? (raw as Array<{ name?: unknown; path?: unknown }>)
+        .map((x) => ({ name: String(x?.name ?? '').trim(), path: String(x?.path ?? '').trim() }))
+        .filter((x) => x.name && x.path)
+    : [];
+  renderFavoriteLines(items.length ? items : DEFAULT_FAVORITES.map((d) => ({ ...d })));
+}
+
+function flashFavTip(text: string): void {
+  favTip.textContent = text;
+  setTimeout(() => {
+    favTip.textContent = '';
+  }, 1800);
+}
+
+favSave.addEventListener('click', () => {
+  void (async () => {
+    const items = parseFavoriteLines(favText.value);
+    if (!items.length) {
+      alert('没有解析出任何条目。每行格式：名称,路径');
+      return;
+    }
+    await chrome.storage.local.set({ [LOCAL_KEYS.favorites]: items });
+    renderFavoriteLines(items);
+    flashFavTip(`已保存 ${items.length} 条 ✓`);
+  })();
+});
+
+favReset.addEventListener('click', () => {
+  void (async () => {
+    await chrome.storage.local.remove(LOCAL_KEYS.favorites);
+    await loadFavoritesEditor();
+    flashFavTip('已恢复默认 ✓');
+  })();
+});
+
 /* ==================== 启动装载 ==================== */
 
 // 顺序：账号（含统计/卡片）→ 站点 → 盒子 → 下拉填充
 void refreshAll();
 // 帮助气泡里的「反悔通道」按标志决定是否出现（勾过「不再提示」才有那一行）
 void refreshHelpReset();
+// 常用页面书签编辑器：只装载一次（编辑器不能进轮询，否则会冲掉正在输入的内容）
+void loadFavoritesEditor();
 
 // 轻量轮询：绑定/在线状态/计数可能被后台事件改变（标签关闭、token 捕获）；
 // 各渲染函数自带 diff 守卫，数据未变化时不重建 DOM（消除 3s 轮询闪烁）

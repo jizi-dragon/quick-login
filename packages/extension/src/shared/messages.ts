@@ -23,8 +23,6 @@ export type RuntimeRequest =
   | { kind: 'par.grantChanged' }
   | { kind: 'ql.diag' }
   | { kind: 'wheel.toggle' }
-  | { kind: 'pages.recent' }
-  | { kind: 'pages.jump'; url: string }
   | { kind: 'data.export' }
   | { kind: 'data.import'; data: DataBackup }
   /* ---- 数据源（本地 ↔ 云端，v3.14）---- */
@@ -46,7 +44,23 @@ export type RuntimeRequest =
    */
   | { kind: 'cloud.device.poll' }
   /** 放弃本次授权：SW 把 `deviceCode` 从内存里丢掉（页面侧同时停掉轮询循环） */
-  | { kind: 'cloud.device.cancel' };
+  | { kind: 'cloud.device.cancel' }
+  /* ---- 实例状态轮盘（v3.15：Alt+W）---- */
+  /**
+   * 问「当前页签是不是可操作的对象实例页」。
+   * 走 sender.tab（而不是让页面自报）——注入的浮层与目标页签必须是同一个，
+   * 由调用方自报 tabId 等于把「操作了哪个页签」交给页面决定。
+   */
+  | { kind: 'status.context' }
+  /** 读状态列表（GetFormInstance → GetListByBasicId 两步链路，在页面主世界执行） */
+  | { kind: 'status.load' }
+  /** 切状态（点即执行；成功后由 background 延时刷新该页签） */
+  | { kind: 'status.change'; code: string; name: string }
+  /* ---- 常用页面书签轮盘（v3.16：Alt+1）---- */
+  /** 取书签清单（空则回落内置默认；由 background 统一归一化，浮层不自己读 storage） */
+  | { kind: 'favorites.list' }
+  /** 在新标签页打开某个书签；`baseOrigin` 为空时按当前活动页签的 origin 兜底 */
+  | { kind: 'favorites.open'; path: string; baseOrigin?: string };
 
 /** 备份文件结构（v1）：种子 + 加密凭证 + 授权站 + 盒子配置（见 tmp 导出脚本） */
 export interface DataBackup {
@@ -92,8 +106,6 @@ export type RuntimeResponse =
   | { kind: 'par.grantChanged'; result: Result<boolean> }
   | { kind: 'ql.diag'; result: Result<Record<string, unknown>> }
   | { kind: 'wheel.toggle'; result: Result<{ opened: boolean }> }
-  | { kind: 'pages.recent'; result: Result<RecentPageEntry[]> }
-  | { kind: 'pages.jump'; result: Result<{ jumped: boolean }> }
   | { kind: 'data.export'; result: Result<DataBackup> }
   | { kind: 'data.import'; result: Result<{ created: number; skipped: number; hosts: string[] }> }
   /* ---- 数据源（本地 ↔ 云端，v3.14）---- */
@@ -104,7 +116,39 @@ export type RuntimeResponse =
   /* ---- 云端设备授权（RFC 8628 设备流，v3.14.1）---- */
   | { kind: 'cloud.device.start'; result: Result<CloudDeviceStart> }
   | { kind: 'cloud.device.poll'; result: Result<CloudDevicePoll> }
-  | { kind: 'cloud.device.cancel'; result: Result<{ cancelled: boolean }> };
+  | { kind: 'cloud.device.cancel'; result: Result<{ cancelled: boolean }> }
+  /* ---- 实例状态轮盘（v3.15：Alt+W）---- */
+  | { kind: 'status.context'; result: Result<StatusContext> }
+  | { kind: 'status.load'; result: Result<StatusList> }
+  | { kind: 'status.change'; result: Result<{ name: string }> }
+  /* ---- 常用页面书签轮盘（v3.16：Alt+1）---- */
+  | { kind: 'favorites.list'; result: Result<FavoriteItem[]> }
+  | { kind: 'favorites.open'; result: Result<{ url: string }> };
+
+/**
+ * 实例状态上下文（v3.15）：从**当前活动页签的 URL** 解析出来的可操作对象。
+ * `bid` = objectId、`id` = instanceId、`mid` = 菜单 id（用于 `/web/view` 上反查 objectId）。
+ */
+export interface StatusContext {
+  href: string;
+  origin: string;
+  objectId: string;
+  instanceId: string;
+  menuId: string;
+  /** 是否可以继续查状态（至少要能确定 objectId，或能用 mid 反查） */
+  operable: boolean;
+  /** 不可操作时的可读原因（浮层空态直接显示它） */
+  reason: string;
+}
+
+/** 一个实例的生命周期状态列表 */
+export interface StatusList {
+  /** 生命周期名（可能为空：服务端没给） */
+  lifecycleName: string;
+  /** 当前状态名（接口字段优先，退回页面 DOM 文字；都读不到为空串） */
+  currentName: string;
+  statuses: Array<{ id: string; code: string; name: string }>;
+}
 
 /** 数据源现状（管理页选择器据此渲染；不回传 token 本身） */
 export interface CloudState {
@@ -178,14 +222,10 @@ export interface CloudMergeReport {
   conflicts: number;
 }
 
-/** 最近配置页条目（v3.13 收敛：仅记录绑定页签，按 host 分组的 MRU） */
-export interface RecentPageEntry {
-  url: string;
-  pageType: string;
-  suffix: string;
-  subject: string;
-  accountAlias: string;
-  ts: number;
+/** 常用页面书签条目（v3.16）；`path` 支持相对路径（`/admin/...`）或完整网址 */
+export interface FavoriteItem {
+  name: string;
+  path: string;
 }
 
 export type { Result };

@@ -1,10 +1,9 @@
-import type { RuntimeRequest, RuntimeResponse, Result } from '../shared/messages';
+import type { RuntimeRequest, RuntimeResponse, Result, StatusContext, StatusList } from '../shared/messages';
 import type { BridgeUpPayload } from '../shared/types';
 import { CONTENT_MESSAGE, EXT_VERSION, LOCAL_KEYS } from '../shared/constants';
 import { accountRegistry } from './core/account-registry';
 import { credentials } from './core/credentials';
 import { navigation, registerNavigationHandlers } from './core/navigation';
-import { pageMonitor } from './core/page-monitor';
 import { siteAuth, probeScheme } from './core/site-auth';
 import {
   forensics,
@@ -25,6 +24,13 @@ import {
 } from './core/cloud-store';
 import { cancelDeviceFlow, pollDeviceFlow, startDeviceFlow } from './core/cloud-device';
 import { migrateLocalToCloud } from './core/cloud-migrate';
+import { listFavorites, resolveFavoriteUrl } from './core/favorites';
+import {
+  changeInstanceStatus,
+  isInstanceContext,
+  loadInstanceStatuses,
+  parseInstanceContext,
+} from './core/instance-status';
 import { sessionManager } from './core/session-manager';
 import { tabRules } from './core/tab-rules';
 
@@ -337,11 +343,28 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       });
       return { kind: 'data.import', result: r };
     }
-    case 'pages.recent':
-      // 实际处理在 onMessage（需要 sender.tab 定位 host）；此处仅满足穷尽性
-      return { kind: 'pages.recent', result: ok([]) };
-    case 'pages.jump':
-      return { kind: 'pages.jump', result: ok({ jumped: false }) };
+    /* ---- 实例状态轮盘（v3.15）：真正处理在 onMessage 前置分流（需要 sender.tab） ---- */
+    case 'status.context':
+    case 'status.load':
+    case 'status.change':
+      return { kind: req.kind, result: fail('状态轮盘只在目标页签内可用（缺少页面上下文）') };
+
+    /* ---- 常用页面书签（v3.16，Alt+1） ---- */
+    case 'favorites.list': {
+      const r = await tryRun(() => listFavorites());
+      return { kind: 'favorites.list', result: r };
+    }
+    case 'favorites.open': {
+      const r = await tryRun(async () => {
+        const url = await resolveFavoriteUrl(req.path, req.baseOrigin);
+        if (!url) {
+          throw new Error('无法确定要打开的地址：相对路径需要一个「基准域名」，请先打开一个平台页面，或在书签里填完整网址');
+        }
+        await chrome.tabs.create({ url, active: true });
+        return { url };
+      });
+      return { kind: 'favorites.open', result: r };
+    }
 
     /* ---------------- 数据源：本地 ↔ 云端（v3.14） ---------------- */
     case 'cloud.state': {
@@ -435,26 +458,107 @@ chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
     return true;
   }
 
-  // 1.5 v3.11 最近配置页：需要 sender.tab，先于通用分流处理
-  // 1.8 最近配置页（v3.13 收敛：仅绑定页签有数据，未绑定页签返回空——根本原则）
-  if (req && typeof req === 'object' && (req as { kind?: string }).kind === 'pages.recent') {
-    void pageMonitor.recentForTab(sender.tab?.id).then((list) => sendResponse({ kind: 'pages.recent', result: ok(list) }));
+  // 1.9 实例状态轮盘（v3.15，Alt+W）：三个 kind 一律只认 sender.tab ——
+  //     平台请求必须在**该页签的页面主世界**发出，才能吃到 DNR 的按账号改头与 `_qlck` 缓存分区；
+  //     若改成「页面自报 tabId」或「后台直接 fetch」，就会退化成跨账号读共享 jar（见 core/instance-status.ts）
+  if (req && typeof req === 'object' && (req as { kind?: string }).kind === 'status.context') {
+    void statusContextFor(sender.tab).then((result) => sendResponse({ kind: 'status.context', result }));
     return true;
   }
-  if (req && typeof req === 'object' && (req as { kind?: string }).kind === 'pages.jump') {
-    const url = (req as { url?: string }).url ?? '';
-    void pageMonitor
-      .jumpCurrentTab(sender.tab?.id, url)
-      .then((jumped) => sendResponse({ kind: 'pages.jump', result: ok({ jumped }) }));
+  if (req && typeof req === 'object' && (req as { kind?: string }).kind === 'status.load') {
+    void statusLoadFor(sender.tab).then((result) => sendResponse({ kind: 'status.load', result }));
+    return true;
+  }
+  if (req && typeof req === 'object' && (req as { kind?: string }).kind === 'status.change') {
+    const r = req as { code?: string; name?: string };
+    void statusChangeFor(sender.tab, r.code ?? '', r.name ?? '').then((result) =>
+      sendResponse({ kind: 'status.change', result }),
+    );
     return true;
   }
 
   // 2. （已移除）旧版本地引擎 NM 桥 —— v2.4 起纯浏览器模式，不再转发引擎指令
-
   // 3. 普通扩展内部请求
   void dispatch(req as RuntimeRequest).then(sendResponse);
   return true;
 });
+
+/* ---------------- 实例状态轮盘（v3.15）：上下文 / 读取 / 切换 ---------------- */
+
+/** 切换成功后等页面刷新的宽限（浮层在此期间显示 toast） */
+const STATUS_RELOAD_GRACE_MS = 1200;
+
+function statusContextFor(tab: chrome.tabs.Tab | undefined): Promise<Result<StatusContext>> {
+  if (!tab?.id || !tab.url) {
+    return Promise.resolve(fail('拿不到当前页签（请在普通网页上使用）'));
+  }
+  const ctx = parseInstanceContext(tab.url);
+  if (!ctx) {
+    return Promise.resolve(fail('当前页签不是普通网页'));
+  }
+  const operable = isInstanceContext(ctx);
+  return Promise.resolve(
+    ok({
+      href: ctx.href,
+      origin: ctx.origin,
+      objectId: ctx.objectId,
+      instanceId: ctx.instanceId,
+      menuId: ctx.menuId,
+      operable,
+      reason: operable ? '' : '当前页面不是对象实例页（地址里没有 bid / id）',
+    }),
+  );
+}
+
+async function statusLoadFor(tab: chrome.tabs.Tab | undefined): Promise<Result<StatusList>> {
+  if (!tab?.id || !tab.url) {
+    return fail('拿不到当前页签');
+  }
+  const ctx = parseInstanceContext(tab.url);
+  if (!ctx) {
+    return fail('当前页签不是普通网页');
+  }
+  if (!isInstanceContext(ctx)) {
+    return fail('当前页面不是对象实例页');
+  }
+  try {
+    const r = await loadInstanceStatuses(tab.id, ctx);
+    return ok({ lifecycleName: r.lifecycleName, currentName: r.currentName, statuses: r.statuses });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+async function statusChangeFor(
+  tab: chrome.tabs.Tab | undefined,
+  code: string,
+  name: string,
+): Promise<Result<{ name: string }>> {
+  if (!tab?.id || !tab.url) {
+    return fail('拿不到当前页签');
+  }
+  const ctx = parseInstanceContext(tab.url);
+  if (!ctx) {
+    return fail('当前页签不是普通网页');
+  }
+  if (!ctx.instanceId) {
+    return fail('当前页面地址里没有 instanceId（id），无法修改状态');
+  }
+  const tabId = tab.id;
+  try {
+    await changeInstanceStatus(tabId, ctx.instanceId, code);
+  } catch (e) {
+    void forensics('status-change', { tabId, instanceId: ctx.instanceId, code, name, ok: false });
+    return fail(e);
+  }
+  void forensics('status-change', { tabId, instanceId: ctx.instanceId, code, name, ok: true });
+  // 成功：延时刷新该页签 —— 页面必须重载才能反映新状态；宽限期让浮层把 toast 显示完。
+  // 注意用裸 setTimeout（ServiceWorkerGlobalScope 没有 window，写 window.setTimeout 会抛且被吞）
+  setTimeout(() => {
+    void chrome.tabs.reload(tabId).catch(() => undefined);
+  }, STATUS_RELOAD_GRACE_MS);
+  return ok({ name });
+}
 
 /* ---------------- 快捷键：账号选择轮盘（v3.8：扇形环；页面内无框浮层优先） ---------------- */
 
@@ -547,26 +651,71 @@ chrome.commands.onCommand.addListener((command) => {
     void flashBadge('→');
     void toggleAccountWheel();
   }
-  if (command === 'quick-pages') {
-    void flashBadge('⇢');
-    void togglePagesOverlay();
+  if (command === 'quick-status') {
+    // v3.15：Alt+W 归状态轮盘（原「最近配置页轮盘」已于 v3.16 整体移除）
+    void flashBadge('⇄');
+    void toggleStatusOverlay();
+  }
+  if (command === 'quick-favorites') {
+    // v3.16：Alt+1 常用页面书签轮盘
+    void flashBadge('★');
+    void toggleFavoritesOverlay();
   }
 });
 
-/** 最近配置页轮盘（v3.13 收敛：仅绑定页签可唤起——页面监视只记录绑定页签） */
-async function togglePagesOverlay(): Promise<void> {
+/** 常用页面书签轮盘（v3.16，Alt+1）——同状态轮盘，只做页面内浮层 */
+let lastFavToggleAt = 0;
+async function toggleFavoritesOverlay(): Promise<void> {
+  const now = Date.now();
+  if (now - lastFavToggleAt < 300) {
+    return;
+  }
+  lastFavToggleAt = now;
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab?.id || !tab.url || !/^https?:/i.test(tab.url)) {
+      void flashBadge('—');
       return;
     }
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      files: ['content/pages-overlay.js'],
+      files: ['content/favorites-overlay.js'],
       world: 'ISOLATED',
     });
   } catch {
-    // 受限页/权限收回：静默
+    // 注入失败：角标给信号，不静默（同状态轮盘）
+    void flashBadge('⊘');
+  }
+}
+
+/**
+ * 实例状态轮盘（v3.15，Alt+W）——只做页面内浮层，**不设独立小窗兜底**：
+ * 状态是「某个实例」的属性，没有实例页就没有可操作对象，开一个空窗没有意义。
+ */
+let lastStatusToggleAt = 0;
+async function toggleStatusOverlay(): Promise<void> {
+  const now = Date.now();
+  if (now - lastStatusToggleAt < 300) {
+    return; // 命令重放 / 系统连击：不重复注入
+  }
+  lastStatusToggleAt = now;
+  try {
+    // 用 lastFocusedWindow（与账号轮盘一致）：MV3 的 SW 不属于任何窗口，
+    // currentWindow 在 SW 里语义不稳，可能查不到活动页签
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tab?.id || !tab.url || !/^https?:/i.test(tab.url)) {
+      void flashBadge('—'); // 受限页（chrome:// 等）：给个可见反馈，别让用户以为是扩展坏了
+      return;
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/status-overlay.js'],
+      world: 'ISOLATED',
+    });
+  } catch {
+    // 注入失败（该站点未授权 / 受限页）：**不再静默**——角标给个信号，
+    // 否则用户只看到「按了没反应」，无法区分命令没绑 vs 注入被拦
+    void flashBadge('⊘');
   }
 }
 
@@ -575,7 +724,10 @@ async function flashBadge(text: string): Promise<void> {
   try {
     await chrome.action.setBadgeBackgroundColor({ color: '#1E6FFF' });
     await chrome.action.setBadgeText({ text });
-    window.setTimeout(() => {
+    // ★ 必须用裸 setTimeout：ServiceWorkerGlobalScope 没有 window，
+    //   写 window.setTimeout 会抛（且被下面的 catch 吞掉）→ 角标文本永远清不掉。
+    //   这个缺陷直接毁掉了「按键没反应时，角标能不能证明命令到了」这条现场诊断线索。
+    setTimeout(() => {
       void chrome.action.setBadgeText({ text: '' });
     }, 1200);
   } catch {
@@ -583,9 +735,29 @@ async function flashBadge(text: string): Promise<void> {
   }
 }
 
+/**
+ * 启动时把「本机**实际**生效的快捷键」写进取证缓冲（v3.17.1）。
+ *
+ * 为什么需要它：Chrome 只在**安装**时登记 `suggested_key`，改 manifest 之后
+ * 「重新加载扩展」**不会重绑**（本会话实测：把 `quick-pages` 从 Alt+W 挪到 Alt+E 后，
+ * Alt+W 仍然唤出旧功能）。于是「按了没反应」到底是
+ * ①命令没绑上、还是 ②绑上了但注入失败，现场极难分辨。
+ * 把 `getAll()` 的真实结果落进 `ql:forensics`（诊断包里可见），一眼可辨。
+ */
+async function logCommandBindings(): Promise<void> {
+  try {
+    const cmds = await chrome.commands.getAll();
+    const bindings = cmds.map((c) => `${c.name}=${c.shortcut || '(未绑定)'}`);
+    void forensics('commands', { bindings: bindings.join(' | ') });
+  } catch {
+    // 取不到不影响业务
+  }
+}
+
 registerNavigationHandlers();
 registerParallelHandlers();
-pageMonitor.registerPageMonitorListeners();
+// 把本机实际生效的快捷键写进诊断包（v3.17.1）：区分「命令没绑」与「注入失败」
+void logCommandBindings();
 
 // 打开失败自学习（v3.10.9）：绑定页签加载失败时按错误类型翻转协议并原页签重开。
 // 优先并行账号（par.* 主流程），未命中再试旧会话模型（session.* 轮盘路径）。

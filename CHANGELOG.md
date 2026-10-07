@@ -2,6 +2,180 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+## 3.17.1（2026-10-08）
+
+**排障：Alt+W 唤不出状态轮盘 —— 修 3 处「让故障无法被看见」的缺陷。**
+
+用户报告 Alt+W 无反应。逐段核对实现链路（manifest 命令 → `onCommand` 分发 → `toggleStatusOverlay`
+→ `executeScript` 注入 → 浮层挂载）后确认**链路本身是对的**，但沿路有三处缺陷会把真实原因藏起来：
+
+1. **`flashBadge` 在 SW 里用了 `window.setTimeout`**（既有缺陷，v3.13 时代就在）：
+   `ServiceWorkerGlobalScope` 没有 `window` → 抛错且被紧邻的 `catch` 吞掉 →
+   **角标文本设上去之后永远清不掉**。这直接毁掉了「按键到底有没有到达后台」这条最关键的现场判据。
+   改为裸 `setTimeout`。
+2. **活动页签查询口径不一致**：账号轮盘用 `{ active: true, lastFocusedWindow: true }`（可用），
+   而 v3.15/v3.16 新增的两块轮盘抄了已删除的 `togglePagesOverlay` 的 `currentWindow: true`。
+   MV3 的 SW 不属于任何窗口，`currentWindow` 语义不稳（可能查不到页签 → 静默什么都不做）。
+   两块新轮盘统一改为 `lastFocusedWindow`。
+3. **注入失败完全静默**：`catch {}` 让「命令没绑 / 站点未授权 / 受限页」三种情况在用户眼里
+   都是「按了没反应」。现在角标给信号：`—` = 当前页不是普通网页；`⊘` = 注入被拒（该站点未授权）。
+
+**另新增现场判据**：SW 启动时调用 `chrome.commands.getAll()`，把**本机实际生效的快捷键**
+写进 `ql:forensics`（`commands: quick-wheel=Alt+Q | quick-status=(未绑定) | …`）——
+诊断包里一眼可见，不必再猜。
+
+> **根因提示（Chrome 平台行为，非代码缺陷）**：`suggested_key` 只在扩展**安装**时登记，
+> 改 manifest 后「重新加载扩展」**不会重绑**。本会话已有实证：v3.15.0 把 `quick-pages`
+> 从 Alt+W 挪到 Alt+E 后，用户按 Alt+W 唤出的**仍是旧功能**——说明 Chrome 保留了旧绑定、
+> 也没给新命令 `quick-status` 登记 Alt+W。
+> 处置：在 `chrome://extensions/shortcuts` 手动为该命令指定 Alt+W，或卸载后重新加载扩展。
+
+> **验收**：`npm run typecheck` 0 错误、`npm run build` BUILD_OK；
+> 产物 `dist/background.js` 中 `window.setTimeout` 命中数 **0**（修复前为 1）。
+
+## 3.17.0（2026-10-08）
+
+**移除配置页监听与主体名页签标注（`page-monitor` 模块整体删除）。**
+
+用户表示这两项都不需要。它们同属 v3.11.0 引入的「配置页监视」能力，本次连同其整条数据链一并拿掉：
+
+| 删除项 | 说明 |
+|---|---|
+| `background/core/page-monitor.ts` | 整个文件删除（L1 路由分类器、名称表、`applySubject`、`ingestNames`、`tabs.onUpdated` 监听器） |
+| 桥上行 `pageNames` | `content/shield-main.ts` 的**名称型 API 嗅探**（`NAME_API_RE` / `extractNamePairs` / `reportPageNames`）与 `BridgeUpPayload` 的 `pageNames` 分支一并删除 |
+| `parellel-session` 的 `pageNames` 分发 | `handleBridge` 里对应分支删除 |
+| `ql:pageNames` | 存储键随模块消失，存量数据不再读写 |
+| 启动装载 | `service-worker.ts` 不再调用 `registerPageMonitorListeners()` |
+
+### 保留：页签名 = 标签标题（核心能力未受影响）
+
+`page-monitor` 只是**额外覆盖**了标题；账号页签标题原本就由独立链路维护，未动：
+
+- `parallel-session.ts` 自己的 `applyTitle()`（`setTabTitle` MAIN 注入 + `sb:setTitle` 消息）——
+  在 `open` / `refreshTitle`（改名）/ 收编 / `restore` 四处调用；
+- `content/title-hook.ts` 收到 `sb:setTitle` 后持续维持标题（防 SPA 重写）。
+
+**行为差异**：标题从「`账号别名 · 主体名·类型`」回到「`账号别名`」——
+即 `添加并行账号` 表单里写的「页签名」原样作为标签标题。
+
+### 顺带修掉一个既有缺陷：重复出网
+
+`shield-main.ts` 的名称嗅探为了给名称表喂数据，会对命中白名单的 GET **再发一次请求**
+（`nativeFetch` 被调用两次，第一次的返回值只用于 `clone()` 读取后丢弃）。
+该嗅探随本次移除一并消失，**这条重复请求不复存在**（此前记录在 `docs/CODEBASE_OVERVIEW.md` 风险 C13）。
+
+> **验收**：`npm run typecheck` 0 错误、`npm run build` BUILD_OK；产物中
+> `BasicObjectDetail` / `GetUserMenuPermission` / `MenuGroup/QueryList` / `pageNames` / `ql:pageNames`
+> 命中数均为 0；构建入口与产物文件列表已无 `pages-overlay`。
+> ⚠️ 未在真实浏览器中人工验收。
+
+## 3.16.0（2026-10-08）
+
+**移除「最近配置页」；新增「常用页面」书签轮盘（Alt+1）。**
+
+### 一、移除「最近配置页」（v3.11.0 引入，整体删除）
+
+用户报告「按 Alt+W 弹出的仍是最近配置页」，且明确要求去掉该功能。连同它一起删掉的还有整条链路：
+
+- 命令 `quick-pages`（建议键 Alt+E）从 `manifest.commands` 删除；
+- `content/pages-overlay.ts` 文件删除，构建入口一并移除；
+- 协议 `pages.recent` / `pages.jump` 与类型 `RecentPageEntry` 删除；
+- `page-monitor.ts` 里的 MRU 记录（`recordRecent`）、`recentForTab()`、`jumpCurrentTab()` 删除；
+- 存储键 `ql:recentPages` 与常量 `RECENT_PAGES_MAX` 删除（存量键不再读写，留在 storage 里不影响功能）。
+
+> **保留**：`page-monitor.ts` 的 **L1 路由分类器 + 名称表 + 复合页签标题**（`账号别名 · 主体名·类型`）。
+> 那是「页签标注」能力，与「最近配置页」是两件事，本次未动。
+
+**若按 Alt+W 仍弹出旧浮层**：说明浏览器还挂着上一版的命令绑定。请在 `chrome://extensions` 对本扩展点「重新加载」；
+仍不行就到 `chrome://extensions/shortcuts` 看该扩展的快捷键列表（`quick-pages` 应当已经消失）。
+命令的 suggested_key 只在扩展加载时登记，改完 manifest 必须重新加载才生效。
+
+### 二、新增「常用页面」书签轮盘（Alt+1）
+
+来源：同事「阿克索配置助手 v2.1.0」评审的 **D1**（`docs/COLLEAGUE-EXT-REVIEW.md`）。与已移除的 MRU 的分工：
+**MRU = 「我刚去过哪」（自动记录），书签 = 「我常去哪」（用户显式维护）**。
+
+- 新命令 `quick-favorites`（建议键 **Alt+1**）→ 页面内浮层，与状态轮盘同款外壳；
+- 悬停预演「将打开「名称」」→ 点击在新标签页打开，数字键 1-9/0 快选，Esc / 点遮罩关闭；
+- 内置默认 6 条平台常用管理页（用户管理 / 角色列表 / 工作流 / 菜单 / 视图 / TraceLog），开箱即用；
+- **可在管理页「常用页面」卡片里编辑**：每行 `名称,路径`（英文逗号 / 中文逗号 / 制表符均可），
+  路径支持相对路径（`/admin/…`，拼到当前站点 origin）或完整网址；另有「恢复默认」。
+- 编辑器**刻意不进 3 秒轮询**——那是用户正在输入的框，轮询回写会冲掉正在敲的内容。
+
+> 同事默认列表里的第 7 条「文件布局」带了他们环境专属的 `form-layout/edit?id=dea246e4-…`，
+> 换环境必然 404，故未收录；需要的话在管理页自己加一行即可。
+
+### 三、配套重构（避免制造重复实现）
+
+- 新增 `ui/wheel/ring-wheel.ts`：状态轮盘与书签轮盘共用的**单环轮盘渲染内核**
+  （几何 / 扇区 / 编号 / 径向文字 / 空态 / 单元素退化 / Hub 三行）。`status-core.ts` 与
+  `favorites-core.ts` 退化为薄适配层。抽出来的原因很直接：两块轮盘除数据外完全同构，
+  复制两份等于把评审里点出的「同一段逻辑多处维护」问题再制造一遍。
+- 新增 `ui/wheel/ring-wheel-style.ts`：两块浮层共用的样式表（此前各写一份）。
+- 账号轮盘（`wheel-core.ts`）**行为零改动**，只是把几何原语导出（`polar`/`sectorPath`/`el`/
+  `radialText`/`truncate` 与 `SIZE`/`C`/`R_OUT`/`R_IN`）供内核复用。
+
+> **验收**：`npm run typecheck` 0 错误、`npm run build` BUILD_OK；产物含 `content/favorites-overlay.js`，
+> 不含 `content/pages-overlay.js`；`manifest.commands` 为 3 条（Alt+Q / Alt+W / Alt+1）。
+> ⚠️ 状态轮盘与书签轮盘均**未在真实浏览器中人工验收**，视觉与交互待确认。
+
+## 3.15.0（2026-10-08）
+
+**新增：实例状态轮盘（Alt+W）—— 在对象实例页一键查看并切换生命周期状态。**
+
+功能来源：同事的「阿克索配置助手 v2.1.0」评审（见 `docs/COLLEAGUE-EXT-REVIEW.md` 的 B3「状态列表」+ B4「一键改状态」）。
+只融合这两项，其余功能点按评审结论搁置。
+
+- **快捷键换位**：`quick-status` 取 **Alt+W**；原「最近配置页轮盘」（v3.11.0 的 `quick-pages`）让位到 **Alt+E**，功能不删。两者都可在 `chrome://extensions/shortcuts` 自改。
+- **呼出即用**：在任意**对象实例页**按 Alt+W → 页面内无框浮层（Shadow DOM，与账号轮盘同款视觉：同 viewBox、同扇区/编号/径向文字类名族）；扇区 = 该实例的全部生命周期状态，当前状态以品牌色高亮 + 圆点。
+- **点即执行（不弹二次确认）**：悬停扇区时 Hub 预演「将把「当前」改为「X」」，点击即调 `POST /api/openapi/v1.0/Object/status/{instanceId}/{code}`；成功 → toast「已切换为「X」，正在刷新页面…」→ 1.2s 后由后台刷新该页签；失败 → 红色 toast 并**保持浮层打开**，可改选重试。数字键 1-9 快选，Esc / 点遮罩关闭。
+- **非实例页给空态**：URL 里没有 `bid`/`id` 时浮层显示「当前页面不是对象实例页」，不再报一堆网络错误。
+- **接口链路**（两步，均带 BFS 容错解析，服务端包装层级变了不会立刻失灵）：
+  `POST /api/platform/Layout/GetFormInstance` 挖 `lifecycle.id` → `GET /api/config/lifecycle/Status/GetListByBasicId?basicId=` 取状态数组；
+  `/web/view?mid=` 页面 objectId 缺失时先用 `GET /api/platform/UserView/GetViewList?menuId=` 反查（评审的 B7，B3 的前置）。
+- **平台知识**：URL 的 `bid`=objectId、`id`=instanceId；真实地址可能被百分号编码进 `__iframe=` 参数里，已做解码（评审的 F4）。
+
+### 三处与同事实现**有意不同**的地方（评审 §四 逐条记录的坑，这里都不踩）
+
+1. **请求一律在目标页签的页面主世界发出**（`chrome.scripting.executeScript({world:'MAIN'})`），而不是后台 `fetch`：
+   DNR 的 AUTH/COOKIE 规则条件含 `tabIds:[tabId]`，后台请求没有 tabId ⇒ 拿不到本账号 Bearer、也没有 Cookie 回放，会读到共享 jar（跨账号）。走页面世界还顺带吃到 MAIN 壳的 `_qlck` 缓存分区，避开「状态列表命中上一个账号缓存」这条既有泄漏通道。
+2. **绝不读 `document.cookie` 取 token**：Cookie 虚拟化补丁打在 MAIN world 的 `document` 上，ISOLATED 世界读到的仍是真实 jar（会话卫生会驱逐身份键 ⇒ 常为空，甚至是他账号残留）。身份交给 DNR 补，本功能不碰任何凭据。
+3. **成功判定不猜**：同事实现是「响应体里没有 message 就算成功」，于是 200 + 非 JSON 的网关拦截页会被当成成功并刷掉页面。这里把「非 JSON 响应」单列为失败并如实报出；状态项缺 `code` 时**直接拒绝**，不会像同事实现那样兜底拿 `name` 当 code 发出去。
+
+> **验收**：`npm run typecheck` 0 错误、`npm run build` BUILD_OK（构建产物含 `content/status-overlay.js`）。
+> ⚠️ **平台接口与字段名未经真机验证**：`GetFormInstance` 的 `lifecycle.id` 位置、状态项字段名、当前状态字段名均沿用同事实现的形态并做了 BFS 容错；`PUT`/状态码语义以首次实测为准。
+
+## 3.14.1（2026-10-07）
+
+**设备授权改用 RFC 8628 设备流，取代「网页出码、人抄进应用」。**
+
+- 登录云端账号库不再需要用户手抄授权码：`POST /api/auth/device-start` 取回批准页 URL + userCode，扩展直接 `chrome.tabs.create` 打开批准页（**URL 由服务端拼好，扩展不自己拼**），页面侧单循环按服务端下发的 `interval` 轮询 `POST /api/auth/device-poll`，批准后令牌当场落库。**用户一个字都不用抄。**
+- `deviceCode` 是换令牌的凭据，**只活在 `cloud-device.ts` 的模块内存**：不进 DOM、不进 storage、不进日志、不回传页面；任何终态或用户取消一律置 null（进程重启即遗忘，这也是服务端 `consumed` 状态存在的原因）。
+- 取消 = 世代号 +1 + 唤醒当前一拍，请求返回后再比对一次世代号——**请求期间点取消，令牌绝不会落盘**（否则"取消"就是摆设）。
+- 四种终态（denied / expired / consumed / unknown）文案互不相同；**不认识的 status 直接停轮询并报错**，不当作 pending 空转。
+- 展示名与头像取自 device-poll 的 `user` 字段，**纯展示、不参与任何鉴权判断**——「头像没取到于是登录失败了」这类荒唐事被结构性排除。
+- 「本地 → 云端」切换确认弹窗新增「不再提示」勾选（`ql:skipSwitchConfirm`），并在数据源 `?` 帮助气泡尾部提供**反悔通道**（「已关闭切换确认 · 重新开启」）：没有反悔通道的"不再提示"会把当时并不知情的用户锁死。
+- 旧的 `cloud.auth`（手抄授权码 → `/api/auth/device-token`）标记 `@deprecated` 但**予以保留**：端点在服务端还在，删掉这条路径等于替别人做决定。
+
+> **版本号补记**：云端子系统的两次提交（`f62d162` / `d7d66db`）落地时三条版本来源未同步、CHANGELOG 亦未记。3.14.0 / 3.14.1 两条为事后补写，三处版本号（根 `package.json`、`manifest.json`、`src/shared/constants.ts` 的 `EXT_VERSION`）已对齐至 `3.14.1` —— 代码注释中出现的 v3.14 / v3.14.1 即指这两条。
+
+## 3.14.0（2026-10-07）
+
+**数据源切换（本地 ↔ 云端）+ Akso Vault 云端账号库。**
+
+- 管理页新增「本地 / 云端」分段控件；云端账号库走 `https://www.dragonrain.top:8443`（Akso Vault），Bearer 会话，15s 超时。
+- **门面模式**：`parallel-store` 保持 **10 个方法签名不变**，按 `ql:dataSource` 分发到 `localStore` / `cloudStore`；两套实现由同一个 `ParallelStore` interface 约束，另有 `cloudStoreContract` 作**编译期同形证明**（少一个方法、签名漂了当场编译不过）。三个调用点一行未改，`localStore` 实现体**逐字节未动**。
+- **切换不删数据**：本地 IndexedDB 原样保留，切回本地只改一个布尔标记；云端模式下唯一读本地库的地方是迁移那一次 `db.accounts.list()`。缺省 `local` ⇒ 老用户零迁移、行为与改动前完全一致。
+- **失败不静默回落**：`dataSource === 'cloud'` 且网络/授权失败时**一律抛可读错误**，绝不偷偷返回本地旧数据——那会让用户以为在看云端、实际是本地旧数据。401/403 清 `cloudAuth` 但**数据源仍留 'cloud'**，由界面提示「登录已过期，请重新登录」（宁可空窗，也不静默切回本地让人以为账号没了）。
+- **合并迁移有两道不可省的核对**（`cloud-migrate.ts`）：① 服务端回报的 `received` 必须等于本地条数；② 云端账号总数必须 ≥ 本地条数。两关都过才写 `dataSource = 'cloud'`——**HTTP 200 不等于数据进去了**（服务端 merge 存在「某条账号因 site_id 不存在被静默跳过」的形态）。核对不过即中止，**本地数据一个字节都没动**。空库也照走核对，不设"跳过"分支。
+- 冲突规则：**updatedAt 新的赢**；历史记录缺 `updatedAt` 一律按 `createdAt` 兜底。本地取不到明文口令的账号**计数上报后仍照传**（跳过它会让 `received` 对不上本地条数，核对点就失去意义）。
+- 云端缓存：`list()` 5 秒短 TTL、站点/盒表 30 秒——**MV3 的 SW 随时会被回收，不假设内存常驻**；写操作后立即失效重拉，**时间线以服务端为准**，不做本地推测。
+- 盒子语义对齐服务端：服务端把「未归盒」对外翻译成默认盒的名字，故下载时 `默认盒名 → 无 box 字段`、上传时 `无 box/默认盒名 → ''`。盒子重命名到空串只能走「删盒 + 盒内账号归默认盒」那一支（服务端 rename 的 target 不接受空串）。
+- 配套 UI：数据源 `?` 帮助气泡（讲清本地/云端/切换代价，带 aria 与点外关闭）、云端登录态胶囊（头像 + 展示名）、登录过期提示条、忙碌标记、合并确认弹窗；popup 增加「登录云端账号库」次级入口。
+
+> **验收**：`npm run typecheck` 0 错误、`npm run build` BUILD_OK（版本号对齐至 3.14.1 后复跑确认）。
+> ⚠️ **云端子系统尚未在真实浏览器中人工验收**——SW 侧 harness 与页面侧 harness 均未入库，视觉与交互待人工确认。
+
 ## 3.13.2（2026-09-10）
 
 **修复：AUTH 改头规则扩展到全资源类型（与 COOKIE 规则同宽）——3.13.1 只补 `main_frame` 仍 401 的教训。** `<a download>` 属性发起的下载请求在 DNR 里经常归型为 **`other`**（因发起方式而异），只补 main_frame 覆盖不全。现 AUTH 与 COOKIE 同用 `ALL_MATCH_TYPES`，下载请求无论归型为 main_frame / other / xmlhttprequest 均携带 Bearer。安全边界不变：`tabIds + requestDomains` 双重锁死。**配套取证**：绑定页签的 401/403（任何类型）与主框架/下载类 4xx-5xx 响应全量写入 `ql:diag`（URL/host/归型/是否覆盖域）——下次诊断包直接可读失败请求，不再依赖症状推断。

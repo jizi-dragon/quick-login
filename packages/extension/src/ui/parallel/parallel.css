@@ -591,6 +591,38 @@
   color: var(--sb-brand);
 }
 
+/* ---- 常用页面书签编辑器（v3.16）---- */
+#fav-text {
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  resize: vertical;
+  min-height: 120px;
+}
+.block .desc code {
+  background: var(--sb-brand-soft);
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: var(--sb-brand);
+}
+.block .desc kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--sb-border-strong);
+  border-bottom-width: 2px;
+  background: var(--sb-surface, #fff);
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--sb-text-sub, #5b6b8f);
+}
+.save-tip {
+  color: var(--sb-ok, #16a34a);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 /* ---- 站点管理 ---- */
 .site-grid {
   display: grid;

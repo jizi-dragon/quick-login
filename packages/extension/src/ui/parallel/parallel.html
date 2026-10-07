@@ -147,6 +147,22 @@
           </form>
           <ul id="site-list" class="plain site-list"></ul>
         </section>
+
+        <!-- ============ 常用页面（书签轮盘 Alt+1 的数据源） ============ -->
+        <section class="card block">
+          <div class="block-head">
+            <h2>常用页面</h2>
+          </div>
+          <p class="desc">按 <kbd>Alt+1</kbd> 呼出书签轮盘，点一下就打开。每行一条：
+            <code>名称,路径</code>；路径可以是 <code>/admin/…</code>（相对当前站点）或完整网址。</p>
+          <textarea id="fav-text" rows="7" spellcheck="false"
+            placeholder="用户管理, /admin/user-mgmt/users/list&#10;工作流, /admin/config/workflow"></textarea>
+          <span class="btn-group">
+            <button id="fav-save" class="btn-primary" type="button">保存</button>
+            <button id="fav-reset" class="btn-ghost" type="button">恢复默认</button>
+            <span id="fav-tip" class="save-tip"></span>
+          </span>
+        </section>
       </div>
     </main>
 

@@ -1,5 +1,14 @@
 # 可行性调研：配置页监听 · 最近 5 个 · 主体名 · 跳转轮盘
 
+> ⚠️ **历史文档（2026-10-08 加注，已全文作废）**：本文设计的全部内容**均已移除**——
+> ①「最近配置页」部分（MRU 记录、`ql:recentPages`、`pages.recent`/`pages.jump` 协议、
+> `content/pages-overlay.ts` 浮层与 `quick-pages` 命令）于 **v3.16.0** 按用户要求整体删除；
+> ②「配置页监听」与「主体名页签标注」部分（L1 路由分类器、名称表 `ql:pageNames`、
+> MAIN 壳的名称型 API 嗅探、复合页签标题 `账号别名 · 主体名·类型`）于 **v3.17.0** 一并删除，
+> `background/core/page-monitor.ts` 模块已不存在。
+> 页签标题回到「页签名」本身（`parallel-session` 的 `applyTitle` + `title-hook`，与本文无关）。
+> 本文仅作设计过程留档，**不再代表当前实现**。
+
 > 调研基线：代码 3.10.9 · 站点实测语料（E2E + 交互式 DOM/API 探针 `tools/e2e/probe-page.mjs`）
 > 结论先行：**可行，映射表已实测闭环（五类页面），实现方案定稿**。
 

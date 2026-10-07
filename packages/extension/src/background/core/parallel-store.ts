@@ -19,8 +19,8 @@ export interface ParallelAccountInput {
 }
 
 /**
- * 数据层门面契约：**这 10 个方法就是全部数据访问面**（调用点只有 page-monitor /
- * parallel-session / service-worker）。本地与云端两套实现都必须逐方法同形 ——
+ * 数据层门面契约：**这 10 个方法就是全部数据访问面**（调用点只有 parallel-session /
+ * service-worker）。本地与云端两套实现都必须逐方法同形 ——
  * 改这里的签名 = 改契约，调用点会当场编译不过（`cloudStoreContract` 是编译期同形证明）。
  */
 export interface ParallelStore {
@@ -162,7 +162,7 @@ async function isCloud(): Promise<boolean> {
 /**
  * 数据层门面：按当前数据源分发。
  * - **签名与语义与改动前完全一致**，10 个方法一个不多一个不少；
- *   调用点（page-monitor / parallel-session / service-worker）一行都不用改。
+ *   调用点（parallel-session / service-worker）一行都不用改。
  * - 云端出错时**原样抛出**（"云端不可用：网络请求失败"这类可读错误直达界面），
  *   绝不静默回落本地 —— 那会让用户以为在看云端数据，实际却是本地旧数据。
  */

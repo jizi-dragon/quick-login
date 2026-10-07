@@ -14,8 +14,8 @@ QuickLogin（v3.13.2）是一个**纯浏览器 Chrome/Edge MV3 扩展**，解决
 对内部低代码平台（`tonbridge-config.aksoegmp.com`，无状态 JWT Bearer 鉴权）并行在线多个账号」的问题。
 每个账号一个独立标签页，通过**多平面隔离**（存储命名空间 / BroadcastChannel / AUTH 改头 /
 Cookie 回放 / HTTP 缓存分区 / ServiceWorker·CacheStorage 封控 / IndexedDB 命名空间）切断同 origin
-账号间的呈现层与网络层串扰；管理入口为并行管理主页、账号轮盘（`Alt+Q`，页内浮层优先）与
-最近配置页轮盘（`Alt+W`）；账号密码 AES-GCM 加密存于本机 IndexedDB。
+账号间的呈现层与网络层串扰；管理入口为并行管理主页，外加三块快捷轮盘：
+账号轮盘（`Alt+Q`）、实例状态轮盘（`Alt+W`）与常用页面书签轮盘（`Alt+1`）；账号密码 AES-GCM 加密存于本机 IndexedDB。
 
 目标平台的登录态是**多份共享资源的叠加**（localStorage、Cookie jar、HTTP 缓存、IndexedDB、
 ServiceWorker），同 origin 多账号天然互相污染。本项目逐层把它们改成按账号/按标签页分区。
@@ -68,7 +68,7 @@ ServiceWorker），同 origin 多账号天然互相污染。本项目逐层把�
 │   │    Cookie 登录快照/动态并入/写入者归属清扫 · 种子下发 · 授权健康门控        │
 │   ├─ core/tab-rules.ts         DNR session 规则（AUTH 100000+ / COOKIE 200000+）│
 │   │                            **逐条安装 + 单条失败降级**                     │
-│   ├─ core/page-monitor.ts      绑定页签的配置页分类/MRU/名称表（v3.13 收敛）    │
+│   ├─ core/favorites.ts         常用页面书签（v3.16，Alt+1 轮盘的数据源）        │
 │   ├─ core/parallel-store.ts    IDB accounts CRUD                              │
 │   ├─ core/credentials.ts       PBKDF2→AES-GCM 凭证加解密                       │
 │   ├─ core/site-auth.ts         授权清单/scheme 探测（**仅 list/probeScheme 活**)│
@@ -80,7 +80,8 @@ ServiceWorker），同 origin 多账号天然互相污染。本项目逐层把�
 │   ├─ auto-login.ts   登录表单自动填表（五重门控 + 逐事件取证）                  │
 │   ├─ title-hook.ts   MutationObserver 维持标题（配合 executeScript 权威写）     │
 │   ├─ wheel-overlay.ts 页面内 Shadow DOM 轮盘（按需 executeScript 注入）        │
-│   └─ pages-overlay.ts 最近配置页浮层（按需注入）                               │
+│   ├─ status-overlay.ts  实例状态轮盘浮层（v3.15，Alt+W；按需注入）              │
+│   └─ favorites-overlay.ts 常用页面书签轮盘浮层（v3.16，Alt+1；按需注入）        │
 │ ui/  parallel/（管理主页 1,291 行）· wheel/（独立小窗 + 共用 wheel-core 视觉契约）│
 │      · popup/（启动器）                                                        │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -93,7 +94,7 @@ ServiceWorker），同 origin 多账号天然互相污染。本项目逐层把�
 | `packages/extension/src/background/service-worker.ts` | 唯一 SW 入口：`onMessage` 分流（`ql:bridgeUp`/`sb:autoLogin*` 前置）→ `dispatch` 穷尽 switch；快捷键轮盘三级降级（页内浮层 → 独立小窗 → 标签页）；角标诊断；`webNavigation.onErrorOccurred` 协议自学习；装载三个注册器 + `void parallelSession.restore()` |
 | `.../background/core/parallel-session.ts` | 运行时编排主体（见组件图）。绑定/快照/规则三者的唯一事实源；`restore()` 冷启自举 |
 | `.../background/core/tab-rules.ts` | 每个绑定标签页至多 2 条 DNR session 规则；id 分区、逐条安装、差集恢复、孤儿清理 |
-| `.../background/core/page-monitor.ts` | 仅绑定页签的配置页监视：L1 路由分类器（5 类页面）、`ql:pageNames` 名称表、复合标题、MRU（每组 ≤5） |
+| `.../background/core/favorites.ts` | 常用页面书签：读写 `ql:favorites`、缺省回落内置默认、相对路径按基准 origin 解析成 URL |
 | `.../background/core/credentials.ts` | PBKDF2(100k, SHA-256, **固定 salt**) → AES-GCM-256；种子存 `chrome.storage.local['sb:encryptionSeed']` |
 | `.../content/shield-main.ts` | MAIN world 壳：上表 1/1′/1.5/4/5/6 平面 + 种子直灌 + 写入上报 + fetch/XHR 嗅探 + 页面命名；激活门控见「数据与控制流」（其中两处实现已失效，见风险 C14/C15） |
 | `.../content/shield-bridge.ts` | 49 行双向中继；**SW 不可达时合成 `unbound`**（fail-open，见风险 A6） |
@@ -145,8 +146,8 @@ COOKIE 规则首次或值变时重建；AUTH 规则 token 变化时换新 id（�
   `permissions: tabs, scripting, cookies, storage, webRequest, declarativeNetRequestWithHostAccess, webNavigation`；
   `host_permissions: []` + `optional_host_permissions: ["*://*/*"]`（按站点动态授权）；
   4 个静态 content script（`shield-bridge` ISOLATED / `shield-main` MAIN，均 `document_start` `all_frames`；
-  `title-hook` / `auto-login` 于 `document_idle`）；2 个 command（`quick-wheel`=Alt+Q、`quick-pages`=Alt+W）。
-- **注意**：`content/wheel-overlay.js` 与 `content/pages-overlay.js` **不在 manifest 中**，
+  `title-hook` / `auto-login` 于 `document_idle`）；**3 个 command**（`quick-wheel`=Alt+Q、`quick-status`=Alt+W、`quick-favorites`=Alt+1）。
+- **注意**：`content/wheel-overlay.js`、`content/status-overlay.js` 与 `content/favorites-overlay.js` **不在 manifest 中**，
   由 SW 在快捷键触发时 `chrome.scripting.executeScript` 按需注入（`service-worker.ts:431`、`:504`）。
 - **后台入口**：`src/background/service-worker.ts`（`restore()` 冷启自举）。
 - **界面入口**：`ui/popup/popup.html`（`action.default_popup`）、`ui/parallel/parallel.html`、
@@ -253,17 +254,15 @@ node tools/e2e/probe-page.mjs   # 页面结构探针（见下方「工具链缺�
     ServiceWorkerGlobalScope 无 `window` → ReferenceError 被静默吞掉 → **角标文本永不自清**。
     已在构建产物 `dist/background.js:2588` 中确认该调用原样保留；
     `tsconfig.json` 引入 `"DOM"` lib 使类型检查放行。（另两处 `window.` 分别位于页面注入函数与注释，无碍。）
-13. **名称型 API 每次出网两次**【验】。`shield-main.ts:379` 与 `:401` 对命中 `NAME_API_RE` 的请求
-    两次调用 `nativeFetch.call(this, input, init)`——第一次仅为挂 `clone()` 读取，返回值被丢弃。
-    即：每次配置页导航都会把同一 GET 打两遍（含服务端副作用与流量翻倍）。
+13. ~~**名称型 API 每次出网两次**~~【已随 v3.17 移除】。`shield-main.ts` 的名称嗅探曾对命中
+    白名单的 GET 两次调用 `nativeFetch`（第一次仅为挂 `clone()` 读取后丢弃）。
+    v3.17 移除配置页监听时该嗅探一并删除，**问题不复存在**——此条留档以示来龙去脉。
 14. **叛逃清扫是死代码**【验】。`nsWipeShared()`（`shield-main.ts:214-243`）读取的是**已被补丁**的
     `indexedDB.databases()` 与 `caches.keys()`——这两个补丁已经把 ns 前缀**剥掉**（`:707-715`、`:616-620`），
     而清扫逻辑仍以 `name.startsWith(ns)` 过滤 → 恒为 false。即 `journalRollback` + `nsWipeShared` 组合中
     **IDB 与 CacheStorage 从未被真正清理**（调用点 `parallel-session.ts:334-335`），
     叛逃页签写入的共享缓存会残留到下次使用。
-15. **XHR 名称嗅探是死路径**【验+推】。`:432` 在 `send()` 时用 `String(this.responseURL || '')` 判 URL，
-    而 XHR 的 `responseURL` 在响应完成前为空串 → `load` 监听永不挂载，
-    名称仓库实际只有 fetch 通道在工作（`page-monitor` 的名称解析能力因此打折）。
+15. ~~**XHR 名称嗅探是死路径**~~【已随 v3.17 移除】。该路径随名称嗅探一并删除；此条留档。
 16. **`wheel-overlay` 的关闭路径泄漏监听器与定时器**【验】。`closeExisting()`（`:22-31`）写
     `dataset.forceClose` 并派发 `ql-wheel-close` 事件，但**全仓库没有任何监听者**
     （`wheel-core.ts:293` 只守卫 `qlWheelNav`）→ 旧实例的 `document` capture `keydown`（`:276`）与
@@ -298,10 +297,12 @@ node tools/e2e/probe-page.mjs   # 页面结构探针（见下方「工具链缺�
 26. **`data.export` 的 `sites` 通常为空**【验】。写 `sb:siteGrants` 的唯一生产路径是
     `siteAuth.grant()`，而 `registerAuthHandlers()`（`site-auth.ts:132`）**全仓库无调用点**；
     管理页「添加并授权」只申请浏览器权限、不写该键。故导出→导入不会恢复站点授权。
-27. **两处输入守卫不一致**【验】。`wheel.ts:113` `Number(e.key) === 0 ? 9 : …` 对空格成立
-    （`Number(' ') === 0`）→ 轮盘窗口里按空格会直接选中第 10 个账号并关窗；
-    `pages-overlay.ts:152-169` 的 `onKey` 不检查 `INPUT/TEXTAREA/isContentEditable`
-    （而 `wheel-overlay.ts:198-201` 有该守卫）→ 浮层打开时在仍获焦的页面输入框敲数字会触发页面跳转。
+27. **账号轮盘的空格键误选与浮层监听器泄漏**【验】。`wheel.ts:113` `Number(e.key) === 0 ? 9 : …`
+    对空格成立（`Number(' ') === 0`）→ 轮盘窗口里按空格会直接选中第 10 个账号并关窗。
+    `wheel-overlay.ts` 关闭时派发 `ql-wheel-close` 但全仓库无监听者 → 旧实例的 keydown 与轮询驻留。
+    （**v3.15/v3.16 新增的两块浮层已规避这两点**：数字键用 `/^[0-9]$/` 严格判定，
+    旧实例清理改成把 `close` 挂在 `window.__QL_*_CLEANUP__` 上由新实例调用。
+    账号轮盘本身**尚未修**——两处属既有代码，未在本次改动范围内。）
 28. **UI 无障碍缺口**【验】。盒子 chips 的 ✎/⏸/✕ 为 `<span>` + click，不可聚焦；
     盒子弹窗无 `aria-modal`/焦点管理；`wheel-core.ts:216` 的 `hub-go` 有 `role="button"`+`tabindex` 却只绑 click，
     键盘按 Enter/Space 无效；全页 29 处阻塞式 `prompt/confirm/alert`。
@@ -365,9 +366,9 @@ node tools/e2e/probe-page.mjs   # 页面结构探针（见下方「工具链缺�
 | `docs/PROJECT-STATUS.md:34-53` | 里程碑止于 **v3.7.2**（+E2E 行） | 缺 v3.8.0–v3.13.2 共 **27 个版本** |
 | `docs/PROJECT-STATUS.md:53` | `npm run e2e`、`node tools/e2e/peek.mjs`、CDP IndexedDB 全量取证 | 三重失效：根 `package.json` 无 `e2e` 脚本、`peek.mjs` 已删、台架已删 |
 | `docs/PROJECT-STATUS.md:8,96` | 称 `tools/e2e/` 已随 v3.9.2 清理移除 | `tools/e2e/probe-page.mjs` 于 `f36b2b9`（2026-09-08）**重新入库并仍在库** |
-| `docs/PROJECT-STATUS.md:57` | 只列 `quick-wheel` 快捷键 | manifest 现有 **2 个** command（漏 `quick-pages` / Alt+W） |
+| `docs/PROJECT-STATUS.md:57` | 只列 `quick-wheel` 快捷键 | manifest 现有 **3 个** command（`quick-wheel`=Alt+Q、`quick-status`=Alt+W、`quick-favorites`=Alt+1；`quick-pages` 已于 v3.16 移除） |
 | `docs/PROJECT-STATUS.md:22,79` | 重复「Cookie 快照仅登录时点采集一次」 | v3.10.6 起快照已动态化（响应捕获 + 袋回流），`USER-MANUAL.md:290` 才是正确表述 |
-| `docs/PROJECT-STATUS.md:112,118` | 关键文件索引 | 缺 `page-monitor.ts`、`pages-overlay.ts`、`tab-title.ts` 与 `ql:forensics`/导入导出/导出诊断（`:118` 的 3000ms 轮询描述**仍准确**） |
+| `docs/PROJECT-STATUS.md:112,118` | 关键文件索引 | 缺 `tab-title.ts`、状态/书签两块浮层与 `ql:forensics`/导入导出/导出诊断（`:118` 的 3000ms 轮询描述**仍准确**；`pages-overlay.ts` 已于 v3.16、`page-monitor.ts` 已于 v3.17 删除，无需补） |
 | `README.md:46` | 「Cookie 快照仅登录时点采集一次…需重新登录刷新快照」 | 同 v3.10.6，已失效 |
 | `README.md:12` | AUTH 平面覆盖「xhr / websocket / sub_frame」 | `tab-rules.ts:49-59` 已扩到 `main_frame`/`other` 等 10 种 |
 | `README.md:3` | 只提云端 `tonbridge-config.aksoegmp.com` | 漏 v3.10.9 的内网站点与 `scheme` 数据化（http/https 自学习） |
