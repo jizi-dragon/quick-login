@@ -1,10 +1,9 @@
 import { CONTENT_MESSAGE, LOCAL_KEYS, SESSION_KEYS } from '../../shared/constants';
 import type { Scheme } from './site-auth';
 import type { BridgeDownPayload, BridgeUpPayload, ParallelAccount } from '../../shared/types';
-import { credentials } from './credentials';
 import { setTabTitle } from '../tabs/tab-title';
 import { pageMonitor } from './page-monitor';
-import { parallelStore } from './parallel-store';
+import { parallelStore, resolveAccountPlaintext } from './parallel-store';
 import { tabRules, parentDomainOf, hostNoPortOf } from './tab-rules';
 
 /**
@@ -831,7 +830,8 @@ export const parallelSession = {
       accountId,
       forceNewTab,
       reused: tabId !== null,
-      hasCredentials: Boolean(account.credentials),
+      // 云端账号的凭证在服务端（hasPassword），本地才是 credentials —— 取证字段要如实反映
+      hasCredentials: Boolean(account.credentials) || account.hasPassword === true,
       box: account.box ?? null,
     });
 
@@ -877,14 +877,20 @@ export const parallelSession = {
     await persistBindings();
     void diag(`open(${accountId}) 绑定已持久化`);
 
-    if (account.credentials) {
+    // 自动填表凭证：本地 = 解密 credentials；云端 = 当场取一次明文
+    // （resolveAccountPlaintext 是数据层门面的附加能力，两条路都归它，调用点只认"有/没有"）
+    if (account.credentials || account.hasPassword) {
       try {
-        const creds = await credentials.decryptCredentials(account.credentials);
-        await setPendingAutoLogin(tabId, creds.username, creds.password);
-        void diag(`open(${accountId}) 凭证解密并下发待登录`);
+        const creds = await resolveAccountPlaintext(account);
+        if (!creds) {
+          void diag(`open(${accountId}) 取不到凭证（云端无口令或口令为空）`);
+        } else {
+          await setPendingAutoLogin(tabId, creds.username, creds.password);
+          void diag(`open(${accountId}) 凭证就绪并下发待登录`);
+        }
       } catch (e) {
-        // 凭证损坏不应阻断网络平面安装（原实现会让 open() 在此中断）
-        void diag(`open(${accountId}) 凭证解密失败：${e instanceof Error ? e.message : String(e)}`);
+        // 凭证取不到（密文损坏 / 云端网络失败）不应阻断网络平面安装（原实现会让 open() 在此中断）
+        void diag(`open(${accountId}) 凭证解析失败：${e instanceof Error ? e.message : String(e)}`);
       }
     } else {
       void diag(`open(${accountId}) 无凭证字段`);

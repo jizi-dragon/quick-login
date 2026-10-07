@@ -32,6 +32,16 @@ export const LOCAL_KEYS = {
   recentPages: 'ql:recentPages',
   /** 登录失败现场取证环形缓冲（v3.12.2：生命周期 + 自动填表逐事件） */
   forensics: 'ql:forensics',
+  /** 数据源：'local' | 'cloud'，缺省 'local'（切换不改动任何本地账号数据） */
+  dataSource: 'ql:dataSource',
+  /** 云端账号库会话：{ baseUrl, token, fernetKey, email } | null */
+  cloudAuth: 'ql:cloudAuth',
+  /**
+   * 「不再提示：本地 → 云端切换确认」标志（v3.14.1，布尔；缺省 false = 每次弹确认）。
+   * ★ 反悔通道在数据源旁边的 `?` 帮助气泡里（「已关闭切换确认 · 重新开启」清掉它）——
+   *   没有反悔通道的"不再提示"会把当时并不知情用户锁死。
+   */
+  skipSwitchConfirm: 'ql:skipSwitchConfirm',
 } as const;
 
 /** 最近配置页每组容量（需求：最近 5 个） */

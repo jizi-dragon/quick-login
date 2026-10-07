@@ -240,6 +240,79 @@
   padding: 5px 10px;
 }
 
+/* ---- 数据源切换（本地 / 云端，v3.14）：胶囊分段控件，观感对齐 .chip.active ---- */
+.source-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--sb-border);
+  background: var(--sb-surface);
+  box-shadow: var(--sb-shadow-sm);
+}
+.source-opt {
+  font-size: 12.5px;
+  padding: 5px 15px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--sb-text-secondary);
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.source-opt:hover:not(.active) {
+  color: var(--sb-brand);
+  background: var(--sb-brand-soft);
+}
+.source-opt.active {
+  background: var(--sb-brand);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(30, 111, 255, 0.28);
+}
+.source-opt:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+.source-busy {
+  font-size: 11.5px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  color: var(--sb-brand);
+  background: var(--sb-brand-soft);
+  border: 1px solid color-mix(in srgb, var(--sb-brand) 22%, transparent);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+/* ---- 数据源提示条（云端不可用 / 合并结果）：醒目但不喧哗 ---- */
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 15px;
+  border-radius: var(--sb-radius);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-line;
+  border: 1px solid var(--sb-border);
+  background: var(--sb-surface);
+  color: var(--sb-text);
+  box-shadow: var(--sb-shadow-sm);
+}
+.notice.err {
+  border-color: color-mix(in srgb, var(--sb-danger) 35%, transparent);
+  background: color-mix(in srgb, var(--sb-danger) 9%, var(--sb-surface));
+  color: color-mix(in srgb, var(--sb-danger) 78%, var(--sb-text));
+}
+.notice.warn {
+  border-color: color-mix(in srgb, var(--sb-warning) 38%, transparent);
+  background: color-mix(in srgb, var(--sb-warning) 11%, var(--sb-surface));
+  color: color-mix(in srgb, var(--sb-warning) 68%, var(--sb-text));
+}
+.notice.ok {
+  border-color: color-mix(in srgb, var(--sb-success) 35%, transparent);
+  background: color-mix(in srgb, var(--sb-success) 10%, var(--sb-surface));
+  color: color-mix(in srgb, var(--sb-success) 62%, var(--sb-text));
+}
+
 /* ---- 批量工具条 ---- */
 .batch-bar {
   display: flex;
@@ -655,6 +728,213 @@
   gap: 8px;
 }
 
+/* ---- 数据源：? 帮助气泡（v3.14.1）---- */
+.source-tools {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.source-help {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--sb-border-strong);
+  background: var(--sb-surface);
+  color: var(--sb-text-secondary);
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--sb-shadow-sm);
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+.source-help:hover,
+.source-help[aria-expanded='true'] {
+  background: var(--sb-brand-soft);
+  border-color: var(--sb-brand);
+  color: var(--sb-brand);
+}
+.help-pop {
+  position: absolute;
+  top: calc(100% + 9px);
+  right: 0;
+  z-index: 70;
+  width: min(360px, 86vw);
+  padding: 14px 15px;
+  border-radius: var(--sb-radius);
+  border: 1px solid var(--sb-border);
+  background: var(--sb-surface);
+  box-shadow: var(--sb-shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.help-pop h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+.help-pop p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--sb-text-secondary);
+}
+.help-pop b {
+  color: var(--sb-text);
+}
+.help-pop .help-foot {
+  padding-top: 8px;
+  border-top: 1px dashed var(--sb-border-strong);
+  font-size: 11.5px;
+}
+.link-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--sb-brand);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ---- 云端登录态 chip（数据源在云端且已登录时显示邮箱）---- */
+.cloud-account {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sb-success) 32%, transparent);
+  background: color-mix(in srgb, var(--sb-success) 10%, var(--sb-surface));
+  color: color-mix(in srgb, var(--sb-success) 62%, var(--sb-text));
+}
+
+/* ---- 登录已过期提示条：文字占满，按钮不换行 ---- */
+#auth-bar {
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+#auth-bar #auth-bar-text {
+  flex: 1;
+  min-width: 200px;
+}
+#auth-bar button {
+  flex: none;
+}
+
+/* ---- 设备授权等待面板（RFC 8628）---- */
+.device-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.device-status-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--sb-text);
+}
+.device-status-text.err {
+  color: color-mix(in srgb, var(--sb-danger) 78%, var(--sb-text));
+}
+.spinner {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid var(--sb-border-strong);
+  border-top-color: var(--sb-brand);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+#device-url {
+  color: var(--sb-brand);
+  word-break: break-all;
+}
+.device-manual {
+  border-top: 1px dashed var(--sb-border-strong);
+  padding-top: 10px;
+}
+.device-manual summary {
+  font-size: 12px;
+  color: var(--sb-text-secondary);
+  cursor: pointer;
+}
+.device-manual summary:hover {
+  color: var(--sb-brand);
+}
+.device-manual .desc {
+  margin-top: 8px;
+}
+.device-manual-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.device-manual-row input {
+  flex: 1;
+  min-width: 0;
+  letter-spacing: 0.22em;
+  font-variant-numeric: tabular-nums;
+}
+.device-manual-msg {
+  margin: 7px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--sb-text-secondary);
+}
+.device-manual-msg.err {
+  color: color-mix(in srgb, var(--sb-danger) 78%, var(--sb-text));
+}
+
+/* ---- 切换确认弹窗里的「不再提示」复选框 ---- */
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--sb-text);
+  cursor: pointer;
+}
+.check-row input {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 1px 0 0;
+  accent-color: var(--sb-brand);
+}
+.check-hint {
+  margin-top: -4px;
+  font-size: 11.5px;
+}
+
 .hidden {
   display: none !important;
 }
+
+/* 「已登录谁」胶囊里的头像。形态与网站控制台、桌面账号页三处保持一致 ——
+   同一件事在三个界面上长得一样，用户才不用重新认一遍。 */
+.cloud-account { display: inline-flex; align-items: center; gap: 6px; }
+.cloud-av {
+  width: 20px; height: 20px; border-radius: 50%; flex: none;
+  display: inline-grid; place-items: center;
+  font-size: 10.5px; font-weight: 700;
+  background: var(--sb-brand-soft); color: var(--sb-brand); overflow: hidden;
+}
+.cloud-av img { width: 100%; height: 100%; object-fit: cover; display: block; }

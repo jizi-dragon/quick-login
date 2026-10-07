@@ -51,10 +51,22 @@ export interface ParallelAccount {
   username: string;
   /** 加密存储的密码等凭证 */
   credentials?: EncryptedCredentials;
+  /**
+   * 服务端是否已存口令（v3.14 云端数据源）。
+   * 云端模式下口令不落扩展（服务端 Fernet 密文），`credentials` 恒为空，
+   * 只能由服务端如实回报"有没有"——UI 的「已存密码」标记据此显示。
+   * 本地账号不写该字段（缺省 undefined = 以 credentials 是否存在为准）。
+   */
+  hasPassword?: boolean;
   color: string;
   /** 所属盒子（收纳分组）；缺省 = 「默认盒子」 */
   box?: string;
   createdAt: number;
+  /**
+   * 最后修改时间（毫秒）：合并冲突的裁决依据 —— 新的赢。
+   * ⚠️ 历史记录（云端旧行 / 老版本写入的本地行）可能没有这个字段，**一律按 createdAt 兜底**，
+   * 不要假设它一定存在（`Number.isFinite(a.updatedAt) ? a.updatedAt : a.createdAt`）。
+   */
   updatedAt: number;
 }
 

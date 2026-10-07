@@ -16,6 +16,15 @@ import {
   warmEnforcementCache,
 } from './core/parallel-session';
 import { parallelStore } from './core/parallel-store';
+import {
+  CLOUD_DEFAULT_BASE_URL,
+  exchangeDeviceCode,
+  getCloudAuth,
+  getDataSource,
+  setDataSource,
+} from './core/cloud-store';
+import { cancelDeviceFlow, pollDeviceFlow, startDeviceFlow } from './core/cloud-device';
+import { migrateLocalToCloud } from './core/cloud-migrate';
 import { sessionManager } from './core/session-manager';
 import { tabRules } from './core/tab-rules';
 
@@ -174,7 +183,8 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
         return list.map((a) => ({
           ...a,
           ...parallelSession.statusOf(a),
-          password: Boolean(a.credentials),
+          // 云端账号的口令存在服务端（扩展侧只有 hasPassword），本地仍是 credentials 是否存在
+          password: Boolean(a.credentials) || a.hasPassword === true,
         }));
       });
       return { kind: 'par.list', result: r };
@@ -332,6 +342,55 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       return { kind: 'pages.recent', result: ok([]) };
     case 'pages.jump':
       return { kind: 'pages.jump', result: ok({ jumped: false }) };
+
+    /* ---------------- 数据源：本地 ↔ 云端（v3.14） ---------------- */
+    case 'cloud.state': {
+      const r = await tryRun(async () => {
+        const [source, auth] = await Promise.all([getDataSource(), getCloudAuth()]);
+        return {
+          source,
+          authorized: Boolean(auth),
+          email: auth?.email ?? '',
+          displayName: auth?.displayName ?? '',
+          avatar: auth?.avatar ?? '',
+          baseUrl: auth?.baseUrl ?? CLOUD_DEFAULT_BASE_URL,
+        };
+      });
+      return { kind: 'cloud.state', result: r };
+    }
+    case 'cloud.auth': {
+      // @deprecated 手抄授权码那条老路（网页出码 → 人抄进扩展 → device-token）。
+      // 保留是为了不删别人的路，但界面已经不再调用它：新流程一律走下面的 cloud.device.*
+      const r = await tryRun(() => exchangeDeviceCode(req.code));
+      return { kind: 'cloud.auth', result: r };
+    }
+    case 'cloud.device.start': {
+      // 设备流第一拍（无凭据）。deviceCode 只留在 cloud-device 的模块内存里，**不回传页面**
+      const r = await tryRun(() => startDeviceFlow(req.clientName));
+      return { kind: 'cloud.device.start', result: r };
+    }
+    case 'cloud.device.poll': {
+      // 只回答"现在怎么样"，不排程：节拍由页面那一个循环按 interval 决定
+      const r = await tryRun(() => pollDeviceFlow());
+      return { kind: 'cloud.device.poll', result: r };
+    }
+    case 'cloud.device.cancel': {
+      const r = await tryRun(async () => ({ cancelled: cancelDeviceFlow() }));
+      return { kind: 'cloud.device.cancel', result: r };
+    }
+    case 'cloud.migrate': {
+      // 本地 → 云端：上传 + 两个核对点，任一不过就中止且**不改数据源**
+      const r = await tryRun(() => migrateLocalToCloud());
+      return { kind: 'cloud.migrate', result: r };
+    }
+    case 'cloud.source.set': {
+      // 云端 → 本地：只改数据源标记（本地 IndexedDB 一直在，无需任何搬运）
+      const r = await tryRun(async () => {
+        await setDataSource('local');
+        return { source: 'local' as const };
+      });
+      return { kind: 'cloud.source.set', result: r };
+    }
   }
 }
 

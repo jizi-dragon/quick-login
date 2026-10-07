@@ -7,6 +7,15 @@
   </head>
   <body>
     <main class="wrap">
+      <!-- 数据源提示条（云端不可用 / 合并结果；无事发生时不占位） -->
+      <div id="cloud-banner" class="notice hidden" role="status" aria-live="polite"></div>
+
+      <!-- 登录已过期（服务端 401）：数据源**保持**云端，只提示重新登录，绝不静默切回本地 -->
+      <div id="auth-bar" class="notice err hidden">
+        <span id="auth-bar-text">登录已过期，请重新登录云端账号库（云端数据没有丢，重新登录即可继续用）。</span>
+        <button id="auth-relogin" class="btn-ghost btn-sm" type="button">重新登录</button>
+      </div>
+
       <header class="head">
         <div class="brand">
           <span class="brand-ring" aria-hidden="true"><i></i></span>
@@ -16,6 +25,27 @@
           </div>
         </div>
         <div class="head-right">
+          <!-- 数据源：本地（IndexedDB）/ 云端（自建账号库）。切换不改动本地数据 -->
+          <div class="source-tools">
+            <div id="source-switch" class="source-switch" role="group" aria-label="数据源">
+              <button id="source-local" class="source-opt active" type="button">本地</button>
+              <button id="source-cloud" class="source-opt" type="button">云端</button>
+            </div>
+            <!-- 数据源说明：圆形 ? —— 点开是气泡（不是 alert），可点外部 / Esc 关闭 -->
+            <button id="source-help" class="source-help" type="button" aria-haspopup="dialog"
+              aria-expanded="false" aria-controls="source-help-pop" title="本地和云端有什么区别？">?</button>
+            <div id="source-help-pop" class="help-pop hidden" role="dialog" aria-label="数据源说明">
+              <h4>本地 / 云端</h4>
+              <p><b>本地</b>：账号存在这台电脑的浏览器里，断网也能用；换一台电脑就没有。</p>
+              <p><b>云端</b>：账号存在服务器上，换电脑登录就能用；断网时读不到（数据不会丢，网络恢复即可）。</p>
+              <p><b>切换</b>：本地 → 云端会把本地账号<b>合并上传</b>（同站同名的以最后修改时间较新的为准）；
+                <b>本地数据不会被删除</b>，随时可以切回来。</p>
+              <p id="help-reset-confirm" class="help-foot hidden">已关闭切换确认 ·
+                <button id="help-reset-confirm-btn" class="link-btn" type="button">重新开启</button></p>
+            </div>
+          </div>
+          <span id="source-busy" class="source-busy hidden">正在合并…</span>
+          <span id="cloud-account" class="cloud-account hidden"></span>
           <div class="head-actions">
             <button id="data-export" class="btn-ghost btn-sm" type="button">导出数据</button>
             <button id="data-import" class="btn-ghost btn-sm" type="button">导入数据</button>
@@ -61,7 +91,7 @@
           <div class="block-head">
             <h2>添加并行账号</h2>
           </div>
-          <p class="desc">页签名即该账号所有标签页的标题；密码 AES-GCM 加密存放在本机。</p>
+          <p id="par-hint" class="desc">页签名即该账号所有标签页的标题；密码 AES-GCM 加密存放在本机。</p>
           <form id="par-form" class="form">
             <div class="field-pair">
               <label class="field">
@@ -130,6 +160,54 @@
         <div class="modal-actions">
           <button id="box-modal-cancel" class="btn-ghost" type="button">取消</button>
           <button id="box-modal-ok" class="btn-primary" type="button">确定移入</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 云端设备授权（RFC 8628）等待面板：转圈 + 批准页链接 + 取消/重试。
+         ★ deviceCode 不进 DOM；这里的链接是服务端拼好的 verificationUrl，原样打开 -->
+    <div id="device-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>登录云端账号库</h3>
+        <div class="device-status">
+          <span id="device-spinner" class="spinner" aria-hidden="true"></span>
+          <p id="device-status" class="device-status-text" role="status" aria-live="polite">正在向云端申请授权…</p>
+        </div>
+        <p class="desc">已打开浏览器批准页：请在那边的页面上登录并点「批准」。完成后这里会自动继续，不用回来操作。</p>
+        <p class="desc">如果浏览器没有打开，请手动访问
+          <a id="device-url" href="#" target="_blank" rel="noreferrer noopener">批准页链接</a>。
+        </p>
+        <details id="device-manual" class="device-manual">
+          <summary>浏览器没打开？手动输入 8 位码</summary>
+          <p class="desc">批准页向你索要 8 位授权码时，可在这里输入本次会话的码并重新打开批准页。
+            这个码只在服务端的批准页使用（扩展不会拿它去换令牌）。</p>
+          <div class="device-manual-row">
+            <input id="device-user-code-input" inputmode="numeric" autocomplete="off" maxlength="8"
+              placeholder="8 位数字" aria-label="8 位授权码" />
+            <button id="device-user-code-open" class="btn-ghost btn-sm" type="button">打开批准页</button>
+          </div>
+          <p id="device-manual-msg" class="device-manual-msg"></p>
+        </details>
+        <div class="modal-actions">
+          <button id="device-cancel" class="btn-ghost" type="button">取消</button>
+          <button id="device-retry" class="btn-primary hidden" type="button">重试</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 本地 → 云端：合并上传确认（自定义弹窗：confirm 加不了「不再提示」复选框） -->
+    <div id="switch-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>切到云端账号库</h3>
+        <p id="switch-modal-text" class="desc"></p>
+        <label class="check-row">
+          <input id="switch-modal-skip" type="checkbox" />
+          <span>不再提示（以后从本地切到云端直接开始合并）</span>
+        </label>
+        <p class="desc check-hint">反悔：数据源旁边的 <b>?</b> 里有「已关闭切换确认 · 重新开启」。</p>
+        <div class="modal-actions">
+          <button id="switch-modal-cancel" class="btn-ghost" type="button">取消</button>
+          <button id="switch-modal-ok" class="btn-primary" type="button">开始合并</button>
         </div>
       </div>
     </div>

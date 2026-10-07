@@ -1,5 +1,11 @@
 import type { ParallelAccount, ParallelAccountStatus } from '../../shared/types';
-import type { DataBackup } from '../../shared/messages';
+import type {
+  CloudDevicePoll,
+  CloudMergeReport,
+  DataBackup,
+  RuntimeRequest,
+  RuntimeResponse,
+} from '../../shared/messages';
 import { EXT_VERSION, LOCAL_KEYS } from '../../shared/constants';
 import { send } from '../send';
 
@@ -47,6 +53,40 @@ const boxModalNew = document.getElementById('box-modal-new') as HTMLInputElement
 const boxModalOk = document.getElementById('box-modal-ok') as HTMLButtonElement;
 const boxModalCancel = document.getElementById('box-modal-cancel') as HTMLButtonElement;
 
+const sourceLocalBtn = document.getElementById('source-local') as HTMLButtonElement;
+const sourceCloudBtn = document.getElementById('source-cloud') as HTMLButtonElement;
+const sourceBusyEl = document.getElementById('source-busy') as HTMLSpanElement;
+const cloudBannerEl = document.getElementById('cloud-banner') as HTMLDivElement;
+const parHintEl = document.getElementById('par-hint') as HTMLParagraphElement;
+
+/* ---- 数据源帮助气泡 / 云端登录态 / 登录过期条（v3.14.1） ---- */
+const sourceHelpBtn = document.getElementById('source-help') as HTMLButtonElement;
+const sourceHelpPop = document.getElementById('source-help-pop') as HTMLDivElement;
+const helpResetConfirm = document.getElementById('help-reset-confirm') as HTMLParagraphElement;
+const helpResetConfirmBtn = document.getElementById('help-reset-confirm-btn') as HTMLButtonElement;
+const cloudAccountEl = document.getElementById('cloud-account') as HTMLSpanElement;
+const authBarEl = document.getElementById('auth-bar') as HTMLDivElement;
+const authReloginBtn = document.getElementById('auth-relogin') as HTMLButtonElement;
+
+/* ---- 设备授权等待面板（RFC 8628） ---- */
+const deviceModal = document.getElementById('device-modal') as HTMLDivElement;
+const deviceSpinner = document.getElementById('device-spinner') as HTMLSpanElement;
+const deviceStatusEl = document.getElementById('device-status') as HTMLParagraphElement;
+const deviceUrlEl = document.getElementById('device-url') as HTMLAnchorElement;
+const deviceManual = document.getElementById('device-manual') as HTMLDetailsElement;
+const deviceUserCodeInput = document.getElementById('device-user-code-input') as HTMLInputElement;
+const deviceUserCodeOpen = document.getElementById('device-user-code-open') as HTMLButtonElement;
+const deviceManualMsg = document.getElementById('device-manual-msg') as HTMLParagraphElement;
+const deviceCancelBtn = document.getElementById('device-cancel') as HTMLButtonElement;
+const deviceRetryBtn = document.getElementById('device-retry') as HTMLButtonElement;
+
+/* ---- 本地 → 云端 合并确认弹窗（自定义，可带「不再提示」） ---- */
+const switchModal = document.getElementById('switch-modal') as HTMLDivElement;
+const switchModalText = document.getElementById('switch-modal-text') as HTMLParagraphElement;
+const switchModalSkip = document.getElementById('switch-modal-skip') as HTMLInputElement;
+const switchModalOk = document.getElementById('switch-modal-ok') as HTMLButtonElement;
+const switchModalCancel = document.getElementById('switch-modal-cancel') as HTMLButtonElement;
+
 /** 有历史记录或站点清单有它时优先预选的默认站点 */
 const PREFERRED_HOST = 'tonbridge-config.aksoegmp.com';
 const LAST_HOST_KEY = 'ql:lastParHost';
@@ -68,6 +108,24 @@ let currentBox: string = '全部';
 /** 批量模式与选中集 */
 let batchMode = false;
 const selectedIds = new Set<string>();
+
+/* ---- 数据源（本地 ↔ 云端，v3.14） ---- */
+/** 当前数据源（由 background 的 ql:dataSource 决定，界面只跟随） */
+let dataSource: 'local' | 'cloud' = 'local';
+/** 是否已持有云端会话（没令牌时点「云端」先走授权码） */
+let cloudAuthorized = false;
+let cloudEmail = '';
+/** 展示名与头像（有就用，没有回落邮箱前缀）—— 只影响显示，不参与任何判断 */
+let cloudDisplayName = '';
+let cloudAvatar = '';
+let cloudBaseUrl = '';
+/** 合并/切换进行中：禁用分段控件 + 显示忙碌态 + 暂停轮询刷新 */
+let cloudBusy = false;
+/** 最近一次 par.list 的失败原因（云端模式下 → 顶部提示条） */
+let cloudListError = '';
+/** 一次性提示（合并结果等），到点自动消失 */
+let bannerFlash: { text: string; kind: 'ok' | 'err' | 'warn'; until: number } | null = null;
+const BANNER_FLASH_MS = 15_000;
 
 /* 防闪烁：数据未变化的轮询不做 DOM 重建 */
 let lastListKey = '';
@@ -91,10 +149,13 @@ function boxOf(a: ParallelAccount): string {
 
 async function loadBrowserAccounts(): Promise<void> {
   const res = await send({ kind: 'par.list' });
+  const failed = res.kind === 'par.list' && !res.result.ok ? res.result.error : '';
   browserAccounts =
     res.kind === 'par.list' && res.result.ok
       ? (res.result.data as BrowserAccount[])
       : [];
+  // 云端模式下读不到就是读不到：列表留空 + 顶部醒目提示（绝不回落到本地旧数据）
+  cloudListError = dataSource === 'cloud' ? failed : '';
   // 清掉已删除账号的选中态
   for (const id of Array.from(selectedIds)) {
     if (!browserAccounts.some((a) => a.id === id)) {
@@ -102,7 +163,7 @@ async function loadBrowserAccounts(): Promise<void> {
     }
   }
 
-  const key = JSON.stringify([defaultBox, browserAccounts.map((a) => [
+  const key = JSON.stringify([defaultBox, dataSource, browserAccounts.map((a) => [
       a.id,
       a.tabName,
       a.username,
@@ -153,7 +214,11 @@ function renderBrowserAccounts(): void {
     const tip = document.createElement('div');
     tip.textContent = browserAccounts.length
       ? `盒子「${currentBox}」暂无账号。把其它盒子的账号移入，或在右侧表单直接添加到该盒子。`
-      : '还没有并行账号。在下方表单填写并「添加并打开」，密码将以 AES-GCM 加密存放在本机。';
+      : dataSource === 'cloud'
+        ? cloudAuthorized
+          ? '云端账号库还是空的。在下方表单填写并「添加并打开」，账号会直接存到云端。'
+          : '云端登录已失效：请点上方「重新登录」恢复后再添加账号。'
+        : '还没有并行账号。在下方表单填写并「添加并打开」，密码将以 AES-GCM 加密存放在本机。';
     li.append(ico, tip);
     browserListEl.appendChild(li);
     return;
@@ -526,6 +591,11 @@ async function removeBoxFlow(name: string): Promise<void> {
 
 dataExportBtn.addEventListener('click', () => {
   void (async () => {
+    // 云端模式下导出的备份**不含口令**（口令在服务端加密存储，扩展侧拿不到密文）——
+    // 这种备份导入后会整条跳过，必须先把话说清楚，不能让用户以为"备份齐了"。
+    if (dataSource === 'cloud' && !confirm('云端模式下导出的备份不含口令（口令在服务端加密存储）。\n如需含口令的完整备份，请先切回本地数据源再导出。\n\n仍要继续导出？')) {
+      return;
+    }
     const res = await send({ kind: 'data.export' });
     if (!(res.kind === 'data.export' && res.result.ok)) {
       alert(`导出失败：${res.kind === 'data.export' && !res.result.ok ? res.result.error : '无响应'}`);
@@ -752,9 +822,18 @@ boxModal.addEventListener('click', (e) => {
   }
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !boxModal.classList.contains('hidden')) {
-    hideBoxModal();
+  if (e.key !== 'Escape') {
+    return;
   }
+  if (!boxModal.classList.contains('hidden')) {
+    hideBoxModal();
+    return;
+  }
+  if (!sourceHelpPop.classList.contains('hidden')) {
+    setHelpOpen(false);
+  }
+  // 设备等待面板**刻意不响应 Esc**：用户可能正在另一个标签页上批准，
+  // 键一按就把登录掐掉太贵了（要取消请点面板上的「取消」；切确认弹窗有自己的 Esc）。
 });
 
 /* ==================== 批量导入 ==================== */
@@ -1220,9 +1299,627 @@ siteForm.addEventListener('submit', (e) => {
   })();
 });
 
+/* ==================== 数据源（本地 ↔ 云端，v3.14；设备授权 v3.14.1） ==================== */
+
+/**
+ * 云端服务 origin 的 host 授权模式。
+ * ★ 服务端**不带任何 CORS 头**（实测 OPTIONS → 405），所以没有这条 host 授权，
+ *   扩展里对云端的 fetch 必然失败 —— 请求必须趁用户手势仍有效时最先发起。
+ */
+const CLOUD_ORIGIN_PATTERN = 'https://www.dragonrain.top/*';
+/** 设备自报的名字（批准页会显示它，用户据此确认"是我这台浏览器"） */
+const DEVICE_CLIENT_NAME = 'Chrome 扩展 · QuickLogin';
+/** 服务端没给 interval 时的兜底秒数（实测服务端会给；这里只是"读不到就别拿 0 去问"） */
+const DEVICE_POLL_FALLBACK_S = 3;
+
+/** 云端 host 授权：必须在用户手势里最先发起（晚一步手势就失效，fetch 必然失败） */
+async function ensureCloudOriginPermission(): Promise<boolean> {
+  try {
+    return await chrome.permissions.request({ origins: [CLOUD_ORIGIN_PATTERN] });
+  } catch {
+    return false;
+  }
+}
+
+function setCloudBusy(busy: boolean): void {
+  cloudBusy = busy;
+  renderSourceSwitch();
+}
+
+function setDeviceBusy(busy: boolean): void {
+  deviceBusy = busy;
+  renderSourceSwitch();
+}
+
+function renderSourceSwitch(): void {
+  sourceLocalBtn.classList.toggle('active', dataSource === 'local');
+  sourceCloudBtn.classList.toggle('active', dataSource === 'cloud');
+  sourceLocalBtn.disabled = cloudBusy || deviceBusy;
+  sourceCloudBtn.disabled = cloudBusy || deviceBusy;
+  sourceBusyEl.classList.toggle('hidden', !cloudBusy);
+  sourceLocalBtn.title = '本地账号库（IndexedDB，完全离线可用）';
+  sourceCloudBtn.title = cloudAuthorized
+    ? `云端账号库${cloudBaseUrl ? `（${cloudBaseUrl}）` : ''}：已登录${cloudEmail ? ` ${cloudEmail}` : ''}；已在云端时点它 = 重新登录`
+    : `云端账号库${cloudBaseUrl ? `（${cloudBaseUrl}）` : ''}：首次使用需要登录授权`;
+  // 「已登录谁」：数据源在云端且**真的持有会话**时才显示，未登录时不显示（不是"未登录"三个字）
+  const showAccount = dataSource === 'cloud' && cloudAuthorized;
+  cloudAccountEl.classList.toggle('hidden', !showAccount);
+  cloudAccountEl.textContent = '';
+  if (showAccount) {
+    const label = cloudDisplayName || cloudEmail || '已登录云端';
+    const av = document.createElement('span');
+    av.className = 'cloud-av';
+    if (cloudAvatar) {
+      const img = document.createElement('img');
+      img.src = cloudAvatar;
+      img.alt = '';
+      av.append(img);
+    } else {
+      // 没设头像就是首字母色块 —— 空着一个灰圆看起来像"加载失败"
+      av.textContent = label.slice(0, 1).toUpperCase();
+    }
+    const tx = document.createElement('span');
+    tx.textContent = label;
+    cloudAccountEl.append(av, tx);
+  }
+  cloudAccountEl.title = showAccount
+    ? `云端账号库已登录${cloudEmail ? `：${cloudEmail}` : ''}（点它 = 重新登录）`
+    : '';
+  // 登录已过期：数据源**仍是云端**，只提示重新登录（SW 侧的 401 清了 cloudAuth，但没人去动数据源）
+  authBarEl.classList.toggle('hidden', !(dataSource === 'cloud' && !cloudAuthorized));
+  authReloginBtn.disabled = deviceBusy;
+  parHintEl.textContent =
+    dataSource === 'cloud'
+      ? '页签名即该账号所有标签页的标题；密码存放在云端账号库（服务端加密），本机不落明文。'
+      : '页签名即该账号所有标签页的标题；密码 AES-GCM 加密存放在本机。';
+}
+
+/** 提示条的唯一渲染点：先看"云端不可用"，再看一次性提示，都没有就收起 */
+function renderCloudBanner(): void {
+  // 未登录（令牌过期/被清）时**不**把"云端未授权"当网络故障播报：那是 #auth-bar 的活，
+  // 两条同时出现会让用户以为是两个毛病。
+  if (cloudListError && dataSource === 'cloud' && cloudAuthorized) {
+    cloudBannerEl.textContent =
+      `云端不可用（${cloudListError}），当前无法读取账号。数据仍在云端，网络恢复后自动可用。`;
+    cloudBannerEl.className = 'notice err';
+    return;
+  }
+  if (bannerFlash && bannerFlash.until > Date.now()) {
+    cloudBannerEl.textContent = bannerFlash.text;
+    cloudBannerEl.className = `notice ${bannerFlash.kind}`;
+    return;
+  }
+  bannerFlash = null;
+  cloudBannerEl.textContent = '';
+  cloudBannerEl.className = 'notice hidden';
+}
+
+function flashBanner(text: string, kind: 'ok' | 'err' | 'warn' = 'ok'): void {
+  bannerFlash = { text, kind, until: Date.now() + BANNER_FLASH_MS };
+  renderCloudBanner();
+}
+
+/** 从 background 取数据源现状（每轮刷新都取：切数据源只发生在那里） */
+async function loadCloudState(): Promise<void> {
+  try {
+    const res = await send({ kind: 'cloud.state' });
+    if (!res || res.kind !== 'cloud.state' || !res.result.ok) {
+      return; // 取不到就维持现状：数据源标记只影响文案，不该拖垮整页刷新
+    }
+    dataSource = res.result.data.source === 'cloud' ? 'cloud' : 'local';
+    cloudAuthorized = res.result.data.authorized;
+    cloudEmail = res.result.data.email;
+    cloudDisplayName = res.result.data.displayName ?? '';
+    cloudAvatar = res.result.data.avatar ?? '';
+    cloudBaseUrl = res.result.data.baseUrl;
+    renderSourceSwitch();
+  } catch {
+    // 同上：维持现状
+  }
+}
+
+/* ---------------- 云端设备授权（RFC 8628，v3.14.1 取代"手抄授权码"） ----------------
+ * 形状：device-start → `chrome.tabs.create(verificationUrl)` → 按 interval 轮询 device-poll → 落令牌。
+ * ★ `deviceCode` 全程不进这个页面（它只活在 SW 内存里）；这里出现的只有给人看的批准页 URL。
+ * ★ 轮询是**页面驱动的单循环**（不是 SW 里的定时器）：取消 = 停掉这一个循环 + 让 SW 丢掉凭据。
+ */
+
+/** 等待的世代号：取消 / 重试都 +1；在跑的那一圈回来后一律作废（不再发下一个请求） */
+let deviceFlowGen = 0;
+/** 取消/重试时立刻叫醒正在等待的那一拍（否则要傻等到下一个 interval） */
+let deviceWake: (() => void) | null = null;
+/** 设备授权进行中（禁掉数据源按钮，杜绝两圈轮询同时跑） */
+let deviceBusy = false;
+/** 本次会话的 8 位码：**只用来核对用户手输**，不渲染进 DOM（不让人抄） */
+let deviceUserCode = '';
+/** 服务端给的批准页 URL：原样打开，不自己拼 */
+let deviceApprovalUrl = '';
+/** 本次授权的绝对过期时刻（服务端 expiresIn 换算；每次 sleep 都被夹到"剩余时间"） */
+let deviceExpiresAt = 0;
+
+/** sendMessage 的"后台重启 / 无接收端"会以 undefined 回调 —— 统一折成 null，别让轮询循环炸掉 */
+async function sendSafe(req: RuntimeRequest): Promise<RuntimeResponse | null> {
+  try {
+    return ((await send(req)) as RuntimeResponse | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 服务端下发的 interval（秒）：必须 ≥1；读不到就退到 3 —— **绝不返回 0**（那等于压测服务端） */
+function normalizeInterval(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 1 ? Math.floor(v) : DEVICE_POLL_FALLBACK_S;
+}
+
+/** 可被打断的一拍：取消/重试调 `deviceWake()` 让它立刻返回（不必等满 interval） */
+function deviceSleep(ms: number): Promise<'slept' | 'woken'> {
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      deviceWake = null;
+      resolve('slept');
+    }, ms);
+    deviceWake = () => {
+      window.clearTimeout(timer);
+      deviceWake = null;
+      resolve('woken');
+    };
+  });
+}
+
+function openDevicePanel(): void {
+  deviceModal.classList.remove('hidden');
+  deviceRetryBtn.classList.add('hidden');
+  deviceManual.open = false;
+  deviceUserCodeInput.value = '';
+  setDeviceManualMsg('', false);
+  deviceUrlEl.textContent = '（等待服务端返回）';
+  deviceUrlEl.removeAttribute('href');
+  setDeviceWaiting('正在向云端申请授权…');
+}
+
+function closeDevicePanel(): void {
+  deviceModal.classList.add('hidden');
+  deviceUserCode = '';
+  deviceApprovalUrl = '';
+  deviceExpiresAt = 0;
+}
+
+/** 面板上的批准页链接：文本就是 URL 本身（要能手动复制），不含任何凭据 */
+function setDeviceLink(url: string): void {
+  deviceApprovalUrl = url;
+  deviceUrlEl.textContent = url;
+  deviceUrlEl.href = url;
+}
+
+function setDeviceWaiting(text = '已打开浏览器，请在那边登录，完成后这里会自动继续。'): void {
+  deviceSpinner.classList.remove('hidden');
+  deviceStatusEl.className = 'device-status-text';
+  deviceStatusEl.textContent = text;
+  deviceRetryBtn.classList.add('hidden');
+}
+
+function showDeviceError(text: string): void {
+  deviceSpinner.classList.add('hidden');
+  deviceStatusEl.className = 'device-status-text err';
+  deviceStatusEl.textContent = text;
+  deviceRetryBtn.classList.remove('hidden');
+}
+
+function setDeviceManualMsg(text: string, err: boolean): void {
+  deviceManualMsg.textContent = text;
+  deviceManualMsg.className = err ? 'device-manual-msg err' : 'device-manual-msg';
+}
+
+/** 终态各自的说法：**不许一律"失败"** —— 这四种原因用户能做的事完全不同 */
+function deviceTerminalText(status: 'denied' | 'expired' | 'consumed' | 'unknown'): string {
+  switch (status) {
+    case 'denied':
+      return '授权被拒绝：这次登录没有完成。云端账号与本地数据都没有改动，可以稍后重试。';
+    case 'expired':
+      return '授权码已过期，请重试。';
+    case 'consumed':
+      return '这次授权已经被取走过（例如扩展后台重启后重复查询），请重新发起登录。';
+    case 'unknown':
+      return '服务端不认识这次授权会话（可能已过期或被清理），请重新发起登录。';
+  }
+}
+
+type DeviceAttempt = 'approved' | 'cancelled' | 'terminal' | 'error';
+
+/**
+ * ★★ 轮询循环（唯一排程点就是下面的 `deviceSleep`）：
+ *    - **每一拍之间至少等 `interval` 秒**（`interval` 取自 device-start，服务端每次回包还能修订它；
+ *      读不到就退到 3）——这是全服务唯一无需凭据的端点族，轮密了等于给服务端做压测；
+ *    - 取消 / 重试 = `deviceFlowGen++` + `deviceWake()`：循环在**当前这一拍**立刻退出；
+ *      醒来后和请求回来后各比一次世代号，所以即便请求在飞，回来也不会再发下一个 device-poll；
+ *    - 总超时以服务端 `expiresIn` 为准：每次 sleep 都夹到剩余时间，到点报"授权码已过期，请重试"。
+ */
+async function pollDeviceUntilDone(gen: number, intervalS: number): Promise<DeviceAttempt> {
+  let delayS = normalizeInterval(intervalS);
+  while (gen === deviceFlowGen) {
+    const remainMs = deviceExpiresAt - Date.now();
+    if (remainMs <= 0) {
+      await sendSafe({ kind: 'cloud.device.cancel' }); // 超时也把 SW 里的 deviceCode 丢掉
+      closeDevicePanel();
+      flashBanner('授权码已过期，请重试。', 'err');
+      return 'terminal';
+    }
+
+    const slept = await deviceSleep(Math.min(delayS * 1000, remainMs));
+    if (slept !== 'slept' || gen !== deviceFlowGen) {
+      return 'cancelled';
+    }
+
+    const res = await sendSafe({ kind: 'cloud.device.poll' });
+    if (gen !== deviceFlowGen) {
+      return 'cancelled'; // 请求在飞的时候被取消：回来什么都不做（更不落令牌）
+    }
+    if (!res || res.kind !== 'cloud.device.poll' || !res.result.ok) {
+      const err = res && res.kind === 'cloud.device.poll' && !res.result.ok ? res.result.error : '后台无响应';
+      showDeviceError(`查询授权状态失败：${err}`);
+      return 'error';
+    }
+
+    const st: CloudDevicePoll = res.result.data;
+    if (st.status === 'pending') {
+      delayS = normalizeInterval(st.interval);
+      setDeviceWaiting();
+      continue;
+    }
+    if (st.status === 'approved') {
+      return 'approved';
+    }
+    if (st.status === 'stopped') {
+      return 'cancelled'; // 本地已取消/已被新会话替换：不是错误，不用提示
+    }
+    closeDevicePanel();
+    flashBanner(deviceTerminalText(st.status), 'err');
+    return 'terminal';
+  }
+  return 'cancelled';
+}
+
+/** 一次完整尝试：device-start → 打开批准页 → 轮询到终态。网络类失败保留面板（里面有「重试」） */
+async function runDeviceAttempt(): Promise<DeviceAttempt> {
+  const gen = ++deviceFlowGen;
+  openDevicePanel();
+
+  const started = await sendSafe({ kind: 'cloud.device.start', clientName: DEVICE_CLIENT_NAME });
+  if (gen !== deviceFlowGen) {
+    return 'cancelled';
+  }
+  if (!started || started.kind !== 'cloud.device.start' || !started.result.ok) {
+    const err =
+      started && started.kind === 'cloud.device.start' && !started.result.ok ? started.result.error : '后台无响应';
+    showDeviceError(`发起授权失败：${err}`);
+    return 'error';
+  }
+
+  const info = started.result.data;
+  deviceUserCode = info.userCode; // 只在内存里，用来核对用户手输的码
+  setDeviceLink(info.verificationUrl); // ★ 直接用服务端拼好的 URL
+  deviceExpiresAt = Date.now() + normalizeInterval(info.expiresIn) * 1000;
+
+  // 打开批准页：失败不致命（面板里有链接 + 手动入口），但必须让用户看见
+  let opened = true;
+  try {
+    await chrome.tabs.create({ url: info.verificationUrl });
+  } catch {
+    opened = false;
+  }
+  if (gen !== deviceFlowGen) {
+    return 'cancelled';
+  }
+  if (opened) {
+    setDeviceWaiting();
+  } else {
+    deviceManual.open = true; // 自动打开失败 ⇒ 兜底入口直接摊开，别让用户去找
+    setDeviceWaiting('自动打开浏览器失败：请手动打开下面的批准页链接（或在下面手动输入 8 位码）。');
+  }
+
+  return pollDeviceUntilDone(gen, info.interval);
+}
+
+/**
+ * 云端登录（设备流）。true = 已拿到令牌并落进 `chrome.storage.local`。
+ * `approved` 之后的落盘在 SW 侧完成，这里只负责把面板收掉 + 立刻刷新登录态。
+ */
+async function loginCloud(): Promise<boolean> {
+  if (deviceBusy) {
+    return false;
+  }
+  setDeviceBusy(true);
+  try {
+    const outcome = await runDeviceAttempt();
+    if (outcome === 'approved') {
+      closeDevicePanel();
+      await loadCloudState(); // 立刻把「☁ 邮箱」画出来，不等下一轮 3 秒刷新
+      return true;
+    }
+    if (outcome === 'cancelled') {
+      closeDevicePanel();
+      return false;
+    }
+    if (outcome === 'terminal') {
+      return false; // 各自的终态提示已经给过
+    }
+    return false; // 'error'：面板留着，里面有「重试」
+  } finally {
+    setDeviceBusy(false);
+  }
+}
+
+/** 「重试」= **重新 device-start**（绝不复用旧 deviceCode）；成功后顺带刷新整页 */
+async function retryDeviceLogin(): Promise<void> {
+  if (!(await ensureCloudOriginPermission())) {
+    showDeviceError('未获得云端服务的访问授权：请关掉本面板，在数据源处重新点击「云端」。');
+    return;
+  }
+  if (!(await loginCloud())) {
+    return;
+  }
+  flashBanner('云端账号库已登录。', 'ok');
+  await refreshAll();
+}
+
+/** 兜底：手动打开批准页（自动打开失败 / 标签页被关掉） */
+async function openApprovalTab(): Promise<void> {
+  if (!deviceApprovalUrl) {
+    setDeviceManualMsg('还没拿到批准页地址：请稍等片刻，或取消后重新发起登录。', true);
+    return;
+  }
+  try {
+    await chrome.tabs.create({ url: deviceApprovalUrl });
+    setDeviceManualMsg('已打开批准页，请在那边完成批准。', false);
+  } catch {
+    setDeviceManualMsg('浏览器拒绝打开新标签页：请手动复制上面的批准页链接访问。', true);
+  }
+}
+
+deviceCancelBtn.addEventListener('click', () => {
+  deviceFlowGen += 1; // 在跑的那一圈作废（醒来后也不会再发请求）
+  deviceWake?.(); // 立刻叫醒它，不必等满 interval
+  void sendSafe({ kind: 'cloud.device.cancel' }); // 让 SW 把 deviceCode 从内存里丢掉
+  closeDevicePanel();
+});
+
+deviceRetryBtn.addEventListener('click', () => void retryDeviceLogin());
+
+deviceUserCodeOpen.addEventListener('click', () => {
+  // ★ 兜底入口：8 位码只在服务端的批准页使用。这里只做两件事 —— 与本次会话核对、打开批准页；
+  //   **不拿它去调任何换令牌的接口**（device-token 那条老路已废弃）。
+  const typed = deviceUserCodeInput.value.replace(/\D/g, '');
+  if (typed.length !== 8) {
+    setDeviceManualMsg('请输入完整的 8 位数字授权码。', true);
+    return;
+  }
+  if (typed !== deviceUserCode) {
+    setDeviceManualMsg(
+      '这 8 位码与本次授权会话不一致（可能是上一次尝试留下的码）。请点上面的批准页链接，或取消后重新发起登录。',
+      true,
+    );
+    return;
+  }
+  setDeviceManualMsg('码与本次会话一致，正在打开批准页…', false);
+  void openApprovalTab();
+});
+
+authReloginBtn.addEventListener('click', () => void retryDeviceLogin());
+
+// 页面被关掉/刷新：把设备授权会话也收掉（deviceCode 不该在后台多留一分钟）
+window.addEventListener('pagehide', () => {
+  void sendSafe({ kind: 'cloud.device.cancel' });
+});
+
+function mergeSummary(report: CloudMergeReport): string {
+  const parts = [`新增 ${report.created}`, `更新 ${report.updated}`];
+  if (report.skipped) {
+    parts.push(`跳过 ${report.skipped}`);
+  }
+  let text =
+    `已合并到云端：本地 ${report.localCount} 个账号 → 云端共 ${report.totalAccounts} 个` +
+    `（${parts.join('，')}，站点 ${report.sites} 个）。本地数据原样保留，随时可以切回本地。`;
+  if (report.missingPassword) {
+    text +=
+      `\n⚠️ 其中 ${report.missingPassword} 个账号在本机取不到明文口令（无凭证或解密失败），` +
+      '已按「无口令」上传，请在云端补录后再用它们自动填表。';
+  }
+  return text;
+}
+
+/**
+ * 切换数据源。
+ * - → 云端：① host 授权（必须在用户手势里最先发起）② 未登录先走设备授权登录
+ *   ③ 合并确认弹窗（可勾「不再提示」，标志落 `ql:skipSwitchConfirm`）④ 合并上传（两个核对点全过才真的切）
+ * - → 本地：只改一个标记位，然后整体刷新（本地库一直躺在那里）—— **不弹任何确认**：
+ *   那是无损操作，弹窗只会让人以为有风险。
+ */
+async function switchDataSource(target: 'local' | 'cloud'): Promise<void> {
+  if (cloudBusy || deviceBusy) {
+    return;
+  }
+  if (target === dataSource) {
+    // 已在云端时再点「云端」= 重新登录（令牌过期后唯一的出路：过期提示条里的按钮也走这里）
+    if (target === 'cloud') {
+      if (!(await ensureCloudOriginPermission())) {
+        flashBanner('未获得云端服务的访问授权，无法登录云端（扩展需要它才能读写云端账号）。', 'err');
+        return;
+      }
+      if (await loginCloud()) {
+        flashBanner('云端账号库已登录。', 'ok');
+        await refreshAll();
+      }
+    }
+    return;
+  }
+
+  if (target === 'local') {
+    const res = await send({ kind: 'cloud.source.set', source: 'local' });
+    if (!(res.kind === 'cloud.source.set' && res.result.ok)) {
+      const err = res.kind === 'cloud.source.set' && !res.result.ok ? res.result.error : '无响应';
+      flashBanner(`切回本地失败：${err}`, 'err');
+      return;
+    }
+    dataSource = 'local';
+    cloudListError = '';
+    flashBanner('已切回本地数据源（本地账号一直是原样保留的）。云端账号仍在云端，随时可以切回去。', 'ok');
+    await refreshAll();
+    return;
+  }
+
+  // ① host 授权：本函数第一段同步执行里发起（跨域请求的前置条件，晚了手势就没了）
+  if (!(await ensureCloudOriginPermission())) {
+    flashBanner('未获得云端服务的访问授权，无法切换到云端（扩展需要它才能读写云端账号）。', 'err');
+    return;
+  }
+
+  // ② 登录：没有会话就走设备流（打开浏览器批准，页面这边轮询等待）
+  if (!cloudAuthorized && !(await loginCloud())) {
+    return;
+  }
+
+  // ③ 合并确认：自定义弹窗（confirm 加不了「不再提示」复选框）；勾过就直连，不再打扰
+  const count = browserAccounts.length;
+  if (!(await readSkipSwitchConfirm())) {
+    const answer = await askSwitchConfirm(count);
+    if (!answer.go) {
+      return;
+    }
+    if (answer.skip) {
+      await chrome.storage.local.set({ [LOCAL_KEYS.skipSwitchConfirm]: true });
+      await refreshHelpReset();
+    }
+  }
+
+  setCloudBusy(true);
+  let report: CloudMergeReport;
+  try {
+    const res = await send({ kind: 'cloud.migrate' });
+    if (!(res.kind === 'cloud.migrate' && res.result.ok)) {
+      const err = res.kind === 'cloud.migrate' && !res.result.ok ? res.result.error : '无响应';
+      flashBanner(`合并到云端失败：${err}`, 'err');
+      return;
+    }
+    report = res.result.data;
+  } finally {
+    setCloudBusy(false);
+  }
+
+  dataSource = 'cloud';
+  cloudListError = '';
+  flashBanner(mergeSummary(report), report.missingPassword ? 'warn' : 'ok');
+  await refreshAll();
+}
+
+sourceLocalBtn.addEventListener('click', () => void switchDataSource('local'));
+sourceCloudBtn.addEventListener('click', () => void switchDataSource('cloud'));
+
+/* ==================== 合并确认弹窗 + 「不再提示」的反悔通道（v3.14.1） ==================== */
+
+/** 「不再提示」标志。**读失败按"没勾过"处理**：宁可多问一次，也不要静默替用户决定 */
+async function readSkipSwitchConfirm(): Promise<boolean> {
+  try {
+    const stored = await chrome.storage.local.get(LOCAL_KEYS.skipSwitchConfirm);
+    return stored[LOCAL_KEYS.skipSwitchConfirm] === true;
+  } catch {
+    return false;
+  }
+}
+
+/** 帮助气泡里的反悔通道：勾过「不再提示」时才有那一行 */
+async function refreshHelpReset(): Promise<void> {
+  helpResetConfirm.classList.toggle('hidden', !(await readSkipSwitchConfirm()));
+}
+
+/**
+ * 本地 → 云端 的合并确认（自定义弹窗，不是 `confirm`）。
+ * 返回 `{ go, skip }`：`skip` = 用户这次勾了「不再提示」并点了开始合并。
+ */
+function askSwitchConfirm(count: number): Promise<{ go: boolean; skip: boolean }> {
+  return new Promise((resolve) => {
+    // 一句话里**永远带上 N**（0 也一样）：切换的后果里"动了多少条"是用户最需要知道的数字
+    switchModalText.textContent =
+      `将把本地 ${count} 个账号合并上传到云端，本地数据保留（随时可以切回本地）。` +
+      (count > 0
+        ? '云端按「站点 + 账号名」比对，同一条记录以最后修改时间较新的为准；' +
+          '上传若未通过核对会自动中止，数据源仍留在本地。'
+        : '本地现在没有账号，切换后直接使用云端账号库。');
+    switchModalSkip.checked = false;
+    switchModal.classList.remove('hidden');
+
+    const finish = (go: boolean): void => {
+      const skip = go && switchModalSkip.checked;
+      switchModal.classList.add('hidden');
+      switchModalOk.removeEventListener('click', onOk);
+      switchModalCancel.removeEventListener('click', onCancel);
+      switchModal.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey);
+      resolve({ go, skip });
+    };
+    const onOk = (): void => finish(true);
+    const onCancel = (): void => finish(false);
+    const onBackdrop = (e: MouseEvent): void => {
+      if (e.target === switchModal) {
+        finish(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        finish(false);
+      }
+    };
+
+    switchModalOk.addEventListener('click', onOk);
+    switchModalCancel.addEventListener('click', onCancel);
+    switchModal.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey);
+  });
+}
+
+/* ==================== 数据源 ? 帮助气泡（点外部 / Esc 关闭） ==================== */
+
+function setHelpOpen(open: boolean): void {
+  sourceHelpPop.classList.toggle('hidden', !open);
+  sourceHelpBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+sourceHelpBtn.addEventListener('click', (e) => {
+  e.stopPropagation(); // 别让"点外部关闭"当场把它关掉
+  const willOpen = sourceHelpPop.classList.contains('hidden');
+  setHelpOpen(willOpen);
+  if (willOpen) {
+    void refreshHelpReset();
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (sourceHelpPop.classList.contains('hidden')) {
+    return;
+  }
+  const target = e.target as Node | null;
+  if (target && (sourceHelpPop.contains(target) || sourceHelpBtn.contains(target))) {
+    return;
+  }
+  setHelpOpen(false);
+});
+
+helpResetConfirmBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  void (async () => {
+    await chrome.storage.local.remove(LOCAL_KEYS.skipSwitchConfirm);
+    await refreshHelpReset();
+    flashBanner('已重新开启「本地 → 云端」的切换确认。', 'ok');
+  })();
+});
+
 /* ==================== 统一刷新（轮询与操作后共用；各渲染层自带 diff 防闪烁） ==================== */
 
 async function refreshAll(): Promise<void> {
+  if (cloudBusy) {
+    return; // 合并进行中：别让 3 秒轮询把界面刷回旧数据源
+  }
+  // 数据源在最前：下面各层的文案/错误提示都要按它分叉
+  await loadCloudState();
   // 先取盒子配置（含默认盒显示名），再渲染账号列表，避免首绘用回退名
   await loadBoxes();
   await loadBrowserAccounts();
@@ -1231,6 +1928,7 @@ async function refreshAll(): Promise<void> {
   await fillSiteOptions();
   await fillBoxOptions();
   syncBatchBar();
+  renderCloudBanner();
 }
 
 /* ==================== 诊断包导出（v3.12.2：一键取证） ==================== */
@@ -1284,6 +1982,8 @@ exportDiagBtn.addEventListener('click', () => {
 
 // 顺序：账号（含统计/卡片）→ 站点 → 盒子 → 下拉填充
 void refreshAll();
+// 帮助气泡里的「反悔通道」按标志决定是否出现（勾过「不再提示」才有那一行）
+void refreshHelpReset();
 
 // 轻量轮询：绑定/在线状态/计数可能被后台事件改变（标签关闭、token 捕获）；
 // 各渲染函数自带 diff 守卫，数据未变化时不重建 DOM（消除 3s 轮询闪烁）
