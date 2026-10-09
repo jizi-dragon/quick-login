@@ -30,6 +30,9 @@ const LOG_TS = join(SRC, 'shared', 'log.ts');
 const SW_TS = join(SRC, 'background', 'service-worker.ts');
 const PANEL_TS = join(SRC, 'ui', 'parallel', 'parallel.ts');
 const PS_TS = join(SRC, 'background', 'core', 'parallel-session.ts');
+// ★ 名字相近、容易拿错的两个文件：`parallel-session`（运行时编排）
+//   与 `parallel-store`（数据层门面）。第 ⑥ 条要改的是**后者**。
+const PSTORE_TS = join(SRC, 'background', 'core', 'parallel-store.ts');
 
 const CASES = [
   {
@@ -64,6 +67,16 @@ const CASES = [
     file: PS_TS,
     anchor: "    log.debug('isEnforceable(%s) → 缓存 %s', host, cached);\n",
     broken: '    void diag(`isEnforceable(${host}) → 缓存 ${cached}`);\n',
+  },
+  {
+    // ★ 第 8 节（离线判定只有一处）的反证 —— 重新引入重复的类定义。
+    //   这一条尤其值得反证：重复定义**当时不会出问题**（判定用标记字段），
+    //   所以"没有报错"完全不能说明判据在验东西。
+    label: '⑥ `parallel-store` 又自定义一份 `OfflineError` ⇒ 判定改 `instanceof` 就会静默失效',
+    file: PSTORE_TS,
+    anchor: "export { OfflineError, isOfflineError } from './offline';\n",
+    broken: "export { OfflineError, isOfflineError } from './offline';\n"
+          + 'export class OfflineError extends Error { readonly isOfflineError = true; }\n',
   },
 ];
 
@@ -115,16 +128,18 @@ console.log('\n=== 还原核对 ===');
 //   —— 下一轮的全量验收会红，但原因指向别处。
 //   判据（自证）：本列表与 CASES 里出现的 `file` **集合相等**。
 const touched = [...new Set(CASES.map((c) => c.file))];
-const uncovered = touched.filter((f) => ![LOG_TS, SW_TS, PANEL_TS, PS_TS].includes(f));
+const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS];
+const uncovered = touched.filter((f) => !COVERED.includes(f));
 if (uncovered.length) failures.push(`还原核对漏了：${uncovered.join(', ')}`);
 
-for (const f of [LOG_TS, SW_TS, PANEL_TS, PS_TS]) {
+for (const f of COVERED) {
   const short = f.slice(ROOT.length + 1);
   // 每个文件里那个"本轮修好的东西"必须仍在
   const marker = f === LOG_TS ? 'return redact(text);'
     : f === SW_TS ? 'out.logs = drain();'
     : f === PANEL_TS ? 'appLogs:'
-    : "log.debug('isEnforceable(%s) → 缓存 %s', host, cached);";
+    : f === PS_TS ? "log.debug('isEnforceable(%s) → 缓存 %s', host, cached);"
+    : "export { OfflineError, isOfflineError } from './offline';";
   const ok = readFileSync(f, 'utf8').includes(marker);
   if (!ok) failures.push(`${short} 还原后缺少 ${marker}`);
   console.log(`  ${ok ? 'OK  ' : 'FAIL'} ${short} 已还原（含 ${marker.slice(0, 40)}）`);

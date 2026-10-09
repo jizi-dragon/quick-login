@@ -454,6 +454,63 @@ export { redact, REDACTED, REDACTION_RULES } from './redact';
 
 ---
 
+## #15 【已修】同一个类型被声明了两次 —— 而现在"不出问题"靠的是一个**实现细节**
+
+**症状**：一切正常。离线回落工作、列表能看、写路径如实报错、`tsc` 零错误、
+打码 54/54 通过。**没有任何症状。**
+
+**根因**：`OfflineError` 与 `isOfflineError` 被声明了**两份**，
+而且**逐字相同**：
+
+| 文件 | 角色 |
+|---|---|
+| `background/core/offline.ts` | 文件头明确写着"**单独一个模块，为了让 `cloud-store` 与 `parallel-store` 都能用**" |
+| `background/core/parallel-store.ts` | **又写了一遍**同名类 + 同名函数 |
+
+它当时**确实不会出错**，原因是一个**实现细节**：判定用的是**标记字段**
+
+```ts
+e.isOfflineError === true        // ← 靠它，两份类定义产生的实例互相认得
+```
+
+而不是 `instanceof`。而 `offline.ts` 的文件头**恰好警告过这件事**：
+
+> 循环依赖在 `iife` 打包下不报错，只会在运行时给出 `undefined` ——
+> 那时 `instanceof` 永远为 false，**回落静默失效**（表现是"离线时列表空了"）。
+
+⇒ 于是形成一个很难察觉的处境：**"现在是对的"依赖"没人把判定改成 `instanceof`"**，
+而 `instanceof` 看起来是**更正规**的写法 —— 下一个人"顺手规范化"它，
+离线回落就**静默失效**，症状是"离线时列表空了"，没有任何报错指向这里。
+
+★ 这条与本仓 #9（身份类 cookie 黑名单必须集中声明）、
+akso-vault #14（同一事实不要有两处声明）是**同一条主线**：
+**两处声明同一事实，一致时无收益，不一致时的失败是静默的。**
+
+**判据**（`tools/verify/verify-log-redaction.mjs` 第 8 节，**54 条**）：
+
+- `export class OfflineError` 全仓**恰好 1 处**；`export function isOfflineError` 恰好 1 处。
+- 判定函数体里**必须**有 `isOfflineError === true`，且**不得**出现 `instanceof`。
+- 离线回落的分支必须有 `log.warn`（否则"为什么离线还能看 / 为什么改不了"无从查起）。
+- 反证（`verify-falsify-logredaction.mjs` **7/7**）：重新加一份 `export class OfflineError` ⇒ **红**。
+
+**处置**：`parallel-store.ts` 里那两份声明**删掉**，改为
+`export { OfflineError, isOfflineError } from './offline'`（转发，保留原有 import 路径）。
+
+★★ **顺带踩到一个 JS 语义坑，值得单独记**：
+`export { X } from './y'` 是 **re-export**，它**不会**在本文件的作用域里绑定 `X`。
+于是本文件自己要用的 `isOfflineError` 必须**再 `import` 一次**。
+而报错位置是**调用点**（`Cannot find name 'isOfflineError'`），
+读起来像"调用点忘了 import"，真因在 re-export 的语义。
+
+**推广**：★ **"现在没出问题"与"这样是对的"是两件不同的事。**
+凡是"两处声明同一事实"的地方，问一句：
+**它们靠什么保持一致？** 如果答案是"我照着抄的"或"恰好用的是某个宽松判定"，
+那它就是在等一个人把它改坏。
+★ 把一个类型集中到一处之后，**顺手钉住"判定必须用标记字段"** ——
+那是让跨打包边界仍然正确的唯一原因，也是这条路径上最容易"被规范化掉"的东西。
+
+---
+
 ## 附：本文件的维护方式
 
 - **发现新的"看起来正常但其实是坏的"缺陷** ⇒ 追加一条，编号取当前最大值 +1。

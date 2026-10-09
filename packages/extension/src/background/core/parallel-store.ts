@@ -33,26 +33,38 @@ export interface ParallelStore {
 }
 
 /**
- * 离线错误。
+ * 离线错误与判定 —— **权威源在 `./offline`**，这里只**转发**。
  *
- * ★ 单独一个类型是为了让**界面能给出准确的提示**：
- *   "离线，这里是上次的副本，改不了" 与 "服务端 500" 是两件完全不同的事，
- *   而它们都长着同一张 `Error` 的脸。调用点用 `isOfflineError(e)` 判断。
+ * ★★ 2026-10-09 去重：本文件原先**自己又定义了一份** `OfflineError` 与
+ *    `isOfflineError`（与 `offline.ts` **逐字相同**的第二个副本）。
+ *
+ *    当时**没有**出问题 —— 因为判定用的是**标记字段**
+ *    （`e.isOfflineError === true`）而不是 `instanceof`，
+ *    所以两份类定义产生的实例**互相认得**。
+ *
+ *    但这正是 `offline.ts` 文件头警告过的那个形态：
+ *    > 循环依赖在 `iife` 打包下不报错，只会在运行时给出 `undefined` ——
+ *    > 那时 `instanceof` 永远为 false，**回落静默失效**。
+ *
+ *    ⇒ 而"两份定义 + 一个靠标记字段的判定"只要被谁顺手改成 `instanceof`
+ *      （那看起来是**更正规**的写法），离线回落就会**静默失效**：
+ *      表现是"离线时列表空了"，而不是任何报错。
+ *
+ *    ⇒ 消除重复：一个类型只有一处声明。转发导出保留了原有的 import 路径，
+ *      调用点不用动。
  */
-export class OfflineError extends Error {
-  readonly code = 'offline';
-  readonly isOfflineError = true;
-  constructor(action: string) {
-    super(`离线：${action}需要连接云端。当前显示的是上次同步的只读副本。`);
-    this.name = 'OfflineError';
-  }
-}
+export { OfflineError, isOfflineError } from './offline';
+// ★ 上面那行是 **re-export**，它**不会**在本文件的作用域里绑定这两个名字。
+//   所以本文件自己要用的 `isOfflineError` 必须**再 import 一次** ——
+//   这是个容易漏的地方：只写 re-export 时，`tsc` 会在调用点报
+//   `Cannot find name 'isOfflineError'`（而不是在 re-export 那行），
+//   看起来像"调用点忘记了"，实际是 re-export 的语义。
+import { isOfflineError } from './offline';
+// ★ 日志（AGENTS.md 规则 22）：本模块的**离线回落判定**是"用户看到什么"的直接决定者，
+//   而它此前没有任何日志 —— 排障时"为什么离线还能看 / 为什么改不了"无从查起。
+import { getLogger } from '../../shared/log';
 
-export function isOfflineError(e: unknown): e is OfflineError {
-  return Boolean(
-    e && typeof e === 'object' && (e as { isOfflineError?: boolean }).isOfflineError === true,
-  );
-}
+const log = getLogger('parallel-store');
 
 /**
  * 读路径：**先云端，失败才回落到只读缓存**。
@@ -74,8 +86,16 @@ async function listWithFallback(): Promise<ParallelAccount[]> {
     }
     const snap = await loadSnapshot();
     if (!snap) {
+      // ★ 这一支的决定是"**离线就是没法用**"，与下面那一支的"给只读副本"**相反**。
+      //   两者在界面上长得像（都是"没数据"），而原因完全不同 ——
+      //   所以必须能分开。记 `warn` 而不是 `error`：它不是缺陷，
+      //   是"第一次离线且从未同步过"的正常分支。
+      log.warn('list() 离线且**无缓存** ⇒ 如实报错（这一支不给只读副本）');
       throw e; // 没有缓存 ⇒ 离线就是没法用，如实报错
     }
+    // ★ 这是"离线只读模式"的**唯一入口**。用户接下来看到的列表、
+    //   以及"为什么改不了"，都源于这一行。
+    log.warn('list() 离线 ⇒ 回落只读副本（%d 个账号）', snap.accounts.length);
     return snap.accounts as ParallelAccount[];
   }
 }
@@ -94,6 +114,9 @@ async function persistSnapshot(rows: ParallelAccount[]): Promise<void> {
     await saveSnapshot(rows, { revision: -1, email: auth?.email });
   } catch {
     /* 缓存写失败不影响主流程 */
+    // ★ 但**要留痕**：缓存是离线时唯一的可用数据源，而它的写失败是静默的。
+    //   没有这一行时，"离线时列表是空的"会被归因到网络，而真因是缓存**从来没写成功过**。
+    log.error('persistSnapshot 失败 ⇒ 离线时将没有可回落的数据（写失败不影响主流程）');
   }
 }
 
@@ -120,8 +143,13 @@ export const parallelStore: ParallelStore = {
       const snap = await loadSnapshot();
       const hit = snap?.accounts.find((a) => a.id === id);
       if (!hit) {
+        // ★ 与 `list()` 的两支同理：离线 + 有副本但**这个 id 不在里面**
+        //   （例如副本是换账号之前的、或那个账号是刚在别的设备上建的）。
+        //   记下 id 才能区分"缓存里没有"与"缓存整个没有"。
+        log.warn('get(%s) 离线且副本里没有这条 ⇒ 如实报错', id);
         throw e;
       }
+      log.warn('get(%s) 离线 ⇒ 回落只读副本', id);
       return hit as ParallelAccount;
     }
   },

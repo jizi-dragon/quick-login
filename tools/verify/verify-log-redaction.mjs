@@ -225,6 +225,29 @@ console.log('\n=== 6. 闭环：`shared/log.ts` 的产出必须有消费者 ===')
   check('判据前提：确实取到了诊断包的 bundle 块', !!bundle);
 }
 
+// ---------------------------------------------------------------- 工具
+
+/**
+ * 剥掉**注释**与**字符串字面量**后的代码。
+ *
+ * ## ★ 为什么每个"结构判据"都要先用它（本仓第四次踩同一个坑）
+ *
+ * 我曾在代码旁写"这里原先写的是 `diag(...)`"来解释降级原因 ——
+ * 而裸的 `/\bdiag\s*\(/` **命中了那句注释**，判据假红。
+ * 同一个坑的历史：`urlTransform`（PITFALLS #1）、`RETURNING`（#14）、
+ * `is_admin`（akso-vault #19）。规律：**「解释为什么不用 X」的文本必然包含 X。**
+ *
+ * ⇒ 判据只看**运行时会执行的东西**。
+ *   ★ 顺序要紧：**先剥字符串再剥行注释**，否则 `'//'` 这种字面量会把后面的
+ *     真代码当注释吃掉（反向失效，那是更坏的一类）。
+ */
+const stripLiterals = (code) => code
+  .replace(/\/\*[\s\S]*?\*\//g, ' ')                       // ① 块注释
+  .replace(/`(?:\\[\s\S]|[^`\\])*`/g, '``')                // ② 模板串
+  .replace(/'(?:\\[\s\S]|[^'\\\n])*'/g, "''")              // ③ 单引号串
+  .replace(/"(?:\\[\s\S]|[^"\\\n])*"/g, '""')              // ④ 双引号串
+  .replace(/\/\/[^\n]*/g, ' ');                            // ⑤ 行注释（必须在字符串之后）
+
 // ---------------------------------------------------------------- ⑦ 三通道分工
 console.log('\n=== 7. 三通道分工：`diag()` 不许写在热路径上 ===');
 {
@@ -280,28 +303,6 @@ console.log('\n=== 7. 三通道分工：`diag()` 不许写在热路径上 ===');
   const enfBody = bodyOf(ps, 'isEnforceable');
   check('判据前提：确实取到了 `isEnforceable` 的函数体', enfBody !== null);
 
-  /**
-   * 剥掉**注释**与**字符串字面量**后的代码。
-   *
-   * ## ★ 为什么必须剥（本仓第四次踩同一个坑）
-   *
-   * 我在这段代码旁边写了"这里原先写的是 `diag(...)`"来解释降级原因 ——
-   * 而裸的 `/\bdiag\s*\(/` **命中了那句注释**。
-   * 同一个坑的历史：`urlTransform`（PITFALLS #1）、`RETURNING`（#14）、
-   * `is_admin`（akso-vault #19）。规律：**"解释为什么不用 X"的文本必然包含 X。**
-   *
-   * ⇒ 判据只看**运行时会执行的东西**。这里没有 AST 可用（是 TS 源码正则检查），
-   *   所以退一步剥注释 + 清空字符串内容。
-   *   ★ 顺序要紧：**先剥字符串再剥行注释**，否则 `'//'` 这种字面量会把后面的
-   *     真代码当注释吃掉（反向失效，那是更坏的一类）。
-   */
-  const stripLiterals = (code) => code
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')                       // ① 块注释
-    .replace(/`(?:\\[\s\S]|[^`\\])*`/g, '``')                // ② 模板串
-    .replace(/'(?:\\[\s\S]|[^'\\\n])*'/g, "''")              // ③ 单引号串
-    .replace(/"(?:\\[\s\S]|[^"\\\n])*"/g, '""')              // ④ 双引号串
-    .replace(/\/\/[^\n]*/g, ' ');                            // ⑤ 行注释（必须在字符串之后）
-
   const enfCode = enfBody ? stripLiterals(enfBody) : '';
 
   // ★★ 判据必须落在**那个具体分支**上，不能落在整个函数体上。
@@ -330,6 +331,62 @@ console.log('\n=== 7. 三通道分工：`diag()` 不许写在热路径上 ===');
   // 三通道的命名空间前缀必须一致（都经 `getLogger`，不直接 console）
   check('`parallel-session` 模块取 logger 走 `getLogger`',
     /getLogger\('parallel-session'\)/.test(ps));
+}
+
+// ---------------------------------------------------------------- ⑧ 离线判定只有一处
+console.log('\n=== 8. 离线判定：`OfflineError` / `isOfflineError` 只有一处声明 ===');
+{
+  // ## 为什么这条值得单列
+  //
+  // 实测（2026-10-09）：`parallel-store.ts` **自己又定义了一份** `OfflineError`
+  // 与 `isOfflineError`（与 `offline.ts` 逐字相同的第二个副本）。
+  //
+  // 它当时**没有**出问题 —— 因为判定看的是**标记字段**
+  // （`e.isOfflineError === true`）而不是 `instanceof`，所以两份类定义的实例互相认得。
+  //
+  // ★ 但这正是 `offline.ts` 文件头警告过的形态：只要有人把判定
+  //   "顺手改成 `instanceof`"（那看起来是**更正规**的写法），
+  //   离线回落就会**静默失效** —— 表现是"离线时列表空了"，而不是任何报错。
+  //   ⇒ 一个类型只有一处声明，是这条静默失效路径的**唯一**结构性防线。
+  //
+  // ★ 顺带钉住"判定必须用标记字段"：那是让两份定义也能互通的**唯一**原因，
+  //   也是跨打包边界（esbuild `iife`）仍然正确的原因。
+  const walkTypes = [];
+  const walkDir = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) { walkDir(full); continue; }
+      if (name.endsWith('.ts')) walkTypes.push(full);
+    }
+  };
+  walkDir(SRC);
+
+  const classDefs = [];
+  const fnDefs = [];
+  for (const f of walkTypes) {
+    const code = stripLiterals(readFileSync(f, 'utf8'));
+    const rel = f.replace(ROOT + '\\', '').replace(ROOT + '/', '');
+    if (/export\s+class\s+OfflineError\b/.test(code)) classDefs.push(rel);
+    if (/export\s+function\s+isOfflineError\s*\(/.test(code)) fnDefs.push(rel);
+  }
+
+  check('`OfflineError` 类只声明一处', classDefs.length === 1,
+    classDefs.length === 1 ? classDefs[0] : `★ ${classDefs.length} 处：${classDefs.join(', ')}`);
+  check('`isOfflineError` 只声明一处', fnDefs.length === 1,
+    fnDefs.length === 1 ? fnDefs[0] : `★ ${fnDefs.length} 处：${fnDefs.join(', ')}`);
+
+  // 判定必须用**标记字段**，不能用 `instanceof`
+  const offlineSrc = readFileSync(join(SRC, 'background', 'core', 'offline.ts'), 'utf8');
+  const fnBody = /export\s+function\s+isOfflineError[\s\S]*?\n\}/.exec(stripLiterals(offlineSrc));
+  check('判据前提：取到了 `isOfflineError` 的函数体', fnBody !== null);
+  check('判定用标记字段（`isOfflineError === true`），**不用** `instanceof`',
+    !!fnBody && /isOfflineError\s*===\s*true/.test(fnBody[0]) && !/instanceof/.test(fnBody[0]));
+
+  // 离线回落的分支必须有日志（否则"为什么离线还能看/为什么改不了"无从查起）
+  const psrc = stripLiterals(readFileSync(join(SRC, 'background', 'core', 'parallel-store.ts'), 'utf8'));
+  check('离线回落分支有日志（`log.warn` 出现在 loadSnapshot 附近）',
+    /log\.warn\([^)]*离线[\s\S]{0,200}?loadSnapshot\(/.test(psrc)
+    || /loadSnapshot\(\)[\s\S]{0,120}?log\.warn\(/.test(psrc));
 }
 
 // ---------------------------------------------------------------- 汇总
