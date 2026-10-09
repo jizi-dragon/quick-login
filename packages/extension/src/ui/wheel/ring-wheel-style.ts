@@ -37,28 +37,28 @@ export const RING_WHEEL_CSS = `
     .sector-wheel.in .sector{opacity:1;transform:scale(1)}
     .sector:hover{transform:scale(1.016);transition-delay:0s}
 
-    .sector-hit{fill:color-mix(in srgb,var(--acc,#1e6fff) 6%,#ffffff);
-      stroke:color-mix(in srgb,var(--acc,#1e6fff) 24%,#e4eaf6);stroke-width:1.6;
+    .sector-hit{fill:color-mix(in srgb,var(--acc) 6%,#ffffff);
+      stroke:color-mix(in srgb,var(--acc) 24%,#e4eaf6);stroke-width:1.6;
       transition:fill .16s ease,stroke .16s ease}
     .sector:hover .sector-hit{
-      fill:color-mix(in srgb,var(--acc,#1e6fff) 20%,#ffffff);stroke:var(--acc,#1e6fff)}
+      fill:color-mix(in srgb,var(--acc) 20%,#ffffff);stroke:var(--acc)}
     .sector.is-current .sector-hit{
-      fill:color-mix(in srgb,var(--acc,#1e6fff) 15%,#ffffff);stroke:var(--acc,#1e6fff);stroke-width:2.2}
+      fill:color-mix(in srgb,var(--acc) 15%,#ffffff);stroke:var(--acc);stroke-width:2.2}
 
     .sector-label{font-size:15px;font-weight:650;fill:#1b2a4a;letter-spacing:.02em;
       pointer-events:none;transition:fill .16s ease}
-    .sector.is-current .sector-label{fill:#1e6fff}
-    .sector:hover .sector-label{fill:var(--acc,#1e6fff)}
+    .sector.is-current .sector-label{fill:var(--acc)}
+    .sector:hover .sector-label{fill:var(--acc)}
 
-    .sector-num circle{fill:#ffffff;stroke:color-mix(in srgb,var(--acc,#1e6fff) 30%,#e4eaf6);
+    .sector-num circle{fill:#ffffff;stroke:color-mix(in srgb,var(--acc) 30%,#e4eaf6);
       stroke-width:1.2;transition:stroke .16s ease,fill .16s ease}
-    .sector:hover .sector-num circle{fill:var(--acc,#1e6fff);stroke:var(--acc,#1e6fff)}
+    .sector:hover .sector-num circle{fill:var(--acc);stroke:var(--acc)}
     .sector-num text{font-size:11px;font-weight:700;fill:#66759b;
       font-variant-numeric:tabular-nums;pointer-events:none;transition:fill .16s ease}
     .sector:hover .sector-num text{fill:#ffffff}
 
     .sector-dot{fill:#cbd5e1;pointer-events:none}
-    .sector-dot.on{fill:#1e6fff;filter:drop-shadow(0 0 5px rgba(30,111,255,.7))}
+    .sector-dot.on{fill:var(--acc);filter:drop-shadow(0 0 5px color-mix(in srgb, var(--acc) .7, transparent))}
 
     .hub-bg{fill:#ffffff;stroke:#e4eaf6;stroke-width:1.5}
     .hub-box{font-size:15px;font-weight:700;fill:#1b2a4a;letter-spacing:.04em}

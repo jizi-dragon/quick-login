@@ -14,7 +14,7 @@
 > | 想了解 | 去哪 |
 > |---|---|
 > | **隔离平面总表（权威口径）** | [docs/CODEBASE_OVERVIEW.md](docs/CODEBASE_OVERVIEW.md) §Architecture |
-> | **踩过的坑（29 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
+> | **踩过的坑（30 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
 > | 功能清单与使用说明（给人看的） | [docs/USER-MANUAL.md](docs/USER-MANUAL.md) |
 > | 现状快照与安全边界 | [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) |
 > | 现场排障与诊断埋点怎么读 | [docs/DIAG-GUIDE.md](docs/DIAG-GUIDE.md) |
@@ -100,6 +100,7 @@
 | 36 | **CSS 变量是"隐式契约"，必须按「页面的依赖链」验；并且 `var(--x)` 与 `var(--x, fallback)` 是两件事。**<br>实测（`PITFALLS #28`）：`wheel.css` 里品牌蓝 `#1e6fff` 出现 **12 次**（8 处 `var(--acc, #1e6fff)` 的 fallback + 4 处裸硬编码），而 `theme.css` 定义了一次 ⇒ **同一个颜色 13 处，改一处必漂**。★ 而 `wheel.html` 既不加载 `theme.css`、`wheel.css` 也没有 `:root` ⇒ `--acc` **从未被定义**。<br>⇒ 处置：加 `:root` 显式定义 `--acc`/`--d`（**值不变 ⇒ 渲染应零变化**），去掉 9 处 fallback + 4 处裸硬编码 ⇒ 品牌蓝 **13 → 2 处**；新增 `tools/verify/verify-css-vars.mjs`（**15 条**）：逐页面按 `<link rel=stylesheet>` + 递归 `@import` 得到依赖链，断言 ① 无「`var()` **无 fallback** 又解析不到」（那会让**整条声明被丢弃**）② 无**自引用** `--x: var(--x)`。<br>★★ **而整理时我自己造出了自引用**：全局替换 `#1e6fff → var(--acc)` **把 `:root` 里那一行自己的值也换掉了** ⇒ `--acc: var(--acc)`。⇒ ★ **全局替换必须排除"那一处定义"**（同族：`str.replace("", x)` 在每个字符间插入、跨多行正则吞相邻块）。<br>★★★ **而"截图逐字节相同"没能发现它** —— 我做了 6 张截图（3 视口 × 2 主题）前后对照，**逐字节相同**，一度以为"视觉零风险"成立。**实测那 6 张截的是空态**：轮盘页要从 `chrome.storage` 读账号才渲染扇区 ⇒ **颜色根本没出现在画面里**。<br>⇒ ★★ **"没变化"是双向信号**：先问"**这次改动真的进入被测路径了吗？**"，再宣布"无副作用"。这类缺陷**只能静态查**，不能靠截图。 |
 | 37 | **"定义 vs 使用"要**两个方向都查** —— 只查一侧的判据会在另一侧静默放行；而"谁算使用者"这个**范围**划错一次就是一次假红。**<br>实测（`PITFALLS #28` 续）：`verify-css-vars.mjs` 第一版**只查"引用了有没有定义"**。补上**反方向**（定义了有没有人用）时，我的探针**把 `theme.css` 排除在"使用者"之外** ⇒ 把 `--sb-brand-hover` / `--sb-bg` 报成**死变量** —— 而它们**就在 theme.css 自己的第 36/48/56 行被用**（按钮渐变 + 页面底色）⇒ **两个假缺陷**。<br>⇒ 判据：`verify-css-vars.mjs` **19 条**（「无「无 fallback 又解析不到」」/「无自引用」/ ★ **「定义的都有人用」**）。<br>★ **反方向那条的"使用者"范围按「全 UI 目录」算，不按「本页的链」算** —— 文件内部的**自用变量是合法的**（`theme.css` 定义并自用），按链算会把它们全报成死变量。<br>★ 反证 **5/5**：追加 `--sb-dead: #abc;`（零引用）⇒ 反方向判据红；追加 `color: var(--nope);` ⇒ 解析判据红；各自还原逐字节。<br>★★ 一句话：**"该存在的有没有"和"该被用的有没有"是两条判据** —— 只写一条，另一侧就是隐形的（同规则 31）。 |
 | 38 | **抽"公共文件"之前先看那个文件里有什么** —— 它是**纯令牌**，还是**令牌 + 会给 DOM 打分的规则**？后者不能整体共享。<br>实测（`PITFALLS #29`）：品牌色原本**两处定义**（`theme.css` 的 `--sb-brand` + `wheel/wheel.css` 的 `--acc`），因为 `wheel.html` **不加载 theme.css**。★ 而**不能简单地 `@import theme.css`** —— 它除 `:root` 外还有**全局选择器**：`*` / `body` / `button` / `.btn-primary` / `.card` / `input,select` / `kbd`，而轮盘**有 `body`** ⇒ 会被打到。<br>⇒ 解法：把色值令牌抽成 `src/ui/tokens.css`（**唯一色值来源**），`theme.css` 与 `wheel.css` 各自引用；品牌色 **2 处 → 1 处**。★ `--acc: var(--sb-brand, #1e6fff)` 的**兜底值与本值相同** ⇒ 即使 tokens 没加载也不空。<br>★ **判据是"渲染逐字节不变"**：2 档视口截图 `f32568…` / `1cc5fa…` **前后完全相同**（★ 且先确认截图**真的渲染出了扇区** —— SVG 元素 33 个、品牌蓝命中 1 个；否则就是规则 36 那个空态陷阱）。<br>★★ `verify-css-vars.mjs` 加「**样式链无环、无重复引用**」（**22 条**）+ 反证 **3/3**：`tokens.css` 追加 `@import './theme.css';` ⇒ 如期变红并报出 `tokens.css → theme.css`。<br>★ 为什么环要单独一条：**浏览器对 `@import` 成环的处理是实现相关的**，而链收集器**去重**会把环**静默吞掉**（链看起来"很短很正常"）。 |
+| 39 | **"同一事实的声明"会跨语言 —— 收敛了一种文件不等于收敛了全部；而"一次改不完"的重复声明，判据只能是「冻结现值 + 只减不增」。**<br>实测（`PITFALLS #30`）：上一轮把品牌色在 **CSS 侧**收敛到 1 处（`tokens.css`）之后，**我才去查 TS 侧** —— 发现品牌蓝在 TS 里 **24 处**（跨 6 个文件）。★ 为什么一直没被发现：`typecheck` **不管颜色**、`verify-css-vars` **只看 CSS 变量** ⇒ **跨语言的那一份从来没人看**。<br>★★ 而"三处独立定义"（`tokens.css` 的 `--sb-brand` / `wheel.css` 的 `--acc` 兜底 / `constants.ts` 的 `SESSION_COLORS[0]`）**值一致但没有任何门禁钉住**。<br>⇒ 新增 `tools/verify/verify-brand.mjs`（**10 条**）：① 三处定义**逐字等价** ② ★ **TS 硬编码处数 ≤ 冻结基线（只减不增）** ③ 白名单每条写明"为什么不能用 var"（如 `chrome.action.setBadgeBackgroundColor({color})` **不收 CSS 变量**）。<br>★ 本轮消掉 `ui/wheel/ring-wheel-style.ts` 的 **13 处**（**24 → 15**）：10 处 `var(--acc,#1e6fff)` 的兜底**永远不会被用到**（`ring-wheel.ts` 在每个扇区的 style 里都显式定义了 `--acc`）+ 2 处直写色 + 1 处同源 `rgba(30,111,255,…)`（改用 `color-mix` 表达）。<br>★ 反证 **5/5**：基线调小 1 ⇒ ②红；`tokens.css` 改一个字符 ⇒ ①红。★ 判据是轮盘截图**逐字节不变**（`f32568…` / `1cc5fa…`）。<br>★★ 两条纪律：**按「事实」去搜重复声明，不要按「文件类型」去搜**（这个色值 / 这个键名 / 这个版本号）；**"一次改不完"时用冻结基线，而改小基线的动作本身就是一次可审计的声明。** |
 
 ---
 
@@ -149,6 +150,10 @@ node tools/verify/verify-load.mjs
 #     `--x: var(--x)` 自引用 ⇒ 等于未定义。浏览器**都不报错**。
 node tools/verify/verify-css-vars.mjs                # **22 条**
 
+# 品牌色一致性 + 不新增硬编码（静态、秒级）
+#   ★ 三处独立定义必须逐字等价；TS/JS 里品牌色硬编码**只减不增**（冻结基线 15）。
+node tools/verify/verify-brand.mjs                   # **10 条**
+
 npm run verify:list       # 列出回归脚本（不跑）
 ```
 
@@ -184,7 +189,7 @@ npm run verify -- --only jarhygiene
   与服务器端统一。
 - **每修一个"看起来正常但其实是坏的"缺陷，就把它的判据写进脚本注释或
   [`docs/PITFALLS.md`](docs/PITFALLS.md)。**
-  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（当前 **29 条**）——在此之前这类教训
+  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（当前 **30 条**）——在此之前这类教训
   只散在 `CHANGELOG.md` 里，而两者的分工不同：
   `CHANGELOG.md` 记"每次发布改了什么"（历史），
   `PITFALLS.md` 记"**哪些错会静默发生、怎么一眼认出来**"（可复用的判据）。
