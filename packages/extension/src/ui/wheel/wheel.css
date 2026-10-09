@@ -1,5 +1,15 @@
 /* 账号轮盘独立小窗（v3.9 Hub 切盒 + 账号色扇区）——页面内无任何窗口控制元素，Esc 关闭 */
 
+:root {
+  /* ★ 品牌蓝的**唯一定义处**（本页不加载 `theme.css`，所以必须自己定义）。
+     此前它只以 8 处 `var(--acc, #1e6fff)` 的 **fallback** 形式存在，
+     另有 4 处裸硬编码 ⇒ 品牌色一共散在 **13 处**（theme.css 1 + 本文件 12），改一处必漂。
+     ★★ 整理时踩过一次：我用全局替换 `#1e6fff → var(--acc)`，把**这一行自己的值**
+        也换掉了 ⇒ 变成 `--acc: var(--acc)` 的**自引用**（等于未定义）。
+        ⇒ **全局替换必须排除"那一处定义"。** */
+  --acc: #1e6fff;
+  --d: 0s; /* 动效时长；此前也只是 fallback */}
+
 * {
   box-sizing: border-box;
 }
@@ -55,7 +65,7 @@ body {
   /* 高亮节点 + 盒名标签（整体随切盒滑动） */
 }
 .box-node-on {
-  fill: #1e6fff;
+  fill: var(--acc);
   stroke: #ffffff;
   stroke-width: 2;
   filter: drop-shadow(0 0 6px rgba(30, 111, 255, 0.55));
@@ -79,7 +89,7 @@ body {
   transition:
     transform 0.34s cubic-bezier(0.22, 1.2, 0.36, 1),
     opacity 0.3s ease;
-  transition-delay: var(--d, 0s);
+  transition-delay: var(--d);
 }
 .sector-wheel.in .sector {
   opacity: 1;
@@ -91,15 +101,15 @@ body {
 }
 
 .sector-hit {
-  fill: color-mix(in srgb, var(--acc, #1e6fff) 7%, #ffffff);
-  stroke: color-mix(in srgb, var(--acc, #1e6fff) 26%, #e4eaf6);
+  fill: color-mix(in srgb, var(--acc) 7%, #ffffff);
+  stroke: color-mix(in srgb, var(--acc) 26%, #e4eaf6);
   stroke-width: 1.6;
   transition: fill 0.16s ease, stroke 0.16s ease;
 }
 .sector:hover .sector-hit,
 .sector.hot .sector-hit {
-  fill: color-mix(in srgb, var(--acc, #1e6fff) 20%, #ffffff);
-  stroke: var(--acc, #1e6fff);
+  fill: color-mix(in srgb, var(--acc) 20%, #ffffff);
+  stroke: var(--acc);
 }
 
 .sector-label {
@@ -111,18 +121,18 @@ body {
   transition: fill 0.16s ease;
 }
 .sector:hover .sector-label {
-  fill: var(--acc, #1e6fff);
+  fill: var(--acc);
 }
 
 .sector-num circle {
   fill: #ffffff;
-  stroke: color-mix(in srgb, var(--acc, #1e6fff) 30%, #e4eaf6);
+  stroke: color-mix(in srgb, var(--acc) 30%, #e4eaf6);
   stroke-width: 1.2;
   transition: stroke 0.16s ease, fill 0.16s ease;
 }
 .sector:hover .sector-num circle {
-  fill: var(--acc, #1e6fff);
-  stroke: var(--acc, #1e6fff);
+  fill: var(--acc);
+  stroke: var(--acc);
 }
 .sector-num text {
   font-size: 11px;
@@ -169,7 +179,7 @@ body {
   transition: stroke 0.16s ease;
 }
 .hub-click:hover .hub-bg {
-  stroke: #1e6fff;
+  stroke: var(--acc);
 }
 .hub-box {
   font-size: 15px;
@@ -195,7 +205,7 @@ body {
   letter-spacing: 0.05em;
 }
 .hub-click:hover .hub-sub {
-  fill: #1e6fff;
+  fill: var(--acc);
 }
 
 /* ---- 空态 ---- */
@@ -203,7 +213,7 @@ body {
   cursor: pointer;
 }
 .hub-go-rect {
-  fill: #1e6fff;
+  fill: var(--acc);
   transition: fill 0.15s ease;
 }
 .hub-go:hover .hub-go-rect {
