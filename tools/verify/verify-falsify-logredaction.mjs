@@ -57,9 +57,12 @@ const CASES = [
   },
   {
     // ★ 本节判据（闭环）的反证 —— 原先没有
+    //   ★★ 锚点**不带 `\n`**：实测带行尾的锚点在这里匹配不上（文件行尾会变），
+    //     于是文件没被改、判据当然绿 ⇒ 反证器报 `空断言`。
+    //     （规则 25 记过"锚点不要带 \n"；本轮它又咬了两次。）
     label: '③ 拆掉 `ql.diag` 里的 drain() ⇒ 日志又没人读了',
     file: SW_TS,
-    anchor: '        out.logs = drain();\n',
+    anchor: 'out.logs = drain();',
     broken: '',
   },
   {
@@ -88,10 +91,11 @@ const CASES = [
   },
   {
     // ★ 第 9 节（SW 入口不静默落空）的反证 ①：拆掉 `default`
+    //   ★★ 锚点同样去掉了行尾 `\n`（见 ③ 的说明）。
     label: '⑦ 拆掉 `dispatch` 的 `default` ⇒ 未知 kind 又静默落空',
     file: SW_TS,
-    anchor: '    default: {\n',
-    broken: '    // 缺陷版：把 default 注释掉\n    // default: {\n',
+    anchor: '    default: {',
+    broken: '    // 缺陷版：把 default 注释掉',
   },
   {
     // ★ 反证 ②：契约里加一个 kind 而 dispatch 不实现。
@@ -182,6 +186,39 @@ const CASES = [
     file: FAV_TS,
     anchor: "    log.warn('listFavorites 读 storage.local 失败 ⇒ 回落到内置默认书签（用户的收藏这次看不到）：%s',",
     broken: '    // 缺陷版：留痕被拆掉',
+  },
+  {
+    // ★ 第 14 节（落盘通道必须接线）的反证 —— 把**模块级的安装调用**注释掉，
+    //   回到"接口摆在那里从没接线"的状态。
+    //   ★ 这一条防的具体后果：日志只活在 SW 内存里，而 MV3 空闲会回收 SW
+    //     ⇒ 用户**事后**导出诊断包时环已经空了 —— **最需要日志时日志已经没了**。
+    //   ★★★ 用**单行锚点**：实测带 `\n` 的多行锚点在这里没匹配上，
+    //     于是文件没被改、判据当然绿 ⇒ 反证器报 `空断言`。
+    //     （规则 25 记过"锚点不要带 \n"；这次是它第二次咬人。）
+    label: '⑯ 注释掉 installLogPersist() 的模块级调用 ⇒ 落盘通道又断线',
+    file: SW_TS,
+    anchor: 'installLogPersist();',
+    broken: '// 缺陷版：不装 sink（日志只活在内存里，SW 一回收就没了）',
+  },
+  {
+    // ★ 第 14 节的第二半：读回来的那一半断掉。
+    //   ⇒ 日志**写了盘却没进诊断包**（`drain()` 读的是内存环）。
+    //   ★ 与 ⑯ 是两个独立的反向 —— 只拆一个都还能"看起来在工作"。
+    label: '⑰ 拆掉 replayLogPersist 的模块级调用 ⇒ 历史日志进不了诊断包',
+    file: SW_TS,
+    anchor: 'void replayLogPersist();',
+    broken: '// 缺陷版：不回灌历史日志',
+  },
+  {
+    // ★ 第 14 节 ⑥ 的反证：让 `restoreToRing` 把记录**再喂回 sink**。
+    //   ⇒ 每启动一次就把落盘内容重写一遍，而队列自己喂自己（越滚越大）。
+    //   ★ 这一条防的是"回灌那条路把落盘通道变成反馈回路"。
+    label: '⑱ restoreToRing 里调 sink ⇒ 回灌变成自我重写的回路',
+    file: LOG_TS,
+    anchor: '  const keep = usable.slice(-RING_SIZE);',
+    broken: '  const keep = usable.slice(-RING_SIZE);\n'
+          + '  // 缺陷版：把记录喂回 sink（回路）\n'
+          + '  if (sink) for (const r of keep) sink(r);',
   },
 ];
 

@@ -3,7 +3,8 @@ import type { BridgeUpPayload } from '../shared/types';
 import { CONTENT_MESSAGE, EXT_VERSION, LOCAL_KEYS } from '../shared/constants';
 // ★ 日志的**唯一公开面**（AGENTS.md 规则 3）：取 logger 与读缓冲都从这里。
 //   直接 `console.*` 会绕过强制打码；直接读 ring 会绕过 `drain()` 的游标还原。
-import { drain, getLogLevel, getLogger } from '../shared/log';
+import { drain, getLogLevel, getLogger, restoreToRing, setSink } from '../shared/log';
+import type { LogRecord } from '../shared/log';
 
 /**
  * 本模块的 logger。
@@ -13,6 +14,109 @@ import { drain, getLogLevel, getLogger } from '../shared/log';
  *   全过程**在日志里完全不存在**。
  */
 const log = getLogger('sw');
+
+/* ================================================================ 日志落盘通道
+ *
+ * ★★ 2026-10-09：补上 `log.ts` 那个**从没被接线的注入点**。
+ *
+ * ## 问题
+ *
+ * `shared/log.ts` 的环形缓冲（`RING_SIZE = 200`）在 **service worker 的内存里**。
+ * 而 **MV3 空闲会回收 SW** —— 于是：
+ *
+ *     故障发生 → SW 记进内存环 → 用户过一会儿去"导出诊断"
+ *              → `ql.diag` 调 `drain()` 读环 → **环常常已经空了**
+ *
+ * ⇒ **最需要日志的时刻，日志已经没了。** 而诊断包恰恰是**事后**才去取的东西。
+ *
+ * ## 为什么之前没发现
+ *
+ * 判据一直是"`drain()` 有没有调用点"（规则 22 那一条，当时确实是**零调用点**，
+ * 已修）。修好之后它**有**调用点了 —— 于是那条判据**变成绿的**，
+ * 而"**读得到吗**"这个问题仍然没有被问到。
+ * ★ 与"接口摆在那里没人接线"同型（v3.19 的 `.side-collapsed`）：
+ *   规则 21 说"安全靠约定时要问『违反了谁会知道』"，
+ *   这里是它的镜像 —— **"机制摆在那里时要问『它真的被接上了吗』"**。
+ *
+ * ## 做法
+ *
+ * `setSink()` 收到的是**同步**回调，而 `chrome.storage` 是异步的
+ * ⇒ 攒一小批再写，避免每条日志一次 IPC。
+ * ★ `log()` 已经把 sink 包在 `try` 里（`log.ts` 的"必须自己保证不抛"），
+ *   而这里额外用 `.catch()` 兜住 **Promise 拒绝**（`try` 拦不住异步拒绝）。
+ *
+ * ## ★ sink 里**绝对不能调 `log()`**
+ *
+ * 那会立刻变成无限递归（`log` → `sink` → `log` → …），而 MV3 里一个未捕获异常
+ * 会终止整个 worker。所以这里只用**裸 `chrome.storage.local`**。
+ */
+const LOG_PERSIST_MAX = 120;
+let logQueue: LogRecord[] = [];
+let logFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function flushLogPersist(): Promise<void> {
+  if (!logQueue.length) return;
+  const batch = logQueue;
+  logQueue = [];
+  try {
+    const stored = await chrome.storage.local.get(LOCAL_KEYS.logPersist);
+    const prev = stored[LOCAL_KEYS.logPersist];
+    const all = (Array.isArray(prev) ? (prev as LogRecord[]) : []).concat(batch);
+    await chrome.storage.local.set({
+      [LOCAL_KEYS.logPersist]: all.slice(-LOG_PERSIST_MAX),
+    });
+  } catch {
+    /* 落盘失败不能影响业务；内存环仍然有这份日志 */
+  }
+}
+
+function installLogPersist(): void {
+  setSink((r) => {
+    logQueue.push({ t: r.t, level: r.level, ns: r.ns, msg: r.msg });
+    // 攒够 10 条立刻写；否则 800ms 后写（避免每条一次 IPC）
+    if (logQueue.length >= 10) {
+      if (logFlushTimer) clearTimeout(logFlushTimer);
+      logFlushTimer = null;
+      void flushLogPersist().catch(() => undefined);
+      return;
+    }
+    if (!logFlushTimer) {
+      logFlushTimer = setTimeout(() => {
+        logFlushTimer = null;
+        void flushLogPersist().catch(() => undefined);
+      }, 800);
+    }
+  });
+}
+
+/**
+ * 把上次落盘的记录回灌进内存环（若本次已是全新 SW，环是空的）。
+ *
+ * ★ 回灌**不经 sink**（见 `restoreToRing` 的注释）——否则每次启动都会重写一遍
+ *   storage，而且队列会自己喂自己。
+ */
+async function replayLogPersist(): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(LOCAL_KEYS.logPersist);
+    const prev = stored[LOCAL_KEYS.logPersist];
+    if (!Array.isArray(prev) || !prev.length) return;
+    const n = restoreToRing(prev as LogRecord[]);
+    // ★ 记一条**自己的**动作 —— 否则"回灌了没有"在诊断包里看不出来。
+    //   它会被 sink 落盘，所以下一次启动时这条也在历史里（时间线连续）。
+    if (n > 0) {
+      log.info('日志落盘回灌：上一个 SW 生命周期的 %d 条已并入内存环（诊断包可见）', n);
+    }
+  } catch {
+    /* 读不到就当没有历史 */
+  }
+}
+
+// ★★ 这两行是**接线本身**。判据必须落在"这一个函数有没有被调用"上，
+//    而不是"文件里有没有 setSink(" —— 后者在函数**定义**里就已满足
+//    （实测踩过：把这两行注释掉，判据仍然全绿）。
+installLogPersist();
+void replayLogPersist();
+
 import { getPendingAutoLogin } from './core/auto-login-cache';
 import { siteAuth, probeScheme } from './core/site-auth';
 import {

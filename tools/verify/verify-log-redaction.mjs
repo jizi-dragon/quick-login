@@ -430,9 +430,21 @@ console.log('\n=== 9. SW 入口：消息分流不许静默落空 ===');
   check('`dispatch` 有 `default` 分支（未知 kind 不再静默落空）', /^\s*default:\s*\{/m.test(d));
   check('`default` 分支记了日志', /default:\s*\{[\s\S]{0,400}?log\.error\(/.test(d));
 
-  // ★ 用**原始**源码取 default 分支那一段，再找注释
-  const rawDispatch = /async function dispatch\(req: RuntimeRequest\)[\s\S]*?\n  \}\n\}/.exec(swSrc);
-  const rawDefault = (rawDispatch ? rawDispatch[0] : '').split(/^\s*default:\s*\{/m)[1] ?? '';
+  // ★ 用**原始**源码取 default 分支那一段，再找注释。
+  //
+  // ★★★ 锚点换过两次，都值得记：
+  //   ① 第一版用 `/async function dispatch\(…\)[\s\S]*?\n  \}\n\}/`
+  //      —— 它**靠缩进猜函数的收尾**。我在文件顶部插入新的顶层代码后，
+  //      这个假设不成立了 ⇒ `rawDefault` 为空 ⇒ 报出来的是
+  //      "`default` 没标 @ts-expect-error"（**指向错误的根因**）。
+  //   ② 第二版我改成匹配注释里的句子，而**我把 `⇒` 漏了**
+  //      ⇒ 仍然匹配不上，而这次我差点又去改断言而不是改锚点。
+  //   ⇒ 定稿：从 **`default: {` 标签本身**起捕获，到那句**独特的 `fail(`** 为止。
+  //     它不依赖缩进、不依赖函数边界、也不依赖注释措辞 —— 只依赖这段代码自己的内容。
+  //   ★ 而"那句 unique 尾部"我**第一版也写错了**：我以为 default 分支里是
+  //     `throw new Error(...)`（它其实是 `return { kind, result: fail(...) }`）。
+  //     ⇒ 锚点必须是**实测读出来的**，不能从记忆里写（规则 23：先实证打印，别猜）。
+  const rawDefault = (/\n\s*default:\s*\{[\s\S]*?fail\(/.exec(swSrc) ?? [''])[0];
   check('`default` 用 `@ts-expect-error` 显式标注类型逃逸',
     /@ts-expect-error/.test(rawDefault));
   check('判据前提：确实取到了 `default` 分支的原文', rawDefault.length > 0);
@@ -902,6 +914,104 @@ console.log('\n=== 13. 静默失败必须留痕（"失败与成功长得一样"�
         catchBodies(body).length === 0);
       check(`${c.fn}() 内有 ≥${c.minLevel} 级留痕 —— ${short}…`, hasLog(body, minIdx));
     }
+  }
+}
+
+// ---------------------------------------------------------------- 14. 落盘通道
+console.log('\n=== 14. 日志落盘通道必须接线（接口摆着 ≠ 接上了）===');
+{
+  // ★★ 为什么单独一节：
+  //
+  //   `log.ts` 早就提供了 `setSink()` 这个**可选落盘注入点**，而它
+  //   **全仓零调用** —— 一个摆在那里、从没接线的接口。
+  //   后果：环形缓冲只在 **service worker 的内存里**，而 **MV3 空闲会回收 SW**
+  //   ⇒ 用户**事后**去导出诊断包时，环往往已经空了。
+  //   **最需要日志的时刻，日志已经没了。**
+  //
+  // ★ 与 v3.19 修掉的 `.side-collapsed` 同型（接口/样式齐备，没人接线），
+  //   也是规则 21 的镜像：那条说"安全靠约定时要问『违反了谁会知道』"，
+  //   这里是"**机制摆在那里时要问『它真的被接上了吗』**"。
+  //
+  // ★ 为什么之前的判据发现不了：判据一直是"`drain()` 有没有调用点"。
+  //   修好那个之后它**有**调用点了 ⇒ 那条判据**变绿**，
+  //   而"**读得到吗**"这个问题从来没被问到。
+  const SW = join(SRC, 'background', 'service-worker.ts');
+  const LOG = join(SRC, 'shared', 'log.ts');
+  const swRaw = readFileSync(SW, 'utf8');
+  const logSrc = readFileSync(LOG, 'utf8');
+  // ★★ 必须**剥注释**再断言调用点。
+  //   实测踩过：第一版写 `/setSink\s*\(/`，而 SW 里我自己那句注释
+  //   "★ `setSink()` 收到的是**同步**回调…" 里就有 `` `setSink()` `` ⇒
+  //   **拆掉真实调用后判据仍然绿**，反证器直接报
+  //   `FAIL 缺陷版下仍然绿 ⇒ 这条验收是空断言！`
+  //   ⇒ 这是 PITFALLS #19 那条（"解释为什么用 X"的文本必然包含 X）的**又一次**，
+  //     也是规则 23（零命中类判据先剥注释）在"正向断言"上的同型形态。
+  const sw = swRaw
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ');
+
+  // ① log.ts 必须**导出** setSink（它是公开面）
+  check('log.ts 导出了 setSink', /export function setSink\(/.test(logSrc));
+  check('log.ts 导出了 restoreToRing（读回来的那一半）',
+    /export function restoreToRing\(/.test(logSrc));
+
+  // ② ★★ SW 必须**在模块级调用安装函数**（这一条是本节的要害）
+  //
+  //   ★★★ 判据设计踩过一次，值得写下来：
+  //     第一版写的是"文件里有没有 `setSink(` 调用"，并通过了。
+  //     而**把 `installLogPersist();` 那行注释掉之后判据仍然全绿** ——
+  //     因为 `setSink((r) => {…})` 就在 `installLogPersist` 的**函数体内部**，
+  //     "文件里出现 `setSink(`"在**函数定义**处就已满足，与"有没有调用它"无关。
+  //     ⇒ 反证器报 `FAIL 缺陷版下仍然绿 ⇒ 这条验收是空断言！`
+  //
+  //   ⇒ 判据必须盯**模块级的那个调用**，而不是"某处出现过某个 token"。
+  //     用 `/^installLogPersist\(\);$/m`（行首行尾）：它只匹配**模块级裸调用**，
+  //     不匹配函数声明 `function installLogPersist(): void {`。
+  check('service-worker.ts **模块级调用**了 installLogPersist（落盘那半接线）',
+    /^installLogPersist\(\);$/m.test(sw));
+
+  // ③ 读回来的那一半也要接（否则日志落盘了却进不了诊断包）
+  check('service-worker.ts **模块级调用**了 replayLogPersist（回灌那半接线）',
+    /^void replayLogPersist\(\);$/m.test(sw));
+
+  // ③b `setSink` 确实被用于装配（装配点在安装函数里）
+  check('installLogPersist 里调了 setSink（装配点存在）',
+    /function installLogPersist\(\)[\s\S]*?\bsetSink\s*\(/.test(sw));
+
+  // ④ 两个健壮性约束（写错会变成 worker 崩溃或无限递归）
+  //    · sink 里**不能调 log()** —— 会 log → sink → log 无限递归
+  const sinkFn = /function installLogPersist\(\)[\s\S]*?\n\}/.exec(sw);
+  check('前提：取到了 installLogPersist 的函数体', sinkFn !== null);
+  if (sinkFn) {
+    const body = sinkFn[0];
+    // sink 回调体内不许出现 log.* 调用
+    const callbacks = [...body.matchAll(/setSink\(\([^)]*\)\s*=>\s*\{[\s\S]*?\n\s*\}\)/g)];
+    check('前提：setSink 的回调被取到', callbacks.length > 0);
+    for (const cb of callbacks) {
+      check('sink 回调里没有 log() 调用（否则无限递归 → SW 终止）',
+        !/\blog\s*\.\s*(debug|info|warn|error)\s*\(/.test(cb[0]));
+    }
+  }
+  //    · 异步写必须自己 catch（`log()` 的 try 只拦同步抛）
+  check('落盘写有 .catch（log() 的 try 拦不住 Promise 拒绝）',
+    /flushLogPersist\(\)\.catch\(/.test(sw));
+
+  // ⑤ 键在 LOCAL_KEYS 里集中声明（规则：不要裸键名字符串）
+  const consts = readFileSync(join(SRC, 'shared', 'constants.ts'), 'utf8');
+  check('落盘键在 LOCAL_KEYS 里声明', /logPersist:\s*'[^']+'/.test(consts));
+  check('SW 用的是 LOCAL_KEYS.logPersist 而不是裸字符串',
+    /LOCAL_KEYS\.logPersist/.test(sw));
+
+  // ⑥ ★ `restoreToRing` **不得**把记录再喂给 sink
+  //   ⇒ 否则每启动一次就把落盘内容重写一遍，且队列自己喂自己（越滚越大）。
+  //   ★ 判据落在**函数体内部**：只查"整个文件里没调 sink"会被别处的调用放过。
+  const restoreFn = /export function restoreToRing\([\s\S]*?\n\}/.exec(logSrc);
+  check('前提：取到了 restoreToRing 的函数体', restoreFn !== null);
+  if (restoreFn) {
+    check('restoreToRing **不调 sink**（否则回灌会自己喂自己）',
+      !/\bsink\s*\(/.test(restoreFn[0]));
+    check('restoreToRing **不调 log()**（回灌不是新事件）',
+      !/\blog\s*\(/.test(restoreFn[0]));
   }
 }
 

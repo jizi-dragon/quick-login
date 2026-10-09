@@ -214,6 +214,46 @@ export interface Logger {
 }
 
 /**
+ * 把**已落盘的历史记录**放回内存环（v3.19）。
+ *
+ * ## 为什么需要它
+ *
+ * 环形缓冲在 **service worker 的内存里**，而 **MV3 空闲会回收 SW**
+ * ⇒ 用户事后导出诊断包时，环往往已经空了。`setSink()` 负责**写出去**，
+ * 本函数负责**读回来** —— 缺任一半，"日志活不到被读的时候"这个问题就没解决。
+ *
+ * ## ★ 三个刻意的设计
+ *
+ * ① **不进 sink**：这些记录本来就是从 sink 里落盘的，再喂回去会立刻重写一遍
+ *    storage，且每启动一次就滚一遍。
+ * ② **不再打码**：进来的 `msg` 是**落盘前就已经打过码的**（`log()` 里 `formatArgs`
+ *    的产物）。再打一次是无害的，但会让人误以为"历史记录没打码"。
+ *    ⇒ 这里只接受 `LogRecord`，调用方无法塞原始文本进来。
+ * ③ **不做级别过滤**：它们**确实发生过**。若按当前 `currentLevel` 丢掉，
+ *    环里的时间线就会缺段，而缺段比"多几条 debug"坏得多
+ *    （排障时最怕的就是"以为看到的全貌其实不是全貌"）。
+ *
+ * @param records 已落盘的记录（`{t, level, ns, msg}`）；超长时只保留最后 `RING_SIZE` 条
+ */
+export function restoreToRing(records: readonly LogRecord[]): number {
+  const usable = records.filter(
+    (r) => r && typeof r.msg === 'string' && typeof r.t === 'number',
+  );
+  if (!usable.length) return 0;
+  const keep = usable.slice(-RING_SIZE);
+  for (const r of keep) {
+    const entry: LogRecord = { t: r.t, level: r.level, ns: r.ns, msg: r.msg };
+    if (ring.length < RING_SIZE) {
+      ring.push(entry);
+    } else {
+      ring[ringCursor] = entry;
+      ringCursor = (ringCursor + 1) % RING_SIZE;
+    }
+  }
+  return keep.length;
+}
+
+/**
  * 取一个 logger。
  *
  * ★ 与服务器端同形（那边是 `logging_setup.get_logger("模块名")`）——
