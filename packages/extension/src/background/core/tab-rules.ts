@@ -16,6 +16,11 @@
  */
 
 /** AUTH 规则 id 区间 */
+// ★ 本文件此前**没有任何 import**（纯常量 + 类型 + DNR 调用）。
+//   日志是它的第一个外部依赖 —— 用 `shared/log`（唯一公开面，强制打码）。
+//   ★ 它**不碰 `chrome.*`**，所以对 content script 也是安全的（AGENTS.md 规则 10）。
+import { getLogger } from '../../shared/log';
+
 const AUTH_BASE = 100_000;
 /** COOKIE 规则 id 区间 */
 const COOKIE_BASE = 200_000;
@@ -30,6 +35,17 @@ interface RuleMeta {
 }
 
 const installed = new Map<number, RuleMeta>();
+
+/**
+ * 本模块的 logger。
+ *
+ * ★ 与 `diag()` 的分工（AGENTS.md 规则 22）：
+ *   · `log.*` → 带级别、进内存环形 200 与 DevTools，**也进诊断包的 `appLogs`**
+ *   · `diag()` → `storage.local` 的人读文本（环形 60，**稀缺**）
+ * ⇒ 中频轨迹（每条规则装上/摘掉）走 `log.debug`（默认 `info` ⇒ 生产静默）；
+ *   真正的失败走 `log.error` + `diag()` 双写。
+ */
+const log = getLogger('tab-rules');
 
 /** 诊断埋点（与 parallel-session 共用 storage.local['ql:diag'] 环形缓冲） */
 async function diag(msg: string): Promise<void> {
@@ -134,12 +150,22 @@ function buildCookieRule(
   });
 }
 
-/** 单条规则安装（返回是否成功；失败仅记录诊断，不阻断其余规则） */
-async function addOne(rule: chrome.declarativeNetRequest.Rule): Promise<boolean> {
+/** 单条规则安装（返回是否成功；失败仅记录诊断，不阻断其余规则） */async function addOne(rule: chrome.declarativeNetRequest.Rule): Promise<boolean> {
   try {
     await chrome.declarativeNetRequest.updateSessionRules({ addRules: [rule] });
+    // ★ 成功的安装走 `debug`（中频：由 `syncAccountRules` 在 cookie 变化时驱动）。
+    //   排障时它回答"这条规则到底装上了没有、id 是多少" —— 而 id 是 `ql.diag`
+    //   里 `sessionRuleCount` 与实际规则对不上的唯一线索。
+    log.debug('addRule #%d 装上（%s）', rule.id, rule.condition?.tabIds?.join(',') ?? '-');
     return true;
   } catch (e) {
+    // ★ 失败同时走两条：`diag()`（进诊断包的人读文本）
+    //   与 `log.error`（带级别、进 `appLogs`、也进诊断包）。
+    //   ★ **这是本文件最要紧的一条日志**：历史教训（PITFALLS #1、#8）是
+    //     `updateSessionRules` 的失败会让**整个网络平面一起死**，
+    //     而当时唯一的信号就是这一行 —— 它必须显眼。
+    log.error('addRule #%d **失败**：%s',
+      rule.id, e instanceof Error ? e.message : String(e));
     void diag(`addRule #${rule.id} 失败：${e instanceof Error ? e.message : String(e)}`);
     return false;
   }
@@ -195,10 +221,41 @@ export const tabRules = {
       try {
         await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: removes });
       } catch (e) {
+        // ★ 移除失败比安装失败**更隐蔽**：安装失败会让功能不生效（用户会发现"串号了"），
+        //   而移除失败会让**本该失效的旧规则继续生效** ——
+        //   表现是"已经切了账号/已解绑，但请求还带着上一个账号的头"。
+        //   两种失败的方向相反，所以必须能分开（照 `cloud-store` 里那条同源推理）。
+        log.error('移除规则**失败** ids=%s：%s',
+          removes.join(','), e instanceof Error ? e.message : String(e));
         void diag(`updateRules 移除失败 ids=${removes.join(',')}：${e instanceof Error ? e.message : String(e)}`);
       }
     }
     installed.set(tabId, meta);
+    // ★★ 这里记的**不只是轨迹**。注意上面两条安装都是"失败就不写 meta"：
+    //   所以 `meta.cookieId`/`meta.authId` 为 `undefined` 就意味着那次安装失败了。
+    //
+    //   ⇒ 最危险的形态是**两条都失败**：页签**完全没有网络平面保护**
+    //     （既不回放 Cookie，也不改 AUTH 头），而它与"装好了"在界面上**长得一样** ——
+    //     平台照样能打开，只是**以错误的身份**在跑。
+    //     这正是 PITFALLS #1/#8 描述的那类静默失效，所以这里分成两级记。
+    const authApplied = meta.authId !== undefined;
+    const cookieApplied = meta.cookieId !== undefined;
+    log.debug('applyBinding tab=%d token=%s cookie=%s → cookieId=%s authId=%s',
+      tabId,
+      token ? '有' : '无',
+      wanted ? `回放${wanted.length}B` : '剥离',
+      meta.cookieId ?? '-',
+      meta.authId ?? '-');
+    if (token !== null && !authApplied) {
+      // 有 token 却装不上 AUTH 规则 ⇒ 该页签的请求**不会带正确的 Bearer**
+      log.error('applyBinding tab=%d 有 token 但 AUTH 规则**未装上** ⇒ 页签将以错误身份请求',
+        tabId);
+    }
+    if (!cookieApplied) {
+      // COOKIE 规则没装上 ⇒ 要么没回放快照（掉登录），要么没剥离（串号）
+      log.error('applyBinding tab=%d COOKIE 规则**未装上** ⇒ 网络平面不完整（%s）',
+        tabId, wanted ? '应回放但未回放' : '应剥离但未剥离');
+    }
     void diag(
       `applyBinding tab=${tabId} token=${token ? '有' : '无'} cookie=${wanted ? `回放${wanted.length}B` : '剥离'} cookieId=${meta.cookieId ?? '-'} authId=${meta.authId ?? '-'}`,
     );

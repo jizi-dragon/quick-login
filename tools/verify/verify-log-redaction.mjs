@@ -477,6 +477,102 @@ console.log('\n=== 9. SW 入口：消息分流不许静默落空 ===');
     + `前置分流 ${preKinds.size} 个）`);
 }
 
+// ---------------------------------------------------------------- ⑩ 网络平面失败可见
+console.log('\n=== 10. 网络平面：规则装不上/摘不掉必须可见 ===');
+{
+  // ## 这一节防的是什么
+  //
+  // `tab-rules.ts` 是**七个隔离平面里的网络平面**（AUTH + COOKIE 两条 DNR 规则）。
+  // 历史教训（`PITFALLS #1`、`#8`）：`updateSessionRules` 的失败会让
+  // **整个网络平面一起死**，而当时唯一的信号只有一行 `diag()`（环形 60，会被挤掉）。
+  //
+  // ★★ 更危险的是**两条规则都装失败**那种形态：
+  //   页签**完全没有网络平面保护**（既不回放 Cookie，也不改 AUTH 头），
+  //   而它与"装好了"在界面上**长得一样** —— 平台照样能打开，
+  //   只是**以错误的身份在跑**（串号）。
+  //
+  // ⇒ 钉住三件事：① `addOne` 失败必须 `log.error`；② `applyBinding` 必须对
+  //   "该装却装不上"报 `log.error`（而不是只写 `debug` 轨迹）；
+  //   ③ 移除失败也必须 `log.error`（它的方向与安装失败**相反**：
+  //   装了没生效 vs 该失效的还生效）。
+  //
+  // ★ 读取方式遵循规则 24：这些断言找的都是**代码标识符**（`log.error(` / `getLogger(`），
+  //   不是字符串字面量的内容 ⇒ 用剥过的源码（避免被自己的注释弄红）。
+  //   而"哪个函数体"用与第 7 节相同的 `bodyOf`（跳过参数表再配平）。
+  // ★★ 这一节**又踩了规则 24 那个坑的变体**，两次都值得记：
+  //
+  //   ① `getLogger('tab-rules')` 里的 `'tab-rules'` 是**字符串字面量** ⇒
+  //      剥过之后变成 `getLogger('')` ⇒ 断言查不到。
+  //   ② 更隐蔽：我要断言的 AUTH / COOKIE / "移除" 这些关键字
+  //      **也都在 `log.error('...')` 的字符串里** ⇒ 同样被剥掉。
+  //
+  //   ⇒ 规则（与 #24 一致，但这次要**在同一节里混用两种源码**）：
+  //     · 找**标识符**（`log.error(` / `diag(` / `log.debug(` / `getLogger`）→ 用**剥过的**
+  //     · 找**字面量的内容**（`'tab-rules'` / `AUTH` / `COOKIE` / `移除`）→ 用**原文**
+  //     ★ 而"哪个函数体"必须从**同一份**源码里切出来 —— 不能拿剥过的边界去原文里查
+  //       （行号虽然一致，但混用容易出错）。所以下面切两遍，各查各的。
+  const trSrc = readFileSync(join(SRC, 'background', 'core', 'tab-rules.ts'), 'utf8');
+  const trCode = stripLiterals(trSrc);
+
+  const bodyOfFn = (src, name) => {
+    const head = new RegExp(
+      `(?:^|\\n)\\s*(?:export\\s+)?(?:async\\s+)?function\\s+${name}\\s*\\(`,
+    ).exec(src);
+    if (!head) return null;
+    let depth = 0;
+    let bodyStart = -1;
+    for (let j = src.indexOf('(', head.index); j < src.length; j++) {
+      if (src[j] === '(') depth++;
+      else if (src[j] === ')') {
+        depth--;
+        if (depth === 0) {
+          const brace = src.indexOf('{', j);
+          if (brace < 0) return null;
+          bodyStart = brace;
+          break;
+        }
+      }
+    }
+    if (bodyStart < 0) return null;
+    let d = 0;
+    for (let j = bodyStart; j < src.length; j++) {
+      if (src[j] === '{') d++;
+      else if (src[j] === '}') { d--; if (d === 0) return src.slice(bodyStart, j + 1); }
+    }
+    return null;
+  };
+  /** `applyBinding` 是对象方法而非 function 声明，单独取（剥过/原文各切一次） */
+  const applyOf = (src) => {
+    const m = /async applyBinding\([\s\S]*?\n  \},/.exec(src);
+    return m ? m[0] : null;
+  };
+
+  // ① 找标识符 ⇒ 用剥过的
+  check('`tab-rules` 取 logger 走 `getLogger`', /getLogger\(/.test(trCode));
+  // ② 找字面量内容 ⇒ 用原文
+  check('`tab-rules` 的 logger 命名空间是 `tab-rules`', /getLogger\('tab-rules'\)/.test(trSrc));
+
+  const addOne = bodyOfFn(trCode, 'addOne');
+  check('判据前提：取到了 `addOne` 的函数体', addOne !== null);
+  check('`addOne` 失败时 `log.error`（装不上必须显眼）',
+    !!addOne && /log\.error\(/.test(addOne));
+  check('`addOne` 仍然写 `diag()`（人读文本，进诊断包）',
+    !!addOne && /diag\(/.test(addOne));
+
+  const abCode = applyOf(trCode);
+  const abRaw = applyOf(trSrc);
+  check('判据前提：取到了 `applyBinding` 的实现（剥过）', abCode !== null);
+  check('判据前提：取到了 `applyBinding` 的实现（原文）', abRaw !== null);
+  check('`applyBinding` 有 `log.debug` 轨迹', !!abCode && /log\.debug\(/.test(abCode));
+  // ★ 关键：对"该装却装不上"必须 `log.error` —— 那才是"静默以错误身份运行"的探针
+  check('`applyBinding` 对"有 token 却装不上 AUTH"报 `log.error`',
+    !!abRaw && /AUTH/.test(abRaw) && /log\.error\(/.test(abRaw));
+  check('`applyBinding` 对"COOKIE 规则未装上"报 `log.error`',
+    !!abRaw && /COOKIE/.test(abRaw) && /log\.error\(/.test(abRaw));
+  check('移除规则失败报 `log.error`（方向与安装失败相反）',
+    !!abRaw && /移除/.test(abRaw) && /log\.error\(/.test(abRaw));
+}
+
 // ---------------------------------------------------------------- 汇总
 const passed = results.filter(Boolean).length;
 console.log(`\n=== 汇总：${passed}/${results.length} 通过 ===`);

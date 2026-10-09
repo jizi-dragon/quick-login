@@ -34,6 +34,7 @@ const PS_TS = join(SRC, 'background', 'core', 'parallel-session.ts');
 //   与 `parallel-store`（数据层门面）。第 ⑥ 条要改的是**后者**。
 const PSTORE_TS = join(SRC, 'background', 'core', 'parallel-store.ts');
 const MSGS_TS = join(SRC, 'shared', 'messages.ts');
+const TABRULES_TS = join(SRC, 'background', 'core', 'tab-rules.ts');
 
 const CASES = [
   {
@@ -97,6 +98,24 @@ const CASES = [
     anchor: "  | { kind: 'par.list' }\n",
     broken: "  | { kind: 'par.list' }\n  | { kind: 'definitely.not.implemented' }\n",
   },
+  {
+    // ★ 第 10 节（网络平面失败可见）的反证 —— 把"规则装不上"的 `log.error`
+    //   **降级为 `log.debug`**（这正是本轮要修的那个缺陷形态）。
+    //
+    //   ★ 这一条尤其值得反证：DNR 装不上时页签会**以错误身份继续跑**，
+    //     而它与"装好了"在界面上长得一样 ⇒ 少了这条 `error` 就再也查不出来
+    //     （`debug` 默认不输出，等于没有）。
+    //
+    //   ★ 缺陷版必须让 `log.error(` **真的消失**（本反证器是字符串替换，
+    //     若只把调用拆成两半，marker 仍在源码里 ⇒ 反证**永远不会红**）。
+    //
+    //   ★ 锚点**不带换行**：带 `\n` 时匹配不上（实测 SKIP，行尾是 CRLF）。
+    //     用"整行内容"作为锚点即可，替换后那两行参数仍然接得上。
+    label: '⑨ 把 `addOne` 失败的 `log.error` 降级为 `log.debug` ⇒ 装不上又变静默',
+    file: TABRULES_TS,
+    anchor: "    log.error('addRule #%d **失败**：%s',",
+    broken: "    log.debug('addRule #%d **失败**：%s',",
+  },
 ];
 
 function runCheck() {
@@ -147,7 +166,7 @@ console.log('\n=== 还原核对 ===');
 //   —— 下一轮的全量验收会红，但原因指向别处。
 //   判据（自证）：本列表与 CASES 里出现的 `file` **集合相等**。
 const touched = [...new Set(CASES.map((c) => c.file))];
-const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS, MSGS_TS];
+const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS, MSGS_TS, TABRULES_TS];
 const uncovered = touched.filter((f) => !COVERED.includes(f));
 if (uncovered.length) failures.push(`还原核对漏了：${uncovered.join(', ')}`);
 
@@ -161,11 +180,13 @@ for (const f of COVERED) {
     : f === PSTORE_TS ? "export { OfflineError, isOfflineError } from './offline';"
     // ★ `messages.ts` 的 marker = 那个**真 kind** 仍在。
     //   配合下面那条"假 kind 必须不在"，两侧都钉住还原真的发生了。
-    : "| { kind: 'par.list' }";
+    : f === MSGS_TS ? "| { kind: 'par.list' }"
+    : "log.error('addRule #%d **失败**：%s',";
   const restored = readFileSync(f, 'utf8');
   const ok = restored.includes(marker)
-    // 反证用的那个"假 kind"必须**已经不在**（否则还原没做成）
-    && !restored.includes('definitely.not.implemented');
+    // 反证用的那些"缺陷版痕迹"必须**已经不在**（否则还原没做成）
+    && !restored.includes('definitely.not.implemented')
+    && !restored.includes('// 缺陷版：不记 error');
   if (!ok) failures.push(`${short} 还原不完整（marker=${marker}）`);
   console.log(`  ${ok ? 'OK  ' : 'FAIL'} ${short} 已还原（含 ${marker.slice(0, 40)}）`);
 }
