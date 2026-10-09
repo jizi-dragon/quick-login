@@ -35,6 +35,7 @@ const PS_TS = join(SRC, 'background', 'core', 'parallel-session.ts');
 const PSTORE_TS = join(SRC, 'background', 'core', 'parallel-store.ts');
 const MSGS_TS = join(SRC, 'shared', 'messages.ts');
 const TABRULES_TS = join(SRC, 'background', 'core', 'tab-rules.ts');
+const CDEV_TS = join(SRC, 'background', 'core', 'cloud-device.ts');
 
 const CASES = [
   {
@@ -116,6 +117,28 @@ const CASES = [
     anchor: "    log.error('addRule #%d **失败**：%s',",
     broken: "    log.debug('addRule #%d **失败**：%s',",
   },
+  {
+    // ★ 第 11 节（凭据不进日志调用）的反证 —— **静态判据**验的是"根本没把凭据交给 log()"。
+    //
+    //   ★★ 值得反证的理由：`log()` **运行时确实会打码**，
+    //   所以这一类缺陷在功能上**看不出任何异常**（DevTools 里显示的是打码后的值），
+    //   只有静态判据能发现它。⇒ 必须证明这条静态判据真的会红。
+    //
+    //   缺陷版：把"判断有没有令牌"改成"把令牌带上"（无存在性判断痕迹 ⇒ 必红）。
+    //   锚点用 `cloud-device.ts` 里那行 `log.info` 的**参数行**（实测原文）。
+    label: '⑩ 日志参数直接带 `token` 值（无存在性判断）⇒ 静态判据必须红',
+    file: CDEV_TS,
+    anchor: "      token ? '有' : '无', fernetKey ? '有' : '无', email ? '有' : '无');",
+    broken: '      token, fernetKey ? \'有\' : \'无\', email ? \'有\' : \'无\');',
+  },
+  {
+    // ★ 反证 ② —— **模板串插值**里出现凭据标识符。
+    //   这一条验的是 ① 那条断言（"插值里不得出现凭据标识符"）。
+    label: '⑪ 模板串插值含 `${deviceCode}` ⇒ 明文交给 log()',
+    file: CDEV_TS,
+    anchor: "  log.debug('device-start 发起（clientName=%s，丢弃上一个会话=%s）', clientName, replaced);",
+    broken: '  log.debug(`device-start 发起（clientName=${clientName}，deviceCode=${deviceCode}）`);',
+  },
 ];
 
 function runCheck() {
@@ -166,7 +189,7 @@ console.log('\n=== 还原核对 ===');
 //   —— 下一轮的全量验收会红，但原因指向别处。
 //   判据（自证）：本列表与 CASES 里出现的 `file` **集合相等**。
 const touched = [...new Set(CASES.map((c) => c.file))];
-const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS, MSGS_TS, TABRULES_TS];
+const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS, MSGS_TS, TABRULES_TS, CDEV_TS];
 const uncovered = touched.filter((f) => !COVERED.includes(f));
 if (uncovered.length) failures.push(`还原核对漏了：${uncovered.join(', ')}`);
 
@@ -181,7 +204,9 @@ for (const f of COVERED) {
     // ★ `messages.ts` 的 marker = 那个**真 kind** 仍在。
     //   配合下面那条"假 kind 必须不在"，两侧都钉住还原真的发生了。
     : f === MSGS_TS ? "| { kind: 'par.list' }"
-    : "log.error('addRule #%d **失败**：%s',";
+    : f === TABRULES_TS ? "log.error('addRule #%d **失败**：%s',"
+    // ★ `cloud-device.ts` 的 marker = 那条"只记有没有凭据"的既有形态仍在。
+    : "token ? '有' : '无'";
   const restored = readFileSync(f, 'utf8');
   const ok = restored.includes(marker)
     // 反证用的那些"缺陷版痕迹"必须**已经不在**（否则还原没做成）

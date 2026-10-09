@@ -573,6 +573,141 @@ console.log('\n=== 10. 网络平面：规则装不上/摘不掉必须可见 ==='
     !!abRaw && /移除/.test(abRaw) && /log\.error\(/.test(abRaw));
 }
 
+// ---------------------------------------------------------------- ⑪ 凭据不进日志调用
+console.log('\n=== 11. 凭据**不进日志调用**（纵深防御）===');
+{
+  // ## 这一节防的是什么
+  //
+  // 前面十节验的都是"`log()` **运行时**会打码"。那是**一道**防线。
+  // 这一节验的是**第二道**：**根本没有把凭据值交给 `log()`**。
+  //
+  // ## 为什么需要第二道
+  //
+  // 打码靠的是 `redact()` 里的 6 条正则。正则**会被绕过**：
+  // 一个没见过的键名、一个被 Base64 过、一个被拼进 URL 的凭据 ——
+  // 都可能漏过。而"从不把明文交出去"**不依赖任何正则**。
+  //
+  // ⇒ 两种形态必须分开：
+  //   · 安全：`log.info('token=%s', token ? '有' : '无')`  ← 交出去的是**判断结果**
+  //   · 危险：``log.info(`token=${token}`)``               ← 交出去的是**明文**
+  //
+  // ★ 判据（两条，都要）：
+  //   ① 模板串**插值**里不得出现凭据标识符；
+  //   ② 模板串**之外**的参数里出现凭据标识符时，必须同时出现"存在性判断"的痕迹
+  //      （`有` / `无` / `缺` / `Boolean(` / `.length`）—— 否则视为把值传了出去。
+  //
+  // ★ 实现要点：参数区必须**配平括号**取出（不能用 `[\s\S]*?\)` ——
+  //   那样会在第一个 `)` 就截断，而括号在日志里很常见）。
+  const CRED = [
+    'deviceCode', 'userCode', 'token', 'fernetKey', 'password', 'passwd', 'pwd',
+    'secret', 'credential', 'credentials', 'authorization', 'cookieValue', 'cookie',
+  ];
+  const credRe = (s) => CRED.filter((c) => new RegExp(`(?<![\\w.])${c}(?![\\w])`).test(s));
+
+  const walkAll = [];
+  const walkDir2 = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) { walkDir2(full); continue; }
+      if (name.endsWith('.ts')) walkAll.push(full);
+    }
+  };
+  walkDir2(SRC);
+
+  const interpolationLeaks = [];
+  const argLeaks = [];
+  let callCount = 0;
+
+  for (const f of walkAll) {
+    const rel = f.replace(ROOT + '\\', '').replace(ROOT + '/', '');
+    const src = readFileSync(f, 'utf8');
+    const code = stripLiterals(src); // 剥掉注释：别被"解释为什么不用 X"的说明弄红（规则 23）
+    for (const m of code.matchAll(/\blog\.(?:debug|info|warn|error)\(/g)) {
+      callCount += 1;
+      // 配平括号取参数区
+      let d = 1;
+      let j = m.index + m[0].length;
+      const start = j;
+      while (j < code.length && d > 0) {
+        if (code[j] === '(') d += 1;
+        else if (code[j] === ')') d -= 1;
+        j += 1;
+      }
+      const args = code.slice(start, j - 1);
+      const ln = code.slice(0, m.index).split('\n').length;
+      // ① 模板串插值（剥过之后模板串内容为空，所以这里其实查不到 —— 见下面的说明）
+      for (const tm of args.matchAll(/\$\{([^}]*)\}/g)) {
+        const hit = credRe(tm[1]);
+        if (hit.length) interpolationLeaks.push(`${rel}:${ln} \${…${hit[0]}…}`);
+      }
+      // ② 参数区（模板串之外）——有凭据标识符就必须有"存在性判断"痕迹
+      //    ★ 剥过之后字符串内容变空，所以"有/无/缺"这些**痕迹也在字符串里**，
+      //      会被剥掉 ⇒ 判据会**假红**。
+      //      ⇒ 这里必须用**原文**的参数区（与规则 24 一致：读字面量内容用原文）。
+    }
+  }
+
+  // ★★ 上面 ② 的说明暴露了一个实现选择：`stripLiterals` 会把 `'有'` 也剥掉，
+  //   导致"有存在性判断"这个**证据**消失 ⇒ 那条断言会假红。
+  //   ⇒ ② 改用**原文**重跑一遍（① 也一并重跑，因为模板串内容同样被剥掉了）。
+  for (const f of walkAll) {
+    const rel = f.replace(ROOT + '\\', '').replace(ROOT + '/', '');
+    const raw = readFileSync(f, 'utf8');
+    // 注释剥掉（但保留字符串）——手工做：只去块注释与行注释，**保留字符串**
+    const noComment = raw
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+    for (const m of noComment.matchAll(/\blog\.(?:debug|info|warn|error)\(/g)) {
+      let d = 1;
+      let j = m.index + m[0].length;
+      const start = j;
+      while (j < noComment.length && d > 0) {
+        if (noComment[j] === '(') d += 1;
+        else if (noComment[j] === ')') d -= 1;
+        j += 1;
+      }
+      const args = noComment.slice(start, j - 1);
+      const ln = noComment.slice(0, m.index).split('\n').length;
+      // ① 模板串插值
+      for (const tm of args.matchAll(/\$\{([^}]*)\}/g)) {
+        const hit = credRe(tm[1]);
+        if (hit.length) interpolationLeaks.push(`${rel}:${ln} 插值含 ${hit[0]}`);
+      }
+      // ② 参数区（去掉第一个格式串之后的部分）
+      const afterFmt = args.replace(/^\s*(`(?:\\[\s\S]|[^`\\])*`|'(?:\\[\s\S]|[^'\\\n])*')/, '');
+      // ★★ 判定必须**逐个凭据标识符**看它**自己**处于什么形态，
+      //   不能看"整段里有没有痕迹"。
+      //
+      //   实测（反证 ⑩）：我第一版写的是"整段含 `有|无|缺|Boolean(|.length` 就算 benign"，
+      //   于是缺陷版
+      //       log.info('...', token, fernetKey ? '有' : '无', ...)
+      //   里那个**裸 `token`** 因为**旁边 `fernetKey` 的 `'有'`** 而被判为 benign
+      //   ⇒ 反证报"缺陷版下仍然绿"⇒ **判据有洞**。
+      //
+      //   ⇒ 安全形态只有三种，且必须**紧贴该标识符**：
+      //     · `cred ? … : …`（三元判断）        · `cred.length` / `cred?.length`
+      //     · `Boolean(cred)`                    · `cred != null` / `cred !== null`
+      //   其余一律视为"把值传了出去"。
+      for (const c of credRe(afterFmt)) {
+        const benign = new RegExp(
+          `(?<![\\w.])${c}(?![\\w])\\s*(\\?|\\.length|\\?\\.length|\\.slice\\(|!==?\\s*null|===?\\s*null)`
+          + `|Boolean\\(\\s*${c}\\s*\\)`
+          + `|(?<![\\w.])${c}(?![\\w])[^,)]*\\?[^,)]*:`,
+        ).test(afterFmt);
+        if (!benign) argLeaks.push(`${rel}:${ln} 裸传 ${c}`);
+      }
+    }
+  }
+
+  // ★ 空集自证（规则 24）：callCount 为 0 时上面两条断言恒真
+  check('判据前提：确实扫到了 `log.*` 调用', callCount > 0, `${callCount} 处`);
+  check('没有任何 `log.*` 的模板串插值里出现凭据标识符',
+    interpolationLeaks.length === 0, interpolationLeaks.join(' | '));
+  check('凭据标识符只以"存在性判断/长度"形式出现在日志参数里',
+    argLeaks.length === 0, argLeaks.join(' | '));
+  console.log(`      （扫过 ${callCount} 处 \`log.*\` 调用；凭据清单 ${CRED.length} 个）`);
+}
+
 // ---------------------------------------------------------------- 汇总
 const passed = results.filter(Boolean).length;
 console.log(`\n=== 汇总：${passed}/${results.length} 通过 ===`);
