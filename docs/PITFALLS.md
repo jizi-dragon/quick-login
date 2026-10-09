@@ -180,6 +180,19 @@ export { redact, REDACTED, REDACTION_RULES } from './redact';
 凡是脚本依赖"我在目录树的第几层"，就把它**打印出来**或**断言**一次 ——
 靠肉眼数 `..` 的个数，迟早数错。
 
+> **同一根因的相反表现（本仓无 `.gitattributes`，`akso-vault` 有）**：
+> 两个仓库对行尾的处理**方向相反**，所以同一个"行尾不对"的毛病在两边长得完全不一样：
+>
+> | 仓库 | `.gitattributes` | 索引里存的 | 磁盘上检出的 | 症状 |
+> |---|---|---|---|---|
+> | `akso-vault` | 有（`*.py text eol=lf`） | LF | **LF** | 脚本把文件写成 CRLF ⇒ `git status` 长期一堆**假 `M`**，真的改动看不见 |
+> | `quick-login` | **无** | LF | **CRLF** | 每次提交打印一堆 `LF will be replaced by CRLF` 警告（**装饰性**，内容无差异） |
+>
+> ★ 本仓实测**没有**假 `M`（提交后 `git status` 干净），所以**刻意不加** `.gitattributes`：
+> 加它会对上百个已跟踪文件做一次重规范化，产生一个巨大且无实际收益的 diff。
+> ⇒ **"看到警告就改配置"不是判据；先确认它有没有造成实际损害**（这里是"有没有假 M"）。
+> 本仓的脚本都在 Windows 上跑、或由 `npm` 调起，shebang 的行尾不会成为问题。
+
 ---
 
 ## #7 【已修·判据教训】`window===window.top` 判顶层，在 `srcdoc` iframe 里会给出反直觉结果
