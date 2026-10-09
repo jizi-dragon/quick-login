@@ -7,15 +7,25 @@
   "workspaces": [
     "packages/*"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check-deps": "node tools/check_deps.mjs",
+    "check": "node tools/check_deps.mjs && tsc --noEmit",
+    "verify": "node tools/verify/run-all.mjs --browser",
+    "verify:list": "node tools/verify/run-all.mjs --list"
   },
   "devDependencies": {
+    "@peculiar/x509": "2.0.0",
     "@types/chrome": "^0.0.280",
     "@types/node": "^22.0.0",
     "esbuild": "^0.24.0",
+    "playwright-core": "1.62.1",
+    "reflect-metadata": "0.2.2",
     "typescript": "^5.6.0"
   },
   "allowScripts": {
