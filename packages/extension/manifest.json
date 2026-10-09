@@ -4,7 +4,7 @@
   "name": "QuickLogin · 多账号并行",
   "short_name": "QuickLogin",
   "version": "3.17.1",
-  "description": "纯浏览器多账号并行：每账号独立标签页与存储命名空间，页签名自定义，凭证加密保存。",
+  "description": "纯浏览器多账号并行：每账号独立标签页与存储命名空间，页签名自定义，账号存云端账号库。",
   "minimum_chrome_version": "110",
   "commands": {
     "quick-wheel": {
@@ -28,6 +28,7 @@
   },
   "icons": {
     "16": "assets/Icon16.png",
+    "32": "assets/Icon32.png",
     "48": "assets/Icon48.png",
     "128": "assets/Icon128.png"
   },
@@ -39,6 +40,7 @@
     "default_popup": "ui/popup/popup.html",
     "default_icon": {
       "16": "assets/Icon16.png",
+      "32": "assets/Icon32.png",
       "48": "assets/Icon48.png",
       "128": "assets/Icon128.png"
     }
