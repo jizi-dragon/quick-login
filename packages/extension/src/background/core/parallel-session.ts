@@ -830,7 +830,8 @@ export const parallelSession = {
       forceNewTab,
       reused: tabId !== null,
       // 云端账号的凭证在服务端（hasPassword），本地才是 credentials —— 取证字段要如实反映
-      hasCredentials: Boolean(account.credentials) || account.hasPassword === true,
+      // ★ v3.18：`credentials` 字段已删（本地数据源废除）⇒ `hasPassword` 是唯一依据。
+    hasCredentials: account.hasPassword === true,
       box: account.box ?? null,
     });
 
@@ -878,7 +879,7 @@ export const parallelSession = {
 
     // 自动填表凭证：本地 = 解密 credentials；云端 = 当场取一次明文
     // （resolveAccountPlaintext 是数据层门面的附加能力，两条路都归它，调用点只认"有/没有"）
-    if (account.credentials || account.hasPassword) {
+    if (account.hasPassword) {
       try {
         const creds = await resolveAccountPlaintext(account);
         if (!creds) {

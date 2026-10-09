@@ -1,16 +1,17 @@
 import { LOCAL_KEYS, SESSION_COLORS } from '../../shared/constants';
-import type { EncryptedCredentials, ParallelAccount } from '../../shared/types';
-import { credentials } from './credentials';
+import type { ParallelAccount } from '../../shared/types';
+import { OfflineError } from './offline';
 import type { ParallelStore } from './parallel-store';
 
 /**
  * 云端账号库（Akso Vault）数据层 —— 与 `parallel-store` **同样的 10 个方法**，但走 HTTP。
  *
  * 三条不可动摇的口径：
- * 1. **本地 IndexedDB 不参与**：切到云端后本地数据原样躺着（切回来立刻可用），
- *    云端 store 一行都不读它、更不写它。唯一的交接点是 `cloud-migrate`（一次性上传）。
- * 2. **失败必须可读、不许静默回落**：`dataSource === 'cloud'` 而网络/授权失败时一律抛错，
- *    绝不偷偷返回本地旧数据（那会让用户以为在看云端）。
+ * 1. ★ **v3.18 起它是唯一的数据源**。本地数据源已整体废除，
+ *    IndexedDB 里只剩一份**只读**快照副本（无口令，见 `account-cache.ts`）。
+ * 2. **失败必须可读、不许静默回落**：网络/授权失败时一律抛错。
+ *    ★ 网络层抛的是 `OfflineError`（可识别），**读路径**据此才敢回落到只读副本；
+ *    而 401/403/5xx 一律不回落 —— 那会让用户看着旧数据以为"还能用"。
  * 3. **MV3 的 SW 会被回收**：不假设内存常驻，快照只做**短 TTL 缓存**（`list()` 5 秒），
  *    写操作后立即失效重拉 —— 时间线以服务端为准。
  *
@@ -37,33 +38,20 @@ export interface CloudAuth {
   avatar?: string;
 }
 
-export type DataSource = 'local' | 'cloud';
-
 const ACCOUNTS_TTL_MS = 5000;
 /** 站点表 / 盒表的 TTL 长一些：它们变得慢，且每次 list() 都要用 */
 const META_TTL_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 
-/* ==================== 数据源开关与云端会话（chrome.storage.local） ==================== */
+/* ==================== 云端会话（chrome.storage.local） ==================== */
 
 /**
- * 当前数据源。缺省 = 本地（老用户零迁移；`ql:dataSource` 不存在时行为与改动前完全一致）。
- * ⚠️ 这里**只兜 storage 读取异常**（此时云端会话同样读不到，任何云端调用都会以"未授权"报错）。
- *    **网络失败一律向上抛**，绝不回落到本地数据 —— 那会让用户以为在看云端。
+ * ★ v3.18：`DataSource` / `getDataSource` / `setDataSource` 已随本地数据源一起**删除**。
+ *
+ * 保留它们会留下一个"看起来还能切"的开关，而切过去的那个地方**已经不存在了**
+ * —— 也就是把"切回本地"变成一条会静默失效的路径。设计上只有一个数据源时，
+ * **代码里就不该留下第二个的名字**。
  */
-export async function getDataSource(): Promise<DataSource> {
-  try {
-    const stored = await chrome.storage.local.get(LOCAL_KEYS.dataSource);
-    return stored[LOCAL_KEYS.dataSource] === 'cloud' ? 'cloud' : 'local';
-  } catch {
-    return 'local';
-  }
-}
-
-export async function setDataSource(source: DataSource): Promise<void> {
-  await chrome.storage.local.set({ [LOCAL_KEYS.dataSource]: source });
-  invalidateCloudCache();
-}
 
 export async function getCloudAuth(): Promise<CloudAuth | null> {
   const stored = await chrome.storage.local.get(LOCAL_KEYS.cloudAuth);
@@ -198,7 +186,13 @@ async function requestJson<T>(
       signal: ctrl.signal,
     });
   } catch {
-    throw new Error('云端不可用：网络请求失败');
+    // ★ v3.18：网络层失败改抛 `OfflineError`（带可识别的标记），
+    //   而不是一句普通的 `Error`。理由：门面要靠它区分
+    //   「网络不通」（读路径可以回落到只读副本）与
+    //   「服务端 500 / 令牌过期」（**绝不能**回落 —— 回落会让用户
+    //   看着一份旧数据以为还能用，于是不去重新登录）。
+    //   在此之前二者都只是一句 `Error`，无法区分。
+    throw new OfflineError('读取云端');
   } finally {
     clearTimeout(timer);
   }
@@ -608,17 +602,18 @@ export const cloudStore = {
   },
 
   /**
-   * 云端口令入参是**本地 AES-GCM 密文**（门面签名不变），这里是唯一解不开就无法完成的方法：
-   * 解密在本机做（种子在 chrome.storage.local），解出来直接 PATCH 明文给服务端（服务端自己用 Fernet 存）。
-   * 换过设备的密文解不开 ⇒ 明确报错，而不是把密文当口令传上去。
+   * 改口令。
+   *
+   * ★ v3.18：**收明文的 `password`**，不再收"本地 AES-GCM 密文"。
+   *
+   *   旧形态是个历史包袱：门面签名当初按本地实现定的（收 `EncryptedCredentials`），
+   *   云端实现只好"先在本机解密再 PATCH 明文"，成了**没有意义的中转** ——
+   *   密文本来就是本机生成的，解它只是绕一圈。
+   *
+   *   本地凭据存储废除后，明文直接来自调用点（用户刚输入的那一次），
+   *   而**本机不再有任何持久化的口令形态**。签名随之改对。
    */
-  async updateCredentials(id: string, creds: EncryptedCredentials): Promise<void> {
-    let password: string;
-    try {
-      password = (await credentials.decryptCredentials(creds)).password;
-    } catch {
-      throw new Error('云端模式下无法使用本机密文口令：解密失败（换设备/清除过扩展数据？）请重新录入');
-    }
+  async updateCredentials(id: string, password: string): Promise<void> {
     await patchAccount(id, { password });
   },
 

@@ -1,9 +1,7 @@
 import type { RuntimeRequest, RuntimeResponse, Result, StatusContext, StatusList } from '../shared/messages';
 import type { BridgeUpPayload } from '../shared/types';
 import { CONTENT_MESSAGE, EXT_VERSION, LOCAL_KEYS } from '../shared/constants';
-import { accountRegistry } from './core/account-registry';
-import { credentials } from './core/credentials';
-import { navigation, registerNavigationHandlers } from './core/navigation';
+import { getPendingAutoLogin } from './core/auto-login-cache';
 import { siteAuth, probeScheme } from './core/site-auth';
 import {
   forensics,
@@ -19,11 +17,8 @@ import {
   CLOUD_DEFAULT_BASE_URL,
   exchangeDeviceCode,
   getCloudAuth,
-  getDataSource,
-  setDataSource,
 } from './core/cloud-store';
 import { cancelDeviceFlow, pollDeviceFlow, startDeviceFlow } from './core/cloud-device';
-import { migrateLocalToCloud } from './core/cloud-migrate';
 import { listFavorites, resolveFavoriteUrl } from './core/favorites';
 import {
   changeInstanceStatus,
@@ -31,7 +26,6 @@ import {
   loadInstanceStatuses,
   parseInstanceContext,
 } from './core/instance-status';
-import { sessionManager } from './core/session-manager';
 import { tabRules } from './core/tab-rules';
 
 function ok<T>(data: T): Result<T> {
@@ -52,71 +46,6 @@ async function tryRun<T>(fn: () => Promise<T>): Promise<Result<T>> {
 
 async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
   switch (req.kind) {
-    case 'session.list':
-      return { kind: 'session.list', result: await tryRun(() => sessionManager.list()) };
-    case 'session.update': {
-      const r = await tryRun(() => sessionManager.update(req.id, req.patch));
-      if (r.ok) {
-        accountRegistry.invalidate(req.id);
-      }
-      return { kind: 'session.update', result: r };
-    }
-    case 'session.delete': {
-      const r = await tryRun(() => sessionManager.delete(req.id));
-      accountRegistry.invalidate(req.id);
-      return { kind: 'session.delete', result: r };
-    }
-    case 'session.open': {
-      const r = await tryRun(async () => {
-        const session = await sessionManager.getOrThrow(req.id);
-        let creds: { username: string; password: string } | undefined;
-        if (session.credentials) {
-          creds = await credentials.decryptCredentials(session.credentials);
-        }
-        const { tabId } = await navigation.switchAccount(session, creds);
-        return { tabId };
-      });
-      return { kind: 'session.open', result: r };
-    }
-    case 'session.openOrCreate': {
-      const r = await tryRun(async () => {
-        const all = await sessionManager.list();
-        const byHost = all.filter((s) => s.siteHost === req.host);
-
-        let session: Awaited<ReturnType<typeof sessionManager.get>>;
-        if (req.accountAlias) {
-          // 显式指定账号：精确匹配该账号（标签标题）的既有会话，否则视为新账号
-          session = byHost.find((s) => (s.accountAlias || s.name) === req.accountAlias);
-        } else {
-          // 快捷打开（未指定账号）：复用该 host 最近更新的会话
-          session = byHost.sort((a, b) => b.updatedAt - a.updatedAt)[0];
-        }
-
-        if (!session) {
-          session = await sessionManager.create({
-            name: req.accountAlias || req.username || req.host,
-            accountAlias: req.accountAlias || req.username || req.host,
-            siteHost: req.host,
-          });
-        }
-
-        // 本次带入了明文账号密码：加密持久化，并作为本次自动登录凭证
-        let creds: { username: string; password: string } | undefined;
-        if (req.username && req.password) {
-          await sessionManager.updateCredentials(
-            session.id,
-            await credentials.encryptCredentials(req.username, req.password),
-          );
-          creds = { username: req.username, password: req.password };
-        } else if (session.credentials) {
-          creds = await credentials.decryptCredentials(session.credentials);
-        }
-
-        const { tabId, reused } = await navigation.switchAccount(session, creds);
-        return { tabId, sessionId: session.id, reused };
-      });
-      return { kind: 'session.openOrCreate', result: r };
-    }
     case 'site.grants.list':
       // v2.4：旧站点清单入口已移除；保留空实现避免旧调用报 unhandled
       return { kind: 'site.grants.list', result: { ok: true, data: [] } };
@@ -190,7 +119,8 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
           ...a,
           ...parallelSession.statusOf(a),
           // 云端账号的口令存在服务端（扩展侧只有 hasPassword），本地仍是 credentials 是否存在
-          password: Boolean(a.credentials) || a.hasPassword === true,
+          // ★ v3.18：`credentials` 已删 ⇒ `hasPassword` 是唯一依据
+          password: a.hasPassword === true,
         }));
       });
       return { kind: 'par.list', result: r };
@@ -262,18 +192,21 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
           format: 'quicklogin-backup' as const,
           version: 1 as const,
           exportedAt: new Date().toISOString(),
-          cryptoSeed: await credentials.getKeySeed(),
           sites: grants.map((g) => g.host),
           boxes: {
             default: (stored[LOCAL_KEYS.defaultBox] as string | undefined)?.trim() || undefined,
             remembered: (stored[LOCAL_KEYS.boxList] as string[] | undefined) ?? [],
             disabled: (stored[LOCAL_KEYS.disabledBoxes] as string[] | undefined) ?? [],
           },
+          // ★ v3.18：**不再导出任何凭据材料**。
+          //   旧格式带 `cryptoSeed` + 每账号的 AES-GCM `credentials`，而本地数据源
+          //   已废除 ⇒ 那份密文再也解不开。留着它只会让人以为"备份里有口令"。
+          //   现在导出的是**配置**（站点/标题/盒子/用户名），换机器时省去重配，但不含秘密。
           accounts: accounts.map((a) => ({
             siteHost: a.siteHost,
             tabName: a.tabName,
             box: a.box,
-            credentials: a.credentials ?? null,
+            username: a.username,
           })),
         };
       });
@@ -285,28 +218,25 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
         if (data?.format !== 'quicklogin-backup' || data.version !== 1) {
           throw new Error('不是有效的 QuickLogin 备份文件（format/version 不符）');
         }
-        if (!data.cryptoSeed || !Array.isArray(data.accounts)) {
-          throw new Error('备份缺少加密种子或账号清单');
+        // ★ v3.18：备份**只含元数据，不含任何凭据**。
+        //
+        //   旧格式带 `cryptoSeed` + 每账号的 AES-GCM `credentials`，导入时现场解密。
+        //   本地凭据存储废除后那条路不复存在（`credentials` 模块已删除）——
+        //   也就是说**旧备份文件里的口令部分再也解不开**，那正是它被删掉的原因：
+        //   密钥种子与密文同处一台机器，它防不住"扩展数据目录被整份拿走"。
+        //
+        //   ⇒ 现在导入只还原**配置**（站点 / 标题 / 盒子 / 用户名），
+        //     口令留给云端（服务端 Fernet 持有）。所以导入出来的账号是"无口令"的，
+        //     用户需要用云端账号库里的那份。
+        if (!Array.isArray(data.accounts)) {
+          throw new Error('备份缺少账号清单');
         }
-        const fileKey = await credentials.deriveKey(data.cryptoSeed);
         let created = 0;
         let skipped = 0;
         for (const item of data.accounts) {
-          if (!item?.siteHost || !item.credentials) {
-            skipped++;
-            continue;
-          }
-          let username: string;
-          let password: string;
-          try {
-            username = await credentials.decryptValue(item.credentials.encryptedUsername, item.credentials.iv, fileKey);
-            password = await credentials.decryptValue(
-              item.credentials.encryptedPassword,
-              item.credentials.ivPassword,
-              fileKey,
-            );
-          } catch {
-            skipped++; // 凭证无法用文件种子解开（文件损坏/被篡改）
+          const username = (item?.username ?? '').trim();
+          if (!item?.siteHost || !username) {
+            skipped++; // 没有用户名的行无法还原身份，如实跳过
             continue;
           }
           const all = await parallelStore.list();
@@ -318,7 +248,8 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
             siteHost: item.siteHost,
             tabName: item.tabName || username,
             username,
-            password,
+            // 空口令 = 这个账号在云端也没存口令（不是错误，如实反映）
+            password: '',
             box: item.box || undefined,
           });
           created++;
@@ -369,9 +300,10 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
     /* ---------------- 数据源：本地 ↔ 云端（v3.14） ---------------- */
     case 'cloud.state': {
       const r = await tryRun(async () => {
-        const [source, auth] = await Promise.all([getDataSource(), getCloudAuth()]);
+        // v3.18：`source` 概念已废除（只剩云端）。保留这个字段会让界面
+        // 以为还能切 —— 而现在切回去的地方根本不存在了。
+        const auth = await getCloudAuth();
         return {
-          source,
           authorized: Boolean(auth),
           email: auth?.email ?? '',
           displayName: auth?.displayName ?? '',
@@ -401,19 +333,6 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       const r = await tryRun(async () => ({ cancelled: cancelDeviceFlow() }));
       return { kind: 'cloud.device.cancel', result: r };
     }
-    case 'cloud.migrate': {
-      // 本地 → 云端：上传 + 两个核对点，任一不过就中止且**不改数据源**
-      const r = await tryRun(() => migrateLocalToCloud());
-      return { kind: 'cloud.migrate', result: r };
-    }
-    case 'cloud.source.set': {
-      // 云端 → 本地：只改数据源标记（本地 IndexedDB 一直在，无需任何搬运）
-      const r = await tryRun(async () => {
-        await setDataSource('local');
-        return { source: 'local' as const };
-      });
-      return { kind: 'cloud.source.set', result: r };
-    }
   }
 }
 
@@ -442,7 +361,7 @@ chrome.runtime.onMessage.addListener((req: unknown, sender, sendResponse) => {
       sendResponse(null);
       return true;
     }
-    void navigation.getPendingAutoLogin(tabId).then((creds) => sendResponse(creds));
+    void getPendingAutoLogin(tabId).then((creds) => sendResponse(creds));
     return true;
   }
 
@@ -754,7 +673,6 @@ async function logCommandBindings(): Promise<void> {
   }
 }
 
-registerNavigationHandlers();
 registerParallelHandlers();
 // 把本机实际生效的快捷键写进诊断包（v3.17.1）：区分「命令没绑」与「注入失败」
 void logCommandBindings();
@@ -766,10 +684,11 @@ chrome.webNavigation.onErrorOccurred.addListener((details) => {
     return; // 仅主 frame 的 scheme 类导航失败才触发协议翻转
   }
   void (async () => {
-    if (await handleOpenError(details.tabId, details.error)) {
-      return;
-    }
-    await navigation.handleSessionOpenError(details.tabId);
+    // ★ v3.18：这里原来还有一步 `navigation.handleSessionOpenError`（旧 Session 模型的
+    //   scheme 自学习）。旧模型已整体废除 —— 现在并行账号那条路自己处理翻转
+    //   （`handleOpenError` → `parallelStore.updateScheme`），而它会更新**云端**那条记录，
+    //   比原来只写本地 IndexedDB 更正确。
+    await handleOpenError(details.tabId, details.error);
   })();
 });
 

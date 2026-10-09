@@ -79,6 +79,9 @@
 | 15 | **脚本换目录后必须重验它的"仓库根"算法**。惯用法是 `path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')`——**`tmp/x.mjs` 里一层即仓库根，迁到 `tools/verify/` 后必须两层**，而**少一层不报错，只会指向错目录**（表现为去读 `tools/dist/manifest.json`）。判据：把表达式**真的求值**并断言等于仓库根，**并做对照实验**证明旧参数确实指错 |
 | 16 | **跑验证前必须先 `npm run build`**：所有脚本都要读 `dist/manifest.json` 的 `key` 反推扩展 ID（`sha256(Base64(key))` 前 32 位 → 映射 a–p）。没有 `dist/` 会直接抛错 |
 | 17 | **门禁必须先反证再相信**：写完判据先问**"拆掉什么它才会红？"**。实测教训：`check_deps.mjs` 的第一版在源码上跑正则 ⇒ 假阳性（把注释里的 `import` 当依赖）；为修它改成"先剥字符串" ⇒ 模块说明符被清空、正则的 `[^'"]+` 匹配不到 ⇒ **检查数从 27 掉到 0，门禁退化成"永远绿"**，而它打印的「检查 0 处」看起来完全正常。⇒ 它现在带一个自检：一处三方模块都没扫到就报 `DEP_SUSPECT` |
+| 18 | **删代码后必须与 HEAD 逐行对照**（不是"看 typecheck 绿不绿"）。<br>实测教训（v3.18，见 §6.3）：删"数据源按钮的 UI 状态块"时，一条跨多行正则**吞掉了紧邻的设备流代码**（三个监听器 + `openApprovalTab` + `deviceApprovalUrl`）。合成出的文件**语法合法**，`tsc` 与 `npm run build` **都通过**，唯一信号是"`deviceUserCodeOpen` 声明但未使用"——那读起来像"清理未用变量"，实际是**功能被删掉**。<br>判据：`git show HEAD:<file>` 与当前文件逐行比，列出**"HEAD 有、现在没有"**的行，**逐条确认它们在删除清单里**。<br>★ **typecheck 只说明"剩下的代码自洽"，不说明"该留的还在"。** |
+| 19 | **跨多行正则删代码时，锚点必须唯一且紧贴目标**。同上教训：那条正则用 `(?:\s*[^\n]*\n)*?` 这样的**开放量词**往后吃，把不相邻的块也吞了。<br>⇒ 优先用**精确的多行字面量**（整块原样写出来）而不是正则。 |
+| 20 | **删 DOM 标记后必须核对 `HTML id ↔ TS getElementById` 一致性**。TS 里 `getElementById('x')` 拿到 `null` 的类型仍是 `HTMLElement`（因为断言了 `as`）⇒ **编译期不报错**，运行时点一下就崩。<br>判据：`id="..."` 的集合与 `getElementById('...')` 的集合做差集，**`TS − HTML` 必须为空**。本轮的检查脚本当场抓到一处（`help-reset-confirm-btn`）。 |
 
 ---
 
@@ -185,88 +188,72 @@ npm run verify -- --only jarhygiene
 
 ---
 
-## 6. 当前进行中的改造（写在这里，因为它会改变多条规则的前提）
+## 6. 本地数据源已废除（v3.18，2026-10-09 完成）
 
-**用户 2026-10-09 决定：彻底废除扩展端的本地账号保存，强制登录云端账号。**
+**用户决定：彻底废除扩展端的本地账号保存，强制登录云端账号。**
+本节保留**侦察结论与踩过的坑** —— 下次改这块周边时仍会需要它们。
 
-### 6.1 侦察结论（2026-10-09 实测，动手前必读，不必再摸一遍）
+### 6.1 结果
 
-| 事实 | 数字 / 位置 |
+| 维度 | 结果 |
 |---|---|
-| `dataSource` 相关命中 | **36 处**：`ui/parallel/parallel.ts` **29**、`cloud-store.ts` 10、`service-worker.ts` 6、`messages.ts` 3、`constants.ts` 3、`parallel-store.ts` 2、`cloud-migrate.ts` 2 |
-| 本地实现 | `parallel-store.ts` 的 `localStore`（10 个方法，走 IndexedDB） |
-| 本地凭据加密 | `background/core/credentials.ts`（**95 行**）—— AES-GCM，**密钥种子就在 `chrome.storage.local` 的 `sb:encryptionSeed` 里** |
-| 门面 | `parallelStore` 按 `dataSource` 分发到 `localStore` / `cloudStore` |
-| ★ **`db.accounts` 的调用点** | **只有** `localStore` 与 `cloud-migrate` ⇒ 云端化后**没有任何调用点**，可整体改造成只读缓存 |
-| ★ **`db.sessions` 的调用点** | **只有** `session-manager.ts`（它自己 12 处） |
-| 要删的 UI | `parallel.ts` 的 `switchDataSource`（~L1741）/ `sourceLocalBtn` / `sourceCloudBtn` / `ql:skipSwitchConfirm` 确认弹窗 |
+| 数据源 | **只剩云端**。`dataSource` / `getDataSource` / `setDataSource` / `DataSource` **全仓零残留** |
+| 删除的文件 | `core/credentials.ts`（本地 AES-GCM 凭据）、`core/cloud-migrate.ts`（本地→云端合并）、`core/navigation.ts` + `core/session-manager.ts` + `core/account-registry.ts`（**旧 Session 模型三者**） |
+| 新增的文件 | `core/account-cache.ts`（只读快照缓存）、`core/offline.ts`（`OfflineError`）、`core/auto-login-cache.ts`（待登录凭据的临时缓存，从 `navigation.ts` 摘出） |
+| 消息 | 删 `session.*`（5 个）、`cloud.migrate`、`cloud.source.set`；`CloudState` 去掉 `source` |
+| 类型 | 删 `Session`、`EncryptedCredentials`、`ParallelAccount.credentials`、`updateCredentials`（**实测无调用点**） |
+| 规模 | 12 个文件，**−796 / +164 行** |
 
-### 6.2 ★★ 一条必须先解决的发现：`session.*` **不是死代码**，它与被废除的本地模型交叉
+**保留**：云端会话、设备流（RFC 8628）、以及**离线时的只读列表缓存**
+（不含口令；可看、可开页签；**不可新增/编辑，填表失效**）。
 
-第一眼它像遗留物：`session.*` 的 5 个消息 + `sessionManager` + `db.sessions`，
-而 **UI 一处都不发这些消息**（实测 UI 只发 `par.*`：`par.list` 7、`par.open` 3、`par.delete` 3、
-`par.create` 2、`par.update` 1、`par.moveBox` 1、`par.renameBox` 1、`par.deleteBox` 1…）。
+### 6.2 ★ `session.*` 曾经"看起来是死代码" —— 这个排查值得复述
 
-**但它不是死代码**：
+第一眼它像遗留物：5 个消息 + `sessionManager` + `db.sessions`，
+而 **UI 一处都不发**（实测 UI 只发 `par.*`）。
+但 `navigation.switchAccount(session, …)` 收的是 `Session`，`accountRegistry`
+用 `sessionManager.get(sessionId)` 取**标签页标题** ⇒ 两个模型**交叉**。
 
-- `navigation.switchAccount(session, creds)` 收的是 **`Session`**（不是 `ParallelAccount`）；
-- `account-registry.ts` 用 `sessionManager.get(sessionId)` 取**标签页标题**；
-- `parallel-session.ts` 也调 `registerNavigationHandlers`。
+**实测结论（与第一眼相反）**：`parallel-session.ts` **完全不 import**
+`navigation` / `session-manager` / `accountRegistry` —— 它有自己的一套
+（`applyTitle` / `SESSION_KEYS.parTabBindings` / `resolveAccountPlaintext`）。
+⇒ 旧模型只服务那 5 个死消息，**可以整体删除**。
 
-⇒ **两个模型在 `navigation` / `account-registry` 处交叉。**
+★ 教训：**"看起来像死代码"与"是死代码"必须分开验证。**
+判据是"**谁真的 import 它**"，不是"谁看起来用得上它"。
 
-★ 所以"删掉本地数据源"之前必须回答一个问题：
-**`sessionId` 与 `accountId` 是不是同一个 id？**
-判定入口：`parallel-session.ts` 调 `navigation` 时传的是哪个 id ——
-它传 `session.id`，而它的 `session` 来自 `parallelStore.get(accountId)`
-（即云端 `ParallelAccount.id`）。**先把这个关系定下来，再动手** ——
-它一次性牵动 `navigation` / `account-registry` / `session-manager` / `types.ts` 四处，
-改一半必然返工。
+### 6.3 ★★ 本轮最贵的一次教训：一条正则吞掉了相邻的功能块（→ 规则 18）
 
-### 6.3 已完成但**未提交**（在 `git stash` 里，见 6.5）
+删"数据源按钮的 UI 状态块"时，我用了一条跨多行正则，它**吞掉了紧邻的设备流代码**
+（`deviceCancelBtn` / `deviceRetryBtn` / `deviceUserCodeOpen` 的监听，
+以及 `openApprovalTab` 函数与 `deviceApprovalUrl` 变量）。
 
-- 新增 `background/core/account-cache.ts` —— 只读快照缓存，
-  `CachedAccount = Omit<ParallelAccount,'credentials'>`（**类型层面就保证不含口令**）
-- 新增 `background/core/offline.ts` —— `OfflineError` + `isOfflineError`。
-  ★ 独立文件是**刻意的**：`cloud-store`（抛它）与 `parallel-store`（判它）互相 import，
-  而循环依赖在 `iife` 打包下不报错，只在运行时给出 `undefined` ⇒
-  `instanceof` 永远 false ⇒ **离线回落静默失效**。所以判定用标记字段而不是 `instanceof`。
-- `storage/db.ts` —— IDB 升到 v3，`accounts` 仓**先删再建**（清掉旧的凭据密文），
-  新增 `replaceAll`（清空 + 写入在**同一个事务**里，避免崩在中间留下空缓存）
-- `parallel-store.ts` —— `localStore` 与分发逻辑已删，只剩云端 + **有条件**的只读回落
-  （只有 `OfflineError` 才回落；401/403/5xx **绝不回落** ——
-  那会让用户看着旧数据以为"还能用"而不去重新登录）
-- 已删 `credentials.ts`、`cloud-migrate.ts`
-- service-worker / cloud-store / constants 里摘掉了 `dataSource` / `cloud.migrate` / `cloud.source.set`
+**为什么危险**：
 
-### 6.4 剩余（撤回时是 **15 个 `tsc` 错误**，全部已定位）
+- 合成出的文件**语法完全合法**，`tsc` 与 `npm run build` **都通过**；
+- 唯一的信号是 **"`deviceUserCodeOpen` 声明但未使用"** ——
+  那读起来像"清理未用变量"，实际是**功能被删掉了**。
 
-| 位置 | 要做什么 |
-|---|---|
-| `cloud-store.ts:612` | 删掉"解密本机密文口令"那条分支（本地没了，这条路不存在） |
-| `service-worker.ts` 5 处 | 摘 `session.*` 那 5 个 case —— **先按 6.2 定下 id 关系** |
-| `service-worker.ts` ~261-305 | **导出/导入**：现在的备份带 `cryptoSeed` + 账号 `credentials`，全依赖本地加密 ⇒ 要么降级成"只导元数据（站点/标题/盒子/用户名）"，要么整体删掉。**这是产品决策，需要用户确认** |
-| `ui/parallel/parallel.ts` ~29 处 | 删数据源切换按钮与 `switchDataSource`（含"不再提示"标志） |
-| `messages.ts` 3 处 | 删 `cloud.migrate` / `cloud.source.set` 的消息类型；`cloud.state` 去掉 `source` |
-| `types.ts` | `Session` 与 `EncryptedCredentials` 的去留（随 6.2 的结论） |
+**判据（已写进规则 18）**：删代码后必须**与 HEAD 逐行对照**，列出
+"HEAD 有、现在没有"的行，并**逐条确认它们在删除清单里**。
+**typecheck 绿不是判据** —— 它只说明"剩下的代码自洽"。
 
-### 6.5 处置：半成品已撤回，绿色基线优先
+### 6.4 导出/导入已降级为"只含元数据"
 
-上述改动**已 `git stash`**（`stash@{0}`，message 前缀 `b7-wip`），**没有提交**。
+旧备份带 `cryptoSeed` + 每账号 AES-GCM `credentials`，导入时现场解密。
+本地凭据存储废除后**那份密文再也解不开**（我们刻意让它如此）。
+⇒ 新格式只带**配置**（站点 / 标题 / 盒子 / 用户名），导入时口令为空。
+**旧备份文件的口令部分不可恢复** —— 这是设计取舍，已写在类型注释里。
 
-理由是本仓**没有 CI**，而"工作区里躺着 15 个编译错误"会让**下一个人（或下一个会话）
-无法判断哪些错是他自己引入的** —— 这是规则 17 的同一推理：
-**一个一直红着的基线，等于没有基线。**
+### 6.5 已知未做（下一步）
 
-⇒ 继续这块时：
-
-```powershell
-git stash list          # 看有没有 b7-wip
-git stash pop           # 有就接着做
-```
-
-★ **不要**把 6.3 的成果和 6.4 的收尾拆成两次、中间隔很久 ——
-那会让 `stash` 长期存在，而 stash 是最容易被忘掉的地方。
+- **文档同步**：`docs/CODEBASE_OVERVIEW.md` / `PROJECT-STATUS.md` /
+  `packages/extension/docs/DESIGN.md` 仍在描述 `credentials.ts` 与数据源切换。
+  ★ 按规则 12：**改权威源**（`CODEBASE_OVERVIEW.md`），其余地方加一行指针。
+- **UI 实机验证**：`src/ui/**` 无自动化覆盖 ⇒ 必须在 `chrome://extensions`
+  **重新加载**后手工点一遍（登录 / 列表 / 开页签 / 盒子 / 设备流 / 离线降级）。
+- **离线只读缓存的界面层**：`account-cache.ts` 与 `parallelStore` 的回落已就位，
+  但"离线时界面上明确显示这是副本"那一层还没做。
 
 ---
 

@@ -1,14 +1,9 @@
-import { db } from '../../storage/db';
 import { SESSION_COLORS } from '../../shared/constants';
-import { credentials } from './credentials';
-import { cloudStore, fetchPlaintextPassword, getDataSource } from './cloud-store';
-import type { EncryptedCredentials, ParallelAccount } from '../../shared/types';
+import { cloudStore, fetchPlaintextPassword } from './cloud-store';
+import { cacheBelongsTo, loadSnapshot, saveSnapshot } from './account-cache';
+import type { ParallelAccount } from '../../shared/types';
 
-function newId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/** 新增账号的入参（本地/云端两套实现共用同一形状） */
+/** 新增账号的入参 */
 export interface ParallelAccountInput {
   siteHost: string;
   tabName: string;
@@ -19,9 +14,11 @@ export interface ParallelAccountInput {
 }
 
 /**
- * 数据层门面契约：**这 10 个方法就是全部数据访问面**（调用点只有 parallel-session /
- * service-worker）。本地与云端两套实现都必须逐方法同形 ——
- * 改这里的签名 = 改契约，调用点会当场编译不过（`cloudStoreContract` 是编译期同形证明）。
+ * 数据层门面契约：**这 10 个方法就是全部数据访问面**
+ * （调用点只有 `parallel-session` / `service-worker`）。
+ *
+ * ★ v3.18（2026-10-09）：**本地数据源已整体废除**，这里只剩云端一种实现。
+ *   签名一个都没改 —— 调用点一行不用动。
  */
 export interface ParallelStore {
   list(): Promise<ParallelAccount[]>;
@@ -32,203 +29,186 @@ export interface ParallelStore {
   updateBox(id: string, box: string): Promise<ParallelAccount>;
   renameBox(from: string, to: string): Promise<number>;
   clearBox(name: string): Promise<number>;
-  updateCredentials(id: string, creds: EncryptedCredentials): Promise<void>;
   delete(id: string): Promise<void>;
 }
 
 /**
- * 【本地实现 —— v3.14 数据源切换时**一字未动**】
- * 并行账号持久化：页签名 / 账号名 / 加密密码 落 IndexedDB。
- * 切到云端后这里不再被调用，但 IndexedDB 里的数据原样躺着，切回本地立刻可用。
+ * 离线错误。
+ *
+ * ★ 单独一个类型是为了让**界面能给出准确的提示**：
+ *   "离线，这里是上次的副本，改不了" 与 "服务端 500" 是两件完全不同的事，
+ *   而它们都长着同一张 `Error` 的脸。调用点用 `isOfflineError(e)` 判断。
  */
-const localStore: ParallelStore = {
-  list(): Promise<ParallelAccount[]> {
-    return db.accounts.list();
-  },
+export class OfflineError extends Error {
+  readonly code = 'offline';
+  readonly isOfflineError = true;
+  constructor(action: string) {
+    super(`离线：${action}需要连接云端。当前显示的是上次同步的只读副本。`);
+    this.name = 'OfflineError';
+  }
+}
 
-  async get(id: string): Promise<ParallelAccount> {
-    const account = await db.accounts.get(id);
-    if (!account) {
-      throw new Error(`账号不存在: ${id}`);
-    }
-    return account;
-  },
-
-  async create(input: {
-    siteHost: string;
-    tabName: string;
-    username: string;
-    password: string;
-    box?: string;
-    scheme?: 'http' | 'https';
-  }): Promise<ParallelAccount> {
-    const now = Date.now();
-    const existing = await db.accounts.list();
-    const box = input.box?.trim();
-    const account: ParallelAccount = {
-      id: newId(),
-      siteHost: input.siteHost,
-      ...(input.scheme ? { scheme: input.scheme } : {}),
-      tabName: input.tabName || input.username,
-      username: input.username,
-      color: SESSION_COLORS[existing.length % SESSION_COLORS.length],
-      ...(box ? { box } : {}),
-      createdAt: now,
-      updatedAt: now,
-      credentials: await credentials.encryptCredentials(input.username, input.password),
-    };
-    await db.accounts.put(account);
-    return account;
-  },
-
-  /** 打开失败自学习（v3.10.9）：scheme 翻转写回账号档案 */
-  async updateScheme(id: string, scheme: 'http' | 'https'): Promise<ParallelAccount> {
-    const account = await this.get(id);
-    const next: ParallelAccount = { ...account, scheme, updatedAt: Date.now() };
-    await db.accounts.put(next);
-    return next;
-  },
-
-  async updateTabName(id: string, tabName: string): Promise<ParallelAccount> {
-    const account = await this.get(id);
-    const next: ParallelAccount = { ...account, tabName, updatedAt: Date.now() };
-    await db.accounts.put(next);
-    return next;
-  },
-
-  /** 移入盒子（空串/空白 = 回到「默认盒子」，即移除 box 字段） */
-  async updateBox(id: string, box: string): Promise<ParallelAccount> {
-    const account = await this.get(id);
-    const name = box.trim();
-    const next: ParallelAccount = { ...account, updatedAt: Date.now() };
-    if (name) {
-      next.box = name;
-    } else {
-      delete next.box;
-    }
-    await db.accounts.put(next);
-    return next;
-  },
-
-  /** 盒子重命名：盒内账号随迁；to 为空 = 并入「默认盒子」。返回随迁账号数 */
-  async renameBox(from: string, to: string): Promise<number> {
-    const fromName = from.trim();
-    const toName = to.trim();
-    if (!fromName) {
-      throw new Error('源盒子名为空');
-    }
-    if (fromName === toName) {
-      return 0;
-    }
-    const accounts = await db.accounts.list();
-    let moved = 0;
-    for (const account of accounts) {
-      if ((account.box ?? '').trim() !== fromName) {
-        continue;
-      }
-      const next: ParallelAccount = { ...account, updatedAt: Date.now() };
-      if (toName) {
-        next.box = toName;
-      } else {
-        delete next.box;
-      }
-      await db.accounts.put(next);
-      moved++;
-    }
-    return moved;
-  },
-
-  /** 删除盒子：盒内账号全部回到「默认盒子」。返回随迁账号数 */
-  async clearBox(name: string): Promise<number> {
-    return this.renameBox(name, '');
-  },
-
-  async updateCredentials(id: string, creds: EncryptedCredentials): Promise<void> {
-    const account = await this.get(id);
-    await db.accounts.put({ ...account, credentials: creds, updatedAt: Date.now() });
-  },
-
-  async delete(id: string): Promise<void> {
-    await db.accounts.delete(id);
-  },
-};
-
-/* ==================== 数据源分发（v3.14：本地 ↔ 云端） ==================== */
-
-async function isCloud(): Promise<boolean> {
-  return (await getDataSource()) === 'cloud';
+export function isOfflineError(e: unknown): e is OfflineError {
+  return Boolean(
+    e && typeof e === 'object' && (e as { isOfflineError?: boolean }).isOfflineError === true,
+  );
 }
 
 /**
- * 数据层门面：按当前数据源分发。
- * - **签名与语义与改动前完全一致**，10 个方法一个不多一个不少；
- *   调用点（parallel-session / service-worker）一行都不用改。
- * - 云端出错时**原样抛出**（"云端不可用：网络请求失败"这类可读错误直达界面），
- *   绝不静默回落本地 —— 那会让用户以为在看云端数据，实际却是本地旧数据。
+ * 读路径：**先云端，失败才回落到只读缓存**。
+ *
+ * ★ 回落是有条件的，这个条件很重要：只有**网络/超时类**失败才回落。
+ *   如果是 401（令牌过期）或 403，回落会让用户看着一份旧数据、
+ *   以为"还能用"，从而不去重新登录 —— 那比直接报错更糟。
+ *   ⇒ 所以只有 `OfflineError` 才回落，认证类错误原样抛。
+ */
+async function listWithFallback(): Promise<ParallelAccount[]> {
+  try {
+    const rows = await cloudStore.list();
+    // 成功即**刷新缓存**。这是缓存唯一的写入点。
+    void persistSnapshot(rows).catch(() => undefined);
+    return rows;
+  } catch (e) {
+    if (!isOfflineError(e)) {
+      throw e;
+    }
+    const snap = await loadSnapshot();
+    if (!snap) {
+      throw e; // 没有缓存 ⇒ 离线就是没法用，如实报错
+    }
+    return snap.accounts as ParallelAccount[];
+  }
+}
+
+async function persistSnapshot(rows: ParallelAccount[]): Promise<void> {
+  // 缓存归属校验需要当前登录邮箱；拿不到就按"本机上次登录"处理（见 account-cache 的注释）
+  try {
+    const { getCloudAuth } = await import('./cloud-store');
+    const auth = await getCloudAuth();
+    const snap = await loadSnapshot();
+    if (snap && !cacheBelongsTo(snap.meta, auth?.email)) {
+      // 换了账号 ⇒ 旧缓存必须先丢，不能把上一个人的列表写成本次快照
+      await saveSnapshot(rows, { revision: -1, email: auth?.email });
+      return;
+    }
+    await saveSnapshot(rows, { revision: -1, email: auth?.email });
+  } catch {
+    /* 缓存写失败不影响主流程 */
+  }
+}
+
+/**
+ * 数据层门面：**只有一个实现（云端）**，外加一条只读离线回落。
+ *
+ * 写操作（create / update* / renameBox / clearBox / delete / updateCredentials）
+ * **一律不回落**：离线时抛出 `OfflineError`，让界面明说"改不了"。
+ * 本地假写会让用户以为改成功了，而恢复在线后那份改动**根本不存在** ——
+ * 这是被废除的那套方案最坏的一种失败形态。
  */
 export const parallelStore: ParallelStore = {
   async list(): Promise<ParallelAccount[]> {
-    return (await isCloud()) ? cloudStore.list() : localStore.list();
+    return listWithFallback();
   },
 
   async get(id: string): Promise<ParallelAccount> {
-    return (await isCloud()) ? cloudStore.get(id) : localStore.get(id);
+    try {
+      return await cloudStore.get(id);
+    } catch (e) {
+      if (!isOfflineError(e)) {
+        throw e;
+      }
+      const snap = await loadSnapshot();
+      const hit = snap?.accounts.find((a) => a.id === id);
+      if (!hit) {
+        throw e;
+      }
+      return hit as ParallelAccount;
+    }
   },
 
-  async create(input: ParallelAccountInput): Promise<ParallelAccount> {
-    return (await isCloud()) ? cloudStore.create(input) : localStore.create(input);
+  create(input: ParallelAccountInput): Promise<ParallelAccount> {
+    return cloudStore.create(input);
   },
 
-  async updateScheme(id: string, scheme: 'http' | 'https'): Promise<ParallelAccount> {
-    return (await isCloud()) ? cloudStore.updateScheme(id, scheme) : localStore.updateScheme(id, scheme);
+  updateScheme(id: string, scheme: 'http' | 'https'): Promise<ParallelAccount> {
+    return cloudStore.updateScheme(id, scheme);
   },
 
-  async updateTabName(id: string, tabName: string): Promise<ParallelAccount> {
-    return (await isCloud()) ? cloudStore.updateTabName(id, tabName) : localStore.updateTabName(id, tabName);
+  updateTabName(id: string, tabName: string): Promise<ParallelAccount> {
+    return cloudStore.updateTabName(id, tabName);
   },
 
-  async updateBox(id: string, box: string): Promise<ParallelAccount> {
-    return (await isCloud()) ? cloudStore.updateBox(id, box) : localStore.updateBox(id, box);
+  updateBox(id: string, box: string): Promise<ParallelAccount> {
+    return cloudStore.updateBox(id, box);
   },
 
-  async renameBox(from: string, to: string): Promise<number> {
-    return (await isCloud()) ? cloudStore.renameBox(from, to) : localStore.renameBox(from, to);
+  renameBox(from: string, to: string): Promise<number> {
+    return cloudStore.renameBox(from, to);
   },
 
-  async clearBox(name: string): Promise<number> {
-    return (await isCloud()) ? cloudStore.clearBox(name) : localStore.clearBox(name);
+  clearBox(name: string): Promise<number> {
+    return cloudStore.clearBox(name);
   },
 
-  async updateCredentials(id: string, creds: EncryptedCredentials): Promise<void> {
-    return (await isCloud()) ? cloudStore.updateCredentials(id, creds) : localStore.updateCredentials(id, creds);
-  },
 
-  async delete(id: string): Promise<void> {
-    return (await isCloud()) ? cloudStore.delete(id) : localStore.delete(id);
+  delete(id: string): Promise<void> {
+    return cloudStore.delete(id);
   },
 };
 
 /**
- * 自动填表要的**明文口令**（门面之外的附加能力，不改上面 10 个方法）：
- * - 本地：解密账号里的 AES-GCM `credentials`（与改动前同一条路）；
- * - 云端：`credentials` 恒为空（服务端用 Fernet 存，扩展拿不到密文），
- *   当场 `GET /api/accounts/{id}/password` 取明文 —— 只在"打开账号"这一刻取一次。
+ * 自动填表要的**明文口令**。
  *
- * ★ 判别只看**账号自身的形状**（`credentials` 还是 `hasPassword`），不看数据源标记：
- *   云端账号的 `hasPassword` 只有云端 store 会写，而依赖标记会在"切源途中/标记过期"
- *   时静默返回 null（表现是"自动填表突然不填了"，最难查的一类）。
+ * v3.18 之后只剩一条路：**当场** `GET /api/accounts/{id}/password` 取一次。
+ * 旧方案里那条"解密本地 AES-GCM `credentials`"的路已随本地数据源一起废除 ——
+ * 也就是说**口令在本机不再有任何持久化形态**。
+ *
+ * ★ 判别只看账号自身的 `hasPassword`（服务端快照里带回来的字段），
+ *   不看任何"数据源标记" —— 依赖标记会在标记过期时静默返回 null，
+ *   表现是"自动填表突然不填了"，是最难查的一类。
  *
  * 取不到返回 `null`（调用方按"无凭证"处理，绝不让它中断 open()）。
  */
 export async function resolveAccountPlaintext(
   account: ParallelAccount,
 ): Promise<{ username: string; password: string } | null> {
-  if (account.credentials) {
-    return credentials.decryptCredentials(account.credentials);
+  if (!account.hasPassword) {
+    return null;
   }
-  if (account.hasPassword) {
+  try {
     const password = await fetchPlaintextPassword(account.id);
     return password ? { username: account.username, password } : null;
+  } catch {
+    // ★ 离线 / 取不到一律返回 null：**填表失效是设计的一部分**，
+    //   不是错误路径。绝不能因为取不到口令就让"打开账号"整个失败。
+    return null;
   }
-  return null;
 }
+
+/** 供界面用：这份列表是不是离线副本，以及它有多旧。 */
+export interface OfflineStatus {
+  offline: boolean;
+  savedAt?: number;
+  ageMs?: number;
+  revision?: number;
+}
+
+export async function getOfflineStatus(): Promise<OfflineStatus> {
+  const snap = await loadSnapshot();
+  if (!snap) {
+    return { offline: false };
+  }
+  const ageMs = Date.now() - snap.meta.savedAt;
+  // 「旧」的阈值取 10 分钟：短于它的副本与在线的差别对用户不可感
+  return ageMs > 10 * 60 * 1000
+    ? { offline: true, savedAt: snap.meta.savedAt, ageMs, revision: snap.meta.revision }
+    : { offline: false };
+}
+
+/** 测试与"退出登录"用：把只读副本也清掉（换账号时**必须**清，见 account-cache）。 */
+export async function dropCachedSnapshot(): Promise<void> {
+  const { clearSnapshot } = await import('./account-cache');
+  await clearSnapshot();
+}
+
+export { SESSION_COLORS };

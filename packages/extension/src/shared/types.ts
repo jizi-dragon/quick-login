@@ -1,34 +1,4 @@
-export interface Session {
-  id: string;
-  /** 会话展示名 */
-  name: string;
-  /** 账号名/用户名 —— 用作标签页标题 */
-  accountAlias: string;
-  color: string;
-  /** 绑定的站点 host，例如 example.com */
-  siteHost: string;
-  /** 站点协议（v3.10.9）：缺省 = https（兼容存量）；打开 URL 与 Cookie 查询跟随 */
-  scheme?: 'http' | 'https';
-  /** 加密存储的账号密码（可选） */
-  credentials?: EncryptedCredentials;
-  createdAt: number;
-  updatedAt: number;
-}
-
 /** 加密后的账号密码 */
-export interface EncryptedCredentials {
-  /** 加密后的用户名（Base64） */
-  encryptedUsername: string;
-  /** 加密后的密码（Base64） */
-  encryptedPassword: string;
-  /** 用户名加密使用的 IV（Base64） */
-  iv: string;
-  /** 密码加密使用的 IV（Base64） */
-  ivPassword: string;
-  /** 加密时间戳 */
-  encryptedAt: number;
-}
-
 export interface SiteGrant {
   host: string;
   grantedAt: number;
@@ -49,8 +19,6 @@ export interface ParallelAccount {
   tabName: string;
   /** 账号名（登录用户名） */
   username: string;
-  /** 加密存储的密码等凭证 */
-  credentials?: EncryptedCredentials;
   /**
    * 服务端是否已存口令（v3.14 云端数据源）。
    * 云端模式下口令不落扩展（服务端 Fernet 密文），`credentials` 恒为空，

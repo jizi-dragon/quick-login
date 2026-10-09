@@ -1,14 +1,9 @@
-import type { ParallelAccount, ParallelAccountStatus, Session, SiteGrant } from './types';
+import type { ParallelAccount, ParallelAccountStatus, SiteGrant } from './types';
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string };
 
 /** UI / content ⇄ background 的请求协议 */
 export type RuntimeRequest =
-  | { kind: 'session.list' }
-  | { kind: 'session.update'; id: string; patch: Partial<Pick<Session, 'name' | 'accountAlias' | 'color'>> }
-  | { kind: 'session.delete'; id: string }
-  | { kind: 'session.open'; id: string; host: string }
-  | { kind: 'session.openOrCreate'; host: string; username?: string; password?: string; accountAlias?: string }
   | { kind: 'site.grants.list' }
   | { kind: 'site.grant.add'; host: string }
   | { kind: 'par.list' }
@@ -32,9 +27,6 @@ export type RuntimeRequest =
    * 端点还在，但**新流程一律走 `cloud.device.*`**（RFC 8628 设备流，见 v3.14.1）。
    */
   | { kind: 'cloud.auth'; code: string }
-  | { kind: 'cloud.migrate' }
-  /** 只允许切回本地：切到云端必须走 cloud.migrate（带上传核对），不给"空翻"的后门 */
-  | { kind: 'cloud.source.set'; source: 'local' }
   /* ---- 云端设备授权（RFC 8628 设备流，v3.14.1）---- */
   /** 起一次设备授权（无凭据）：服务端返回批准页 URL；`deviceCode` 留在 SW 内存里，不回传 */
   | { kind: 'cloud.device.start'; clientName?: string }
@@ -62,13 +54,19 @@ export type RuntimeRequest =
   /** 在新标签页打开某个书签；`baseOrigin` 为空时按当前活动页签的 origin 兜底 */
   | { kind: 'favorites.open'; path: string; baseOrigin?: string };
 
-/** 备份文件结构（v1）：种子 + 加密凭证 + 授权站 + 盒子配置（见 tmp 导出脚本） */
+/**
+ * 备份文件结构（v1）。
+ *
+ * ★ v3.18：**不再包含任何凭据材料**。
+ *   旧版带 `cryptoSeed` + 每账号的 AES-GCM `credentials`，而本地凭据存储已废除
+ *   （密钥种子与密文同处一台机器，防不住"扩展数据目录被整份拿走"）⇒
+ *   那份密文既解不开、也不该再产生。
+ *   现在导出的是**配置**（站点 / 标题 / 盒子 / 用户名），换机器时省去重配，但不含秘密。
+ */
 export interface DataBackup {
   format: 'quicklogin-backup';
   version: 1;
   exportedAt: string;
-  /** 源设备加密种子（导入端用它解密凭证，再以本地种子重加密入库） */
-  cryptoSeed: string;
   /** 授权站点 host 清单 */
   sites: string[];
   boxes: { default?: string; remembered?: string[]; disabled?: string[] };
@@ -76,22 +74,19 @@ export interface DataBackup {
     siteHost: string;
     tabName: string;
     box?: string;
-    credentials: {
-      encryptedUsername: string;
-      encryptedPassword: string;
-      iv: string;
-      ivPassword: string;
-      encryptedAt?: number;
-    } | null;
+    /**
+     * ★ v3.18：**只导元数据，不含任何凭据材料**。
+     *
+     * 旧格式这里是 `credentials: { encryptedUsername, encryptedPassword, iv, ivPassword } | null`
+     * 加上顶层的 `cryptoSeed`，导入时现场解密。而本地凭据存储已废除
+     * （密钥种子与密文同处一台机器，防不住"扩展数据目录被整份拿走"）⇒
+     * 那份密文既解不开、也不该再产生。导出配置，口令留云端。
+     */
+    username?: string;
   }>;
 }
 
 export type RuntimeResponse =
-  | { kind: 'session.list'; result: Result<Session[]> }
-  | { kind: 'session.update'; result: Result<Session> }
-  | { kind: 'session.delete'; result: Result<void> }
-  | { kind: 'session.open'; result: Result<{ tabId: number }> }
-  | { kind: 'session.openOrCreate'; result: Result<{ tabId: number; sessionId: string; reused: boolean }> }
   | { kind: 'site.grants.list'; result: Result<SiteGrant[]> }
   | { kind: 'site.grant.add'; result: Result<SiteGrant> }
   | { kind: 'par.list'; result: Result<Array<ParallelAccount & ParallelAccountStatus & { password: boolean }>> }
@@ -111,8 +106,6 @@ export type RuntimeResponse =
   /* ---- 数据源（本地 ↔ 云端，v3.14）---- */
   | { kind: 'cloud.state'; result: Result<CloudState> }
   | { kind: 'cloud.auth'; result: Result<{ email: string }> }
-  | { kind: 'cloud.migrate'; result: Result<CloudMergeReport> }
-  | { kind: 'cloud.source.set'; result: Result<{ source: 'local' | 'cloud' }> }
   /* ---- 云端设备授权（RFC 8628 设备流，v3.14.1）---- */
   | { kind: 'cloud.device.start'; result: Result<CloudDeviceStart> }
   | { kind: 'cloud.device.poll'; result: Result<CloudDevicePoll> }
@@ -152,7 +145,6 @@ export interface StatusList {
 
 /** 数据源现状（管理页选择器据此渲染；不回传 token 本身） */
 export interface CloudState {
-  source: 'local' | 'cloud';
   /** 是否已持有云端会话（缺省 false = 需要授权码登录） */
   authorized: boolean;
   /** 已登录账号邮箱（未知时为空串） */
