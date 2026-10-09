@@ -46,25 +46,36 @@ function check(label, ok, detail = '') {
 
 const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ');
 
-/** 从一个 HTML 出发，按 `<link rel=stylesheet>` + 递归 `@import` 收集 CSS 链 */
+/** 从一个 HTML 出发，按 `<link rel=stylesheet>` + 递归 `@import` 收集 CSS 链。
+ *
+ *  ★ 返回的 `seen` 已经**去重**，所以"环"不会让它死循环 —— 但那正是问题：
+ *    **环会被静默吞掉**（看起来"链很短"），而浏览器对环的处理是实现相关的。
+ *    ⇒ 下面 `cssChain` 额外返回 `cycles` 供判据使用。 */
 function cssChain(htmlAbs) {
   const seen = [];
+  const cycles = [];
   const queue = [];
   const html = readFileSync(htmlAbs, 'utf8');
   for (const tag of html.match(/<link[^>]+rel=["']stylesheet["'][^>]*>/gi) ?? []) {
     const m = /href=["']([^"']+)["']/i.exec(tag);
-    if (m) queue.push(path.resolve(path.dirname(htmlAbs), m[1]));
+    if (m) queue.push({ p: path.resolve(path.dirname(htmlAbs), m[1]), from: htmlAbs, depth: 0 });
   }
   while (queue.length) {
-    const p = queue.shift();
-    if (seen.includes(p) || !existsSync(p)) continue;
+    const { p, from, depth } = queue.shift();
+    if (!existsSync(p)) continue;
+    if (seen.includes(p)) {
+      // 已在链上 ⇒ 这是一条**重复引用**（环，或菱形依赖）
+      cycles.push(`${path.basename(from)} → ${path.basename(p)}`);
+      continue;
+    }
+    if (depth > 8) { cycles.push(`深度 > 8：${path.basename(p)}`); continue; }
     seen.push(p);
     const css = stripComments(readFileSync(p, 'utf8'));
     for (const m of css.matchAll(/@import\s+(?:url\()?["']([^"']+)["']/g)) {
-      queue.push(path.resolve(path.dirname(p), m[1]));
+      queue.push({ p: path.resolve(path.dirname(p), m[1]), from: p, depth: depth + 1 });
     }
   }
-  return seen;
+  return { chain: seen, cycles };
 }
 
 console.log('=== 前提 ===');
@@ -86,10 +97,14 @@ let totalChainFiles = 0;
 for (const html of htmls) {
   const rel = path.relative(UI, html).replace(/\\/g, '/');
   console.log(`\n=== ${rel} ===`);
-  const chain = cssChain(html);
+  const { chain, cycles } = cssChain(html);
   totalChainFiles += chain.length;
   check(`${rel} 的样式链非空`, chain.length > 0,
     chain.map((c) => path.basename(c)).join(' → ') || '（空）');
+  // ★★ 环 / 重复引用：`@import` 成环时**浏览器行为是实现相关的**，而"去重"会把环静默吞掉
+  //    ⇒ 单独一条判据把它暴露出来（抽取 `tokens.css` 这类重构最容易踩）。
+  check(`${rel} 的样式链无环、无重复引用`, cycles.length === 0,
+    cycles.join(' ') || `${chain.length} 个文件`);
   if (!chain.length) continue;
 
   // ── 收集:定义与引用

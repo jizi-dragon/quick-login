@@ -1,25 +1,7 @@
+@import './tokens.css';
+
 :root {
-  /* 蓝白浅色主题设计令牌（唯一色值来源，禁止硬编码色值） */
-  --sb-brand: #1E6FFF;
-  --sb-brand-hover: #185ED6;
-  --sb-brand-soft: #EAF1FF;
-  --sb-brand-soft-2: #F2F6FF;
-  --sb-bg: #F4F7FD;
-  --sb-surface: #FFFFFF;
-  --sb-surface-2: #FAFCFF;
-  --sb-text: #1B2A4A;
-  --sb-text-secondary: #66759B;
-  --sb-border: #E4EAF6;
-  --sb-border-strong: #D3DDF0;
-  --sb-danger: #EF4444;
-  --sb-success: #22C55E;
-  --sb-warning: #F59E0B;
-  --sb-disabled: #D7E0F1;
-  --sb-radius: 10px;
-  --sb-radius-lg: 16px;
-  --sb-shadow-sm: 0 1px 2px rgba(23, 42, 84, 0.05), 0 2px 8px rgba(23, 42, 84, 0.05);
-  --sb-shadow: 0 1px 2px rgba(23, 42, 84, 0.06), 0 10px 30px rgba(23, 42, 84, 0.08);
-  --sb-shadow-lg: 0 2px 6px rgba(23, 42, 84, 0.08), 0 24px 60px rgba(23, 42, 84, 0.16);
+  /* ★ 色值令牌已移到 tokens.css（唯一色值来源）——本文件不再定义任何色值。 */
 }
 
 * {
