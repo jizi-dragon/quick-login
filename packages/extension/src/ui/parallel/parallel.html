@@ -11,8 +11,12 @@
       <div id="cloud-banner" class="notice hidden" role="status" aria-live="polite"></div>
 
       <!-- 登录已过期（服务端 401）：数据源**保持**云端，只提示重新登录，绝不静默切回本地 -->
+      <!-- ★ v3.19：里面原先有个 `<span id="auth-bar-text">`，而 TS 直接设
+           `authBarEl.textContent = …` ⇒ **把那个 span 整个覆盖掉**。
+           也就是说那个 id 与它的初始文案**永远不会被看到**（只有一条 CSS 选择器还配着它）。
+           ⇒ 去掉 span，只留容器的初始文案（TS 一渲染就会覆盖它）。 -->
       <div id="auth-bar" class="notice err hidden">
-        <span id="auth-bar-text">登录已过期，请重新登录云端账号库（云端数据没有丢，重新登录即可继续用）。</span>
+        登录已过期，请重新登录云端账号库（云端数据没有丢，重新登录即可继续用）。
         <button id="auth-relogin" class="btn-ghost btn-sm" type="button">重新登录</button>
       </div>
 
@@ -25,19 +29,25 @@
           </div>
         </div>
         <div class="head-right">
-          <!-- 数据源：本地（IndexedDB）/ 云端（自建账号库）。切换不改动本地数据 -->
-          <div class="source-tools">
-            <div id="source-switch" class="source-switch" role="group" aria-label="数据源">
-            </div>
-            <!-- 数据源说明：圆形 ? —— 点开是气泡（不是 alert），可点外部 / Esc 关闭 -->
-            <button id="source-help" class="source-help" type="button" aria-haspopup="dialog"
-              aria-expanded="false" aria-controls="source-help-pop" title="本地和云端有什么区别？">?</button>
-            <div id="source-help-pop" class="help-pop hidden" role="dialog" aria-label="数据源说明">
-              <h4>本地 / 云端</h4>
-              <p><b>本地</b>：账号存在这台电脑的浏览器里，断网也能用；换一台电脑就没有。</p>
-              <p><b>云端</b>：账号存在服务器上，换电脑登录就能用；断网时读不到（数据不会丢，网络恢复即可）。</p>
-              <p><b>切换</b>：本地 → 云端会把本地账号<b>合并上传</b>（同站同名的以最后修改时间较新的为准）；
-                <b>本地数据不会被删除</b>，随时可以切回来。</p>
+          <!-- ★★ v3.19（2026-10-09）：这里原先有 `#source-switch`（本地/云端数据源分段控件）
+               与一段讲"本地 → 云端合并上传、本地数据不会被删除"的说明文字。
+               ★ 本地数据源**已整体废除**（决策：强制云端登录），渲染函数也早被删了 ——
+                 但这段 HTML **留了下来**：
+                 · `#source-switch` 是个**空容器**（没有任何 TS 引用它）⇒ 死标记
+                 · `#source-help-pop` 的说明文字**与现在的行为相反** ⇒ 对用户说谎
+               ⇒ 全部清掉，换成一个只讲**当前真实模型**的说明气泡。 -->
+          <div class="cloud-tools">
+            <!-- 云端账号库说明：圆形 ? —— 点开是气泡（不是 alert），可点外部 / Esc 关闭 -->
+            <button id="cloud-help" class="cloud-help" type="button" aria-haspopup="dialog"
+              aria-expanded="false" aria-controls="cloud-help-pop" title="账号存在哪里？离线能用吗？">?</button>
+            <div id="cloud-help-pop" class="help-pop hidden" role="dialog" aria-label="云端账号库说明">
+              <h4>账号存在云端</h4>
+              <p><b>只有云端一种数据源</b>：账号存在服务器上的账号库里，换一台电脑登录就能用。
+                本机<b>不再保存账号库</b>，也不再有"本地 / 云端"的切换。</p>
+              <p><b>离线时</b>：本机会保留一份**只读副本**，用于断网时查看与打开页签。
+                副本<b>不含平台口令</b>，所以离线时<b>不能新增 / 编辑，自动填表也不生效</b>。
+                恢复到在线后会自动切回实时数据。</p>
+              <p><b>口令</b>：由服务端加密存放，本机不落明文。</p>
             </div>
           </div>
           <span id="cloud-account" class="cloud-account hidden"></span>

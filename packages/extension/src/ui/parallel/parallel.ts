@@ -59,8 +59,8 @@ const cloudBannerEl = document.getElementById('cloud-banner') as HTMLDivElement;
 const parHintEl = document.getElementById('par-hint') as HTMLParagraphElement;
 
 /* ---- 数据源帮助气泡 / 云端登录态 / 登录过期条（v3.14.1） ---- */
-const sourceHelpBtn = document.getElementById('source-help') as HTMLButtonElement;
-const sourceHelpPop = document.getElementById('source-help-pop') as HTMLDivElement;
+const sourceHelpBtn = document.getElementById('cloud-help') as HTMLButtonElement;
+const sourceHelpPop = document.getElementById('cloud-help-pop') as HTMLDivElement;
 const cloudAccountEl = document.getElementById('cloud-account') as HTMLSpanElement;
 const authBarEl = document.getElementById('auth-bar') as HTMLDivElement;
 const authReloginBtn = document.getElementById('auth-relogin') as HTMLButtonElement;
@@ -111,6 +111,16 @@ let cloudBaseUrl = '';
 /** 合并/切换进行中：禁用分段控件 + 显示忙碌态 + 暂停轮询刷新 */
 /** 最近一次 par.list 的失败原因（云端模式下 → 顶部提示条） */
 let cloudListError = '';
+/**
+ * ★★ v3.19：**刚刚那份列表是不是只读副本**（离线降级）。
+ *
+ * 与 `cloudListError` 是**两件不同的事**，文案也完全不同：
+ *   · `cloudListError` 非空 ⇒ **什么都没有**（连副本都没有）⇒ "读不到"
+ *   · `offlineStatus.offline` ⇒ **有，但是副本** ⇒ "你现在看的是副本，改不了"
+ * ⇒ 合成一句话会让用户分不清"数据没了"与"数据是旧的"。
+ */
+let offlineStatus: { offline: boolean; savedAt?: number; ageMs?: number; revision?: number } =
+  { offline: false };
 /** 一次性提示（合并结果等），到点自动消失 */
 let bannerFlash: { text: string; kind: 'ok' | 'err' | 'warn'; until: number } | null = null;
 const BANNER_FLASH_MS = 15_000;
@@ -144,6 +154,22 @@ async function loadBrowserAccounts(): Promise<void> {
       : [];
   // 云端模式下读不到就是读不到：列表留空 + 顶部醒目提示（绝不回落到本地旧数据）
   cloudListError = failed;
+
+  // ★★ v3.19：问一次"我刚刚看到的是不是只读副本"。
+  //   ★ **必须在 `par.list` 之后问** —— `par.list` 是"走云端还是走副本"的**发生地**，
+  //     先问列表再问状态，读到的才是与那份列表**同一次**的事实。
+  //     （反过来会读到上一次的记账，界面就会错一拍。）
+  //   ★ 它**不是**"读不到"的补充说明：`failed` 非空是"什么都没有"，
+  //     而这里是"有，但是副本"—— 两种情况的界面文案完全不同。
+  //   ★ 失败时**不报离线**：状态问不到就说不知道，绝不用猜测去顶替事实。
+  try {
+    const off = await send({ kind: 'par.offline' });
+    offlineStatus =
+      off.kind === 'par.offline' && off.result.ok ? off.result.data : { offline: false };
+  } catch {
+    offlineStatus = { offline: false };
+  }
+
   // 清掉已删除账号的选中态
   for (const id of Array.from(selectedIds)) {
     if (!browserAccounts.some((a) => a.id === id)) {
@@ -1356,7 +1382,18 @@ function renderAuthBar(): void {
     '页签名即该账号所有标签页的标题；密码存放在云端账号库（服务端加密），本机不落明文。';
 }
 
-/** 提示条的唯一渲染点：先看"云端不可用"，再看一次性提示，都没有就收起 */
+/**
+ * 提示条的唯一渲染点：**按"严重度 + 信息种类"排序**，都没有就收起。
+ *
+ * 顺序是有意的（越靠前越"用户必须知道"）：
+ *   ① 登录已过期 → 不在这里（那是 `#auth-bar` 的活，两条同时出现会让用户以为是两个毛病）
+ *   ② 云端不可用（**什么都没有**）→ `err`
+ *   ③ **这是离线副本**（有数据，但是旧的、且改不了）→ `warn`
+ *   ④ 一次性提示（合并结果等）
+ *
+ * ★ ② 与 ③ 的文案必须不同：一个是"数据没读到"，一个是"数据是旧的"。
+ *   合成一句会让用户分不清该等网络还是该去重登。
+ */
 function renderCloudBanner(): void {
   // 未登录（令牌过期/被清）时**不**把"云端未授权"当网络故障播报：那是 #auth-bar 的活，
   // 两条同时出现会让用户以为是两个毛病。
@@ -1364,6 +1401,19 @@ function renderCloudBanner(): void {
     cloudBannerEl.textContent =
       `云端不可用（${cloudListError}），当前无法读取账号。数据仍在云端，网络恢复后自动可用。`;
     cloudBannerEl.className = 'notice err';
+    return;
+  }
+  // ★★ 离线只读副本（B7 的显式要求："明确显示这是副本"）。
+  //   用户在这里必须同时知道**三件事**，少一件都会让他误判：
+  //     ① 这是副本（不是实时数据）
+  //     ② 它有多旧（"多久前"比"可能是旧的"有用得多）
+  //     ③ **改不了**（否则"我点了保存怎么没反应"会被理解成扩展坏了）
+  if (offlineStatus.offline) {
+    cloudBannerEl.textContent =
+      `离线：当前显示的是${describeSnapshotAge(offlineStatus.ageMs)}的只读副本。`
+      + '可以查看、可以打开页签；但**不能新增/编辑，自动填表也不生效**。'
+      + '网络恢复后会自动切回实时数据（云端数据没有丢）。';
+    cloudBannerEl.className = 'notice warn';
     return;
   }
   if (bannerFlash && bannerFlash.until > Date.now()) {
@@ -1374,6 +1424,31 @@ function renderCloudBanner(): void {
   bannerFlash = null;
   cloudBannerEl.textContent = '';
   cloudBannerEl.className = 'notice hidden';
+}
+
+/**
+ * 把副本年龄说成人话。
+ *
+ * ★ 为什么要专门写一个：`ageMs` 直接丢给用户（"300000 毫秒前"）没人能读；
+ *   而含糊成"可能是旧的"又丢掉了本仓刻意保留 `savedAt` 的**全部价值** ——
+ *   `account-cache.ts` 的设计意图原文就是
+ *   "界面上就能给出**准确的离线提示**（『这是 3 天前的副本』而不是含糊的『可能是旧的』）"。
+ *
+ * ★ 阈值按"用户会怎么用这份数据"划，不按技术刻度：
+ *   分钟级 → 他大概记得刚才在干什么；小时级 → 要提醒他可能变了；
+ *   天级 → 必须警告他大概率已经过期。
+ */
+function describeSnapshotAge(ageMs?: number): string {
+  if (ageMs === undefined || !Number.isFinite(ageMs) || ageMs < 0) {
+    // 拿不到年龄时**不编**：宁可少说，也不要说错（与"离线状态问不到就不报离线"同一条原则）
+    return '上次同步';
+  }
+  const min = Math.floor(ageMs / 60_000);
+  if (min < 1) return '刚才同步';
+  if (min < 60) return `${min} 分钟前同步`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前同步`;
+  return `${Math.floor(hr / 24)} 天前同步`;
 }
 
 function flashBanner(text: string, kind: 'ok' | 'err' | 'warn' = 'ok'): void {

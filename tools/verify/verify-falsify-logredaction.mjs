@@ -36,6 +36,7 @@ const PSTORE_TS = join(SRC, 'background', 'core', 'parallel-store.ts');
 const MSGS_TS = join(SRC, 'shared', 'messages.ts');
 const TABRULES_TS = join(SRC, 'background', 'core', 'tab-rules.ts');
 const CDEV_TS = join(SRC, 'background', 'core', 'cloud-device.ts');
+const PH_TS = join(SRC, 'ui', 'parallel', 'parallel.html');
 
 const CASES = [
   {
@@ -139,6 +140,17 @@ const CASES = [
     anchor: "  log.debug('device-start 发起（clientName=%s，丢弃上一个会话=%s）', clientName, replaced);",
     broken: '  log.debug(`device-start 发起（clientName=${clientName}，deviceCode=${deviceCode}）`);',
   },
+  {
+    // ★ 第 12 节（DOM 双向一致性）的反证 —— **反方向**：重新放一个孤儿 id。
+    //   ★ 这一条验的是规则 20 的**另一半**（HTML 有、TS 零引用）。
+    //     它不会崩，所以没有任何运行期信号 —— 只有静态判据能发现它。
+    //   ★ 锚点用**实测原文**（是 `span` 不是 `div` —— 猜标签名会 SKIP）。
+    label: '⑫ 重新放一个孤儿 id（HTML 有、TS 零引用）⇒ 双向判据必须红',
+    file: PH_TS,
+    anchor: '          <span id="cloud-account" class="cloud-account hidden"></span>',
+    broken: '          <span id="cloud-account" class="cloud-account hidden"></span>\n'
+          + '          <div id="definitely-orphan-id"></div>',
+  },
 ];
 
 function runCheck() {
@@ -189,7 +201,7 @@ console.log('\n=== 还原核对 ===');
 //   —— 下一轮的全量验收会红，但原因指向别处。
 //   判据（自证）：本列表与 CASES 里出现的 `file` **集合相等**。
 const touched = [...new Set(CASES.map((c) => c.file))];
-const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS, MSGS_TS, TABRULES_TS, CDEV_TS];
+const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS, MSGS_TS, TABRULES_TS, CDEV_TS, PH_TS];
 const uncovered = touched.filter((f) => !COVERED.includes(f));
 if (uncovered.length) failures.push(`还原核对漏了：${uncovered.join(', ')}`);
 
@@ -205,6 +217,7 @@ for (const f of COVERED) {
     //   配合下面那条"假 kind 必须不在"，两侧都钉住还原真的发生了。
     : f === MSGS_TS ? "| { kind: 'par.list' }"
     : f === TABRULES_TS ? "log.error('addRule #%d **失败**：%s',"
+    : f === PH_TS ? 'id="cloud-account"'
     // ★ `cloud-device.ts` 的 marker = 那条"只记有没有凭据"的既有形态仍在。
     : "token ? '有' : '无'";
   const restored = readFileSync(f, 'utf8');

@@ -708,6 +708,82 @@ console.log('\n=== 11. 凭据**不进日志调用**（纵深防御）===');
   console.log(`      （扫过 ${callCount} 处 \`log.*\` 调用；凭据清单 ${CRED.length} 个）`);
 }
 
+// ---------------------------------------------------------------- ⑫ DOM 一致性（双向）
+console.log('\n=== 12. DOM 一致性：HTML ↔ TS 双向 ===');
+{
+  // ## 这一节补的是规则 20 的**另一半**
+  //
+  // 规则 20 现在只查一个方向：`getElementById('x')` 的 x 必须在 HTML 里有 `id="x"`
+  // （缺了 ⇒ `null` 被 `as HTMLElement` 骗过 ⇒ 运行时崩）。
+  //
+  // ★ 而本轮发现的缺陷是**反方向**：**HTML 有 id、TS 零引用**。
+  //   它不一定崩，但用户会看到：
+  //     · 一个**不工作的控件**（`#source-switch` 是个空容器），或
+  //     · 一段**讲废弃功能、与当前行为相反**的说明文字
+  //       （`#source-help-pop` 在讲"本地 → 云端合并上传、本地数据不会被删除"，
+  //        而本地数据源**已整体废除**）。
+  //   —— 后者不是崩溃，是**对用户说谎**，而没有门禁会抓到它。
+  //
+  // ⇒ 白名单：**确实只作静态内容、不需要 TS 触碰**的 id 才允许"零引用"。
+  //   加进这个列表时必须写清**为什么它可以不被引用** ——
+  //   否则它就退化成"新增孤儿 id 的合法通道"。
+  const STATIC_ONLY_IDS = {
+    // 盒子弹窗的标题，当前只有"移入盒子"一种用法 ⇒ 静态写死即可。
+    // 保留 id 是为了将来出现第二种用法时能改（渐进增强），而不是因为它现在被用着。
+    'box-modal-title': '静态标题（当前只有一种用法）',
+  };
+
+  // ★ 剥 HTML 注释再找 id —— 这一条**本轮又踩了同一个坑**：
+  //   我在清理时写了注释"原先有个 `<span id="auth-bar-text">`"，
+  //   而裸正则 `\bid="([^"]+)"` **命中了注释里的那个字面量** ⇒ 探针误报"还有 2 个孤儿"。
+  //   这是 PITFALLS #14 / #18 那条教训的**第三次**（规则 23 / 26）。
+  const stripHtmlComments = (s) => s.replace(/<!--[\s\S]*?-->/g, ' ');
+
+  const htmlFiles = [];
+  const walkHtml = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) { walkHtml(full); continue; }
+      if (name.endsWith('.html')) htmlFiles.push(full);
+    }
+  };
+  walkHtml(SRC);
+
+  // TS 的全部文本（id 的引用面）。用它当"被引用"的判据足够：
+  // 少引用的代价是"多报一个孤儿"（人工看一眼即可），而漏报的代价是缺陷溜过。
+  const tsAll = [];
+  const walkTs = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) { walkTs(full); continue; }
+      if (name.endsWith('.ts')) tsAll.push(readFileSync(full, 'utf8'));
+    }
+  };
+  walkTs(SRC);
+  const tsText = tsAll.join('\n');
+
+  const orphans = [];
+  let idTotal = 0;
+  for (const f of htmlFiles) {
+    const rel = f.replace(ROOT + '\\', '').replace(ROOT + '/', '');
+    const ids = [...stripHtmlComments(readFileSync(f, 'utf8')).matchAll(/\bid="([^"]+)"/g)]
+      .map((m) => m[1]);
+    idTotal += ids.length;
+    for (const id of ids) {
+      if (!tsText.includes(id) && !(id in STATIC_ONLY_IDS)) {
+        orphans.push(`${rel}: ${id}`);
+      }
+    }
+  }
+
+  // ★ 空集自证（规则 24）：一个 id 都没扫到时上面恒真
+  check('判据前提：确实扫到了 HTML 里的 id', idTotal > 0, `${idTotal} 个`);
+  check('没有"HTML 有 id、TS 零引用"的孤儿标记（白名单除外）',
+    orphans.length === 0, orphans.join(' | '));
+  console.log(`      （${htmlFiles.length} 个页面 / ${idTotal} 个 id；`
+    + `白名单 ${Object.keys(STATIC_ONLY_IDS).length} 个）`);
+}
+
 // ---------------------------------------------------------------- 汇总
 const passed = results.filter(Boolean).length;
 console.log(`\n=== 汇总：${passed}/${results.length} 通过 ===`);

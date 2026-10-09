@@ -24,7 +24,7 @@ import {
   registerParallelHandlers,
   warmEnforcementCache,
 } from './core/parallel-session';
-import { parallelStore } from './core/parallel-store';
+import { getOfflineStatus, parallelStore } from './core/parallel-store';
 import {
   CLOUD_DEFAULT_BASE_URL,
   exchangeDeviceCode,
@@ -171,6 +171,14 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
         }));
       });
       return { kind: 'par.list', result: r };
+    }
+    /* 离线只读副本的可见性。
+     * ★ 它在 `par.list` **之后**被调用：`par.list` 是"走云端还是走副本"的**发生地**，
+     *   所以先问列表、再问状态，读到的才是与那份列表**同一次**的事实。
+     *   （反过来问会读到上一次的记账，界面就会晚上一拍或早上一拍。） */
+    case 'par.offline': {
+      const r = await tryRun(() => getOfflineStatus());
+      return { kind: 'par.offline', result: r };
     }
     case 'par.create': {
       const r = await tryRun(async () => {

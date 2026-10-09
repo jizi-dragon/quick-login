@@ -240,47 +240,21 @@
   padding: 5px 10px;
 }
 
-/* ---- 数据源切换（本地 / 云端，v3.14）：胶囊分段控件，观感对齐 .chip.active ---- */
-.source-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px;
-  border-radius: 999px;
-  border: 1px solid var(--sb-border);
-  background: var(--sb-surface);
-  box-shadow: var(--sb-shadow-sm);
-}
-.source-opt {
-  font-size: 12.5px;
-  padding: 5px 15px;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--sb-text-secondary);
-  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
-}
-.source-opt:hover:not(.active) {
-  color: var(--sb-brand);
-  background: var(--sb-brand-soft);
-}
-.source-opt.active {
-  background: var(--sb-brand);
-  color: #fff;
-  box-shadow: 0 4px 12px rgba(30, 111, 255, 0.28);
-}
-.source-opt:disabled {
-  cursor: progress;
-  opacity: 0.65;
-}
-.source-busy {
-  font-size: 11.5px;
-  padding: 4px 11px;
-  border-radius: 999px;
-  color: var(--sb-brand);
-  background: var(--sb-brand-soft);
-  border: 1px solid color-mix(in srgb, var(--sb-brand) 22%, transparent);
-  animation: pulse 1.6s ease-in-out infinite;
-}
+/* ---- ★★ v3.19（2026-10-09）：这里删掉了整个「数据源切换」样式块 ----
+ *
+ * 删掉的是：`.source-switch` / `.source-opt`(:hover/:active/:disabled) / `.source-busy`。
+ *
+ * ★ 为什么可以删：本地数据源**已整体废除**（决策：强制云端登录），
+ *   `renderSourceSwitch` 也早被删了 —— 而这些样式**留了下来**。
+ *   实测确认：`packages/extension/src` 下的 `.ts` 与 `.html` 对这三个类名**零引用**。
+ *
+ * ★ 为什么值得单独记一句：**死 CSS 不会报错，也不会被任何门禁抓到** ——
+ *   它只是静静地留在那里，而下一个读代码的人会以为有个"数据源切换"控件存在
+ *   （这次同一个位置上，HTML 里也确实还留着那个空容器，还带着一段
+ *   讲"本地 → 云端合并上传"的说明文字 —— 那段字是**对用户说谎**）。
+ *   ⇒ 删除 UI 时，**HTML 标记 + TS 引用 + CSS 规则**要一起清；
+ *     而这三者的漏网方式各不相同（见 AGENTS.md 规则 20）。
+ */
 
 /* ---- 数据源提示条（云端不可用 / 合并结果）：醒目但不喧哗 ---- */
 .notice {
@@ -761,13 +735,13 @@
 }
 
 /* ---- 数据源：? 帮助气泡（v3.14.1）---- */
-.source-tools {
+.cloud-tools {
   position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
-.source-help {
+.cloud-help {
   flex: none;
   width: 18px;
   height: 18px;
@@ -785,8 +759,8 @@
   box-shadow: var(--sb-shadow-sm);
   transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
 }
-.source-help:hover,
-.source-help[aria-expanded='true'] {
+.cloud-help:hover,
+.cloud-help[aria-expanded='true'] {
   background: var(--sb-brand-soft);
   border-color: var(--sb-brand);
   color: var(--sb-brand);
@@ -856,10 +830,13 @@
   justify-content: space-between;
   flex-wrap: wrap;
 }
-#auth-bar #auth-bar-text {
-  flex: 1;
-  min-width: 200px;
-}
+/* ★ v3.19：这里删掉了 `#auth-bar #auth-bar-text { flex:1; min-width:200px }`。
+ *   那个 span 已从 HTML 移除（TS 一直用 `textContent` 把它整个覆盖掉，
+ *   所以它从来没有被看到过）。
+ *   ★ 删掉 `flex:1` **不影响排布**：TS 用 `textContent =` 赋的那段文字会成为
+ *     `#auth-bar` 自己的**匿名文本节点**，而匿名块会自然占满剩余空间 ——
+ *     按钮仍然被 `flex:none` 顶到行尾。 */
+
 #auth-bar button {
   flex: none;
 }

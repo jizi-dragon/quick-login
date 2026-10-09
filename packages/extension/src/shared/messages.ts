@@ -7,6 +7,14 @@ export type RuntimeRequest =
   | { kind: 'site.grants.list' }
   | { kind: 'site.grant.add'; host: string }
   | { kind: 'par.list' }
+  /* ---- 离线只读副本的可见性（v3.19，2026-10-09）----
+   * 决策：本地数据源废除后，离线**只能看副本**（可看、可开页签；
+   * 不可新增/编辑、填表失效）。
+   * ⇒ 界面**必须明说"这是副本"**，否则用户会把副本当成实时数据，
+   *   而"改了没反应"会被理解成扩展坏了。
+   * ★ 判据是**发生地记账**（`lastListFellBack`），不是"快照年龄"启发式 ——
+   *   见 `background/core/parallel-store.ts` 里那段注释。 */
+  | { kind: 'par.offline' }
   | { kind: 'par.create'; siteHost: string; tabName: string; username: string; password: string; open: boolean; box?: string; scheme?: 'http' | 'https' }
   | { kind: 'par.probeScheme'; host: string }
   | { kind: 'par.update'; id: string; patch: Partial<Pick<ParallelAccount, 'tabName'>> }
@@ -90,6 +98,10 @@ export type RuntimeResponse =
   | { kind: 'site.grants.list'; result: Result<SiteGrant[]> }
   | { kind: 'site.grant.add'; result: Result<SiteGrant> }
   | { kind: 'par.list'; result: Result<Array<ParallelAccount & ParallelAccountStatus & { password: boolean }>> }
+  /* `offline=true` ⇒ 用户此刻看到的列表**就是**只读副本（不是"可能旧"）。
+   * `savedAt` / `ageMs` 让界面能说准"这是多久前的副本"，
+   * 而不是含糊的"可能是旧的"（`account-cache.ts` 的设计意图）。 */
+  | { kind: 'par.offline'; result: Result<{ offline: boolean; savedAt?: number; ageMs?: number; revision?: number }> }
   | { kind: 'par.create'; result: Result<ParallelAccount> }
   | { kind: 'par.probeScheme'; result: Result<'http' | 'https'> }
   | { kind: 'par.update'; result: Result<ParallelAccount> }

@@ -14,7 +14,7 @@
 > | 想了解 | 去哪 |
 > |---|---|
 > | **隔离平面总表（权威口径）** | [docs/CODEBASE_OVERVIEW.md](docs/CODEBASE_OVERVIEW.md) §Architecture |
-> | **踩过的坑（18 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
+> | **踩过的坑（19 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
 > | 功能清单与使用说明（给人看的） | [docs/USER-MANUAL.md](docs/USER-MANUAL.md) |
 > | 现状快照与安全边界 | [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) |
 > | 现场排障与诊断埋点怎么读 | [docs/DIAG-GUIDE.md](docs/DIAG-GUIDE.md) |
@@ -54,7 +54,7 @@
 |---|---|
 | 1 | **七个平面缺一不可，且每个平面都要问"这条路径绕过了谁"**。历史教训：平面 4（HTTP 缓存）曾用 DNR 的 `redirect.urlTransform` 实现——**该字段是 Firefox 专属、Chrome 从未支持**（Chromium 以 `Unexpected property: 'urlTransform'` 拒绝），而 `updateSessionRules` 是**原子批量** ⇒ 同批的 COOKIE/AUTH 规则被一起拒绝，**网络平面全死**。现在改为页面层实现 + **逐条安装降级**。<br>判据（**必须是精确的**）：`Get-ChildItem packages/extension/src -Recurse -Filter *.ts \| Select-String -Pattern 'urlTransform\s*:'` ⇒ **零命中**。<br>★ 判据要匹配**作为键**的 `urlTransform:`，**不要**只搜这个词——它在解释"为什么不用它"的注释里有 4 处（`types.ts` / `shield-main.ts` / `tab-rules.ts`），只搜词会**永远为红**。已实测：精确判据零命中，且构造一个真实使用后**能红**（反证通过） |
 | 2 | **MAIN 世界与 ISOLATED 世界的分工不能混**：`shield-main.ts`（`"world": "MAIN"`）负责**补丁页面 API**；`shield-bridge.ts`（ISOLATED）负责**与 background 通信**。补丁必须落在 MAIN，通信必须落在 ISOLATED。判据：`manifest.json` 里 `shield-main` 的 `"world": "MAIN"` 必须存在 |
-| 3 | **平台口令加密存放，且永不入日志、永不出现在诊断埋点里**。历史教训：`mergeCookieSnapshot` 的 token 门禁、`IDENTITY_COOKIE_BLACKLIST` 的身份键过滤——**凭据类的键名要在一处集中声明**，不要在各个调用点各写一份黑名单。<br>★ **日志落盘/输出只有一个通道**：`shared/log.ts` 的 `log()`，它**无条件先打码**（`shared/redact.ts`）。取 logger 一律 `getLogger('模块名')`。<br>★ **`src/` 下除 `shared/log.ts` 外不许出现裸 `console.*`** —— `console.debug('...', obj)` 这种**对象直传**是最容易顺手泄密的形态（今天对象里只有计数，明天有人塞 `{ username, password }` 做"排障方便"）。<br>★ **打码顺序固定：先做 `%s` 替换 → 再拼多余参数 → 最后整体打码。** 顺序反了会失效：`logger.info('password=%s', pw)` 若先拼成 `password=%s pw`，`%s` 把**键和值分开**，打码规则完全命中不了（`PITFALLS #4`）。<br>判据：`node tools/verify/verify-log-redaction.mjs`（**81 条**：含对象直传、分隔参数、结构性扫描、**闭环**、**三通道分工**、**离线判定唯一**、**SW 入口不静默落空**、**网络平面失败可见**、**凭据不进日志调用**）+ 反证 `node tools/verify/verify-falsify-logredaction.mjs`（**12/12**）。见 `PITFALLS #3`、`#4`、`#5`、`#14`、`#15`、`#16`、`#17`、`#18` |
+| 3 | **平台口令加密存放，且永不入日志、永不出现在诊断埋点里**。历史教训：`mergeCookieSnapshot` 的 token 门禁、`IDENTITY_COOKIE_BLACKLIST` 的身份键过滤——**凭据类的键名要在一处集中声明**，不要在各个调用点各写一份黑名单。<br>★ **日志落盘/输出只有一个通道**：`shared/log.ts` 的 `log()`，它**无条件先打码**（`shared/redact.ts`）。取 logger 一律 `getLogger('模块名')`。<br>★ **`src/` 下除 `shared/log.ts` 外不许出现裸 `console.*`** —— `console.debug('...', obj)` 这种**对象直传**是最容易顺手泄密的形态（今天对象里只有计数，明天有人塞 `{ username, password }` 做"排障方便"）。<br>★ **打码顺序固定：先做 `%s` 替换 → 再拼多余参数 → 最后整体打码。** 顺序反了会失效：`logger.info('password=%s', pw)` 若先拼成 `password=%s pw`，`%s` 把**键和值分开**，打码规则完全命中不了（`PITFALLS #4`）。<br>判据：`node tools/verify/verify-log-redaction.mjs`（**83 条**：含对象直传、分隔参数、结构性扫描、**闭环**、**三通道分工**、**离线判定唯一**、**SW 入口不静默落空**、**网络平面失败可见**、**凭据不进日志调用**、**DOM 双向一致性**）+ 反证 `node tools/verify/verify-falsify-logredaction.mjs`（**13/13**）。见 `PITFALLS #3`、`#4`、`#5`、`#14`、`#15`、`#16`、`#17`、`#18`、`#19` |
 | 4 | **真实 cookie jar 不得驻留扩展账号的会话**（会话卫生三层防线：`preJar` 基线 → 快照差集清扫 → `cookies.onChanged` 持续驱逐），**且全部按写入者归属门控**——原生页签自己写的 cookie **不能动**，否则会破坏用户不用扩展时的正常登录 |
 | 5 | **DNR 规则按 `tabIds` 限定，不要写全局规则**。全局规则会改到用户自己开的普通标签页，那是"帮倒忙" |
 | 6 | **`main_frame` 导航刻意不改写**（保护静态资源与 SSO 跳转语义）。改这条之前先读 `docs/CODEBASE_OVERVIEW.md` 的风险清单 |
@@ -83,11 +83,12 @@
 | 19 | **跨多行正则删代码时，锚点必须唯一且紧贴目标**。同上教训：那条正则用 `(?:\s*[^\n]*\n)*?` 这样的**开放量词**往后吃，把不相邻的块也吞了。<br>⇒ 优先用**精确的多行字面量**（整块原样写出来）而不是正则。 |
 | 20 | **删 DOM 标记后必须核对 `HTML id ↔ TS getElementById` 一致性**。TS 里 `getElementById('x')` 拿到 `null` 的类型仍是 `HTMLElement`（因为断言了 `as`）⇒ **编译期不报错**，运行时点一下就崩。<br>判据：`id="..."` 的集合与 `getElementById('...')` 的集合做差集，**`TS − HTML` 必须为空**。本轮的检查脚本当场抓到一处（`help-reset-confirm-btn`）。 |
 | 21 | **"零裸 `console.*`"只证明了"没有绕过 A 通道"，证明不了"没有 B 通道"。**<br>实测（`PITFALLS #12`）：扩展端有**三个**写出进程的出口 —— `console` / `chrome.storage` / 网络。其中 `forensics()` 与 `diag()` 都直接写 `chrome.storage.local` 且**不做任何打码**，而它们的产物**会进诊断包被一键导出**。"零裸 console"当时是全绿的。<br>⇒ **打码必须落在通道上，而不是靠调用点自觉**。落盘点（`storage.local.set` / `console.*` / `fetch` 的发包体）是**该有打码的地方**；调用点不是。<br>★ 找这类洞的方法是**枚举出口**（谁会写到进程外？），不是搜索已知的坏模式。<br>★ 凡是"安全靠约定"的地方，问一句：**这条约定如果被违反，谁会知道？** 答不上来 = 它是约定而不是机制。<br>判据：`node tools/verify/verify-forensics-redaction.mjs`（25 条，**真的把模块求值、真的调 `forensics()` 再读回落盘内容**）+ 反证 `verify-falsify-forensics.mjs`（3/3） |
-| 22 | **"加日志"是三件事，缺一件就等于没加**：① 有出口、② **有人读**、③ **有用的那条活得到被读的时候**。<br>实测（`PITFALLS #14`）：打码全绿、零裸 console 全绿，但 `drain()` **零调用点**（日志只进 DevTools，**诊断包里一条都没有**），而 `diag()` 被一个**每次调用都会走到**的热路径占满（`ql:diag` 是**环形 60**、45 个写入点）。⇒ 病不是"日志少"，是**日志系统没闭环**。<br>★ **三通道分工是硬约定，不要混用**：<br>&nbsp;&nbsp;· `log.debug()` → 内存环形 200 + DevTools。**热路径**用它（默认 `info` 级 ⇒ 生产静默、零存储开销）<br>&nbsp;&nbsp;· `diag()` → `storage.local` 环形 **60**。**罕见但关键**：失败 / 降级 / 状态跃迁<br>&nbsp;&nbsp;· `forensics()` → `storage.local` 环形 **120**。**结构化事件**（可按字段过滤）<br>★ 判断"这条日志会不会挤掉别的"：看**它所在的控制流多久走一次**，不是看"它是不是写在一个重要函数里"。<br>判据：`verify-log-redaction.mjs` 第 6 节（闭环）+ 第 7 节（分工）+ 第 8 节（离线判定唯一）⇒ **81 条**；反证 **12/12**（拆 `drain`、拆 `appLogs`、热路径改回 `diag`、重复 `OfflineError`、拆 `dispatch` 的 `default`、契约加 kind、`log.error` 降级为 `debug`、裸传凭据、`${deviceCode}` 插值 —— 各自变红） |
+| 22 | **"加日志"是三件事，缺一件就等于没加**：① 有出口、② **有人读**、③ **有用的那条活得到被读的时候**。<br>实测（`PITFALLS #14`）：打码全绿、零裸 console 全绿，但 `drain()` **零调用点**（日志只进 DevTools，**诊断包里一条都没有**），而 `diag()` 被一个**每次调用都会走到**的热路径占满（`ql:diag` 是**环形 60**、45 个写入点）。⇒ 病不是"日志少"，是**日志系统没闭环**。<br>★ **三通道分工是硬约定，不要混用**：<br>&nbsp;&nbsp;· `log.debug()` → 内存环形 200 + DevTools。**热路径**用它（默认 `info` 级 ⇒ 生产静默、零存储开销）<br>&nbsp;&nbsp;· `diag()` → `storage.local` 环形 **60**。**罕见但关键**：失败 / 降级 / 状态跃迁<br>&nbsp;&nbsp;· `forensics()` → `storage.local` 环形 **120**。**结构化事件**（可按字段过滤）<br>★ 判断"这条日志会不会挤掉别的"：看**它所在的控制流多久走一次**，不是看"它是不是写在一个重要函数里"。<br>判据：`verify-log-redaction.mjs` 第 6 节（闭环）+ 第 7 节（分工）+ 第 8 节（离线判定唯一）⇒ **83 条**；反证 **13/13**（拆 `drain`、拆 `appLogs`、热路径改回 `diag`、重复 `OfflineError`、拆 `dispatch` 的 `default`、契约加 kind、`log.error` 降级为 `debug`、裸传凭据、`${deviceCode}` 插值、孤儿 HTML id —— 各自变红） |
 | 23 | **写"零命中"或"某函数里没有 X"这类判据时，先剥注释与字符串字面量**，并且**把范围按代码的真实控制流划**。<br>实测（`PITFALLS #14`，本仓第四次踩第一个坑）：我在代码旁写了"这里原先写的是 `diag(...)`"来解释降级，而裸正则命中了**那句注释**。历史：`urlTransform`（#1）、`RETURNING`（akso-vault #13）、`is_admin`（akso-vault #19）。规律：**"解释为什么不用 X"的文本必然包含 X**。<br>★★ 而**第二次假红推翻的是判据的「范围」**：我断言"整个 `isEnforceable` 里没有 `diag()`"，实证打印函数体后发现另外两处 `diag()` **每个 host 只走一次**（之后进缓存）、**根本不是热路径**。真正每次调用都走到的是**缓存命中那一支**。<br>⇒ 顺序：① **实证打印**你要断言的那段（别猜）；② 剥注释/字符串；③ 断言落到**那个具体分支**；④ 加一条**自证前提**的断言（"我确实取到了这段代码"）。<br>★ 剥离顺序：**先剥字符串再剥行注释** —— 否则 `'//'` 这类字面量会把后面的真代码当注释吃掉（反向失效更坏）。 |
 | 24 | **`stripLiterals` 只能用于"怕被自己的解释性文字弄红"的断言；凡是要读「字符串字面量的内容」的断言必须用原始源码。** 并且**所有 `every` / `some` / `includes` 类判据都要先问"集合会不会是空的？"**<br>实测（`PITFALLS #16`）：我顺手用 `stripLiterals` 去读消息契约 —— 而 `kind: 'par.list'` 里的 **`'par.list'` 本身就是字符串字面量**，被剥成 `''` ⇒ 提取到 **0 个 kind** ⇒ `[].every(...)` **恒返回 `true`** ⇒ 那条"契约同步"判据**什么都没验**。<br>★ `@ts-expect-error` **也是注释** ⇒ 它同样要在原始源码里找。<br>★★ 这是本仓**第三次**"门禁退化成永远绿"（另见 #11 幽灵依赖、akso-vault #17），三次都是**为了让判据不被自己的注释弄红而引入的剥离，顺手把判据要读的东西也剥掉了**。<br>⇒ 三条措施：① 结构断言用剥过的源码、读字面量用原文（**分开**）；② 对"集合可能为空"的判据一律加 `check('判据前提：集合非空', size > 0)`，让"集合为空"与"契约不同步"在输出里**分得开**；③ 反证必须**真的加一个 kind**（`\| { kind: 'definitely.not.implemented' }`）⇒ 判据必须红 —— 别的反证都验不到这个形态。 |
-| 25 | **加日志前先问"这条路径失败时，用户会看到什么？"** —— 如果答案是**"和成功一样"**，那它必须有 `warn`/`error`，**且不能是 `debug`**（`debug` 在生产默认不输出 ⇒ 等于没加）。<br>实测（`PITFALLS #17`）：`tab-rules.ts`（**网络平面**）有 4 条静默失败路径，而它们**全都和成功长得一样** ——<br>&nbsp;&nbsp;· AUTH 规则装不上 ⇒ 请求**不带正确 Bearer**<br>&nbsp;&nbsp;· COOKIE 规则装不上 ⇒ 既不回放也不剥离<br>&nbsp;&nbsp;· **两条都失败** ⇒ 页签**完全没有网络平面保护**，却**照样能打开平台**，只是**以错误的身份在跑**<br>&nbsp;&nbsp;· 移除规则失败 ⇒ **本该失效的旧规则继续生效**（表现是"切了账号还带着上一个账号的头"）<br>★ 判断依据：`meta.authId` / `meta.cookieId` 是否 `undefined` —— 它们**只在成功时才写入**，所以那个 `undefined` 就是"该装却没装上"的现成判据。<br>★★ 本轮我一度打算把"规则装上"也记成 `debug` —— 那是对的（**中频轨迹**）。但**失败若也走 `debug`，默认 `info` 级下生产一个字都不输出** ⇒ 我们"加了日志"而缺陷依然静默。**同一个日志调用，`debug` 与 `error` 的差别就是"没日志"与"有日志"。**<br>⇒ 一句话：**`debug` 记"发生了什么"；`warn`/`error` 记"失败了但看起来像成功"。**<br>判据：`verify-log-redaction.mjs` 第 10 节 ⇒ **81 条**；反证 **12/12**（把那行 `log.error` **降级为 `log.debug`** ⇒ 如期变红）。<br>★ 反证器的一个小坑：缺陷版必须让被断言的**字符串真的消失**。最初我写成"把 `log.error(` 拆成两半"，于是 marker 仍在源码里 ⇒ 判据不红 ⇒ 反证 `SKIP`（**验的是空气**）。另：锚点**不要带 `\n`**（行尾 CRLF，会匹配不上）。 |
-| 26 | **白名单式判据（"这段里含安全痕迹就放过"）必须先问：那个痕迹**会不会来自别的对象**？** 会 ⇒ 范围划错了，要**逐个对象**判。<br>实测（`PITFALLS #18`，与 #23 同源、**第二次**出现）：我加了一条静态判据验"凭据值没被交给 `log()`"，实现是"**参数区**里若有凭据标识符，就必须同时有存在性判断的痕迹（`有`/`无`/`Boolean(`/`.length`）"。<br>它在真实代码上**通过**。而反证注入缺陷后 ——<br>&nbsp;&nbsp;`log.info('...', token, fernetKey ? '有' : '无', ...)` —— 判据**仍然绿**：那个**裸 `token`** 被**旁边 `fernetKey` 的 `'有'`** 一起放过了。反证器直接报 `FAIL 这条验收是空断言！`<br>⇒ 修法：安全形态只有四种，且必须**紧贴该标识符本身** —— `cred ? … : …`、`cred.length`、`cred.slice(`、`cred !== null`、`Boolean(cred)`；其余一律算出界。**逐标识符**判定，不看整段。<br>★ 这是 #23 那条教训的第二次：**范围划大了，判据就会在真实缺陷面前放行。** 第一次是 `isEnforceable`（我划成整个函数体，真实热路径只是缓存命中那一支）；这一次是日志参数（我划成整段，真实要逐个值看）。<br>★ 而**发现它的唯一方法是反证**：把缺陷真的注进去，看判据红不红。这一次反证不但发现了缺陷，还**否证了我自己的判据**。<br>判据：`verify-log-redaction.mjs` 第 11 节 ⇒ **81 条**；反证 **12/12**（裸传凭据 ⑩、`${deviceCode}` 插值 ⑪ 各自变红）。 |
+| 25 | **加日志前先问"这条路径失败时，用户会看到什么？"** —— 如果答案是**"和成功一样"**，那它必须有 `warn`/`error`，**且不能是 `debug`**（`debug` 在生产默认不输出 ⇒ 等于没加）。<br>实测（`PITFALLS #17`）：`tab-rules.ts`（**网络平面**）有 4 条静默失败路径，而它们**全都和成功长得一样** ——<br>&nbsp;&nbsp;· AUTH 规则装不上 ⇒ 请求**不带正确 Bearer**<br>&nbsp;&nbsp;· COOKIE 规则装不上 ⇒ 既不回放也不剥离<br>&nbsp;&nbsp;· **两条都失败** ⇒ 页签**完全没有网络平面保护**，却**照样能打开平台**，只是**以错误的身份在跑**<br>&nbsp;&nbsp;· 移除规则失败 ⇒ **本该失效的旧规则继续生效**（表现是"切了账号还带着上一个账号的头"）<br>★ 判断依据：`meta.authId` / `meta.cookieId` 是否 `undefined` —— 它们**只在成功时才写入**，所以那个 `undefined` 就是"该装却没装上"的现成判据。<br>★★ 本轮我一度打算把"规则装上"也记成 `debug` —— 那是对的（**中频轨迹**）。但**失败若也走 `debug`，默认 `info` 级下生产一个字都不输出** ⇒ 我们"加了日志"而缺陷依然静默。**同一个日志调用，`debug` 与 `error` 的差别就是"没日志"与"有日志"。**<br>⇒ 一句话：**`debug` 记"发生了什么"；`warn`/`error` 记"失败了但看起来像成功"。**<br>判据：`verify-log-redaction.mjs` 第 10 节 ⇒ **83 条**；反证 **13/13**（把那行 `log.error` **降级为 `log.debug`** ⇒ 如期变红）。<br>★ 反证器的一个小坑：缺陷版必须让被断言的**字符串真的消失**。最初我写成"把 `log.error(` 拆成两半"，于是 marker 仍在源码里 ⇒ 判据不红 ⇒ 反证 `SKIP`（**验的是空气**）。另：锚点**不要带 `\n`**（行尾 CRLF，会匹配不上）。 |
+| 26 | **白名单式判据（"这段里含安全痕迹就放过"）必须先问：那个痕迹**会不会来自别的对象**？** 会 ⇒ 范围划错了，要**逐个对象**判。<br>实测（`PITFALLS #18`，与 #23 同源、**第二次**出现）：我加了一条静态判据验"凭据值没被交给 `log()`"，实现是"**参数区**里若有凭据标识符，就必须同时有存在性判断的痕迹（`有`/`无`/`Boolean(`/`.length`）"。<br>它在真实代码上**通过**。而反证注入缺陷后 ——<br>&nbsp;&nbsp;`log.info('...', token, fernetKey ? '有' : '无', ...)` —— 判据**仍然绿**：那个**裸 `token`** 被**旁边 `fernetKey` 的 `'有'`** 一起放过了。反证器直接报 `FAIL 这条验收是空断言！`<br>⇒ 修法：安全形态只有四种，且必须**紧贴该标识符本身** —— `cred ? … : …`、`cred.length`、`cred.slice(`、`cred !== null`、`Boolean(cred)`；其余一律算出界。**逐标识符**判定，不看整段。<br>★ 这是 #23 那条教训的第二次：**范围划大了，判据就会在真实缺陷面前放行。** 第一次是 `isEnforceable`（我划成整个函数体，真实热路径只是缓存命中那一支）；这一次是日志参数（我划成整段，真实要逐个值看）。<br>★ 而**发现它的唯一方法是反证**：把缺陷真的注进去，看判据红不红。这一次反证不但发现了缺陷，还**否证了我自己的判据**。<br>判据：`verify-log-redaction.mjs` 第 11 节 ⇒ **83 条**；反证 **13/13**（裸传凭据 ⑩、`${deviceCode}` 插值 ⑪ 各自变红）。 |
+| 27 | **删除一个 UI 功能的完成判据是「四处都没有它」：TS 引用 / HTML 标记 / CSS 规则 / 说明文字。**<br>实测（`PITFALLS #19`）：v3.18 废除本地数据源时 `renderSourceSwitch` 删干净了、`dataSource` **全仓零残留**（当时判据通过），但并行页上**还留着三样** ——<br>&nbsp;&nbsp;· `<div id="source-switch">` **空容器**（TS 零引用）<br>&nbsp;&nbsp;· 一整套**死 CSS**（`.source-switch` / `.source-opt` / `.source-busy`，约 40 行）<br>&nbsp;&nbsp;· ★★ **一段说明文字**，讲"本地 → 云端会**合并上传**、**本地数据不会被删除**、随时可以切回来" —— 而**这套功能已经不存在了**<br>★ 三处的**漏网方式各不相同**：`typecheck` 只管 TS（引用没了就绿）；HTML 多一个 `id` **不报错**，而规则 20 只查**反方向**；**死 CSS 不被任何门禁覆盖**；而**说明文字是字符串，没有任何机制检查它是否还在说真话** —— 它不是崩溃，是**对用户说谎**。<br>⇒ 判据：**HTML ↔ TS 双向一致性**（`verify-log-redaction.mjs` 第 12 节 ⇒ **83 条**）。`id="…"` 里除白名单外**都必须在 TS 源码里出现过**；白名单要写清"为什么它可以不被引用"。反证 **13/13**（重新放一个孤儿 id ⇒ 如期变红）。<br>★ 每次删 UI，去搜一遍那个功能**在人话里怎么被称呼**（"本地""云端""切换"），不只是搜它的标识符。<br>★ 实现坑（同一教训的**第三次**）：探针第一版直接对 HTML 跑 `\bid="([^"]+)"`，而我在清理时写了注释"原先有个 `<span id="auth-bar-text">`" ⇒ **正则命中了注释里的字面量** ⇒ 误报。必须**先剥 HTML 注释**（同 #23 / #26）。 |
 
 ---
 
@@ -116,8 +117,8 @@ npm run build             # esbuild → dist/
 npm run check-deps        # 幽灵依赖门禁（三方裸模块必须已声明）
 
 # 打码通道 + 闭环：**四个**脚本，秒级，都**不需要浏览器**
-node tools/verify/verify-log-redaction.mjs           # 日志通道（**81 条**）
-node tools/verify/verify-falsify-logredaction.mjs    # ↑ 的反证（**12/12**）
+node tools/verify/verify-log-redaction.mjs           # 日志通道（**83 条**）
+node tools/verify/verify-falsify-logredaction.mjs    # ↑ 的反证（**13/13**）
 node tools/verify/verify-forensics-redaction.mjs     # 取证/诊断通道（25 条）
 node tools/verify/verify-falsify-forensics.mjs       # ↑ 的反证（3/3）
 
@@ -156,7 +157,7 @@ npm run verify -- --only jarhygiene
   与服务器端统一。
 - **每修一个"看起来正常但其实是坏的"缺陷，就把它的判据写进脚本注释或
   [`docs/PITFALLS.md`](docs/PITFALLS.md)。**
-  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（当前 **18 条**）——在此之前这类教训
+  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（当前 **19 条**）——在此之前这类教训
   只散在 `CHANGELOG.md` 里，而两者的分工不同：
   `CHANGELOG.md` 记"每次发布改了什么"（历史），
   `PITFALLS.md` 记"**哪些错会静默发生、怎么一眼认出来**"（可复用的判据）。
@@ -263,8 +264,16 @@ npm run verify -- --only jarhygiene
   ★ 按规则 12：**改权威源**（`CODEBASE_OVERVIEW.md`），其余地方加一行指针。
 - **UI 实机验证**：`src/ui/**` 无自动化覆盖 ⇒ 必须在 `chrome://extensions`
   **重新加载**后手工点一遍（登录 / 列表 / 开页签 / 盒子 / 设备流 / 离线降级）。
-- **离线只读缓存的界面层**：`account-cache.ts` 与 `parallelStore` 的回落已就位，
-  但"离线时界面上明确显示这是副本"那一层还没做。
+- **离线只读缓存的界面层**：★ **v3.19（2026-10-09）已完成** ——
+  新增 `par.offline` 消息，`#cloud-banner` 的 `warn` 分支会明说
+  "这是 **N 分钟前同步的只读副本**，可以看、可以打开页签，
+  但不能新增/编辑，自动填表也不生效"。
+  ★ 判据从"快照年龄"启发式改成了**发生地记账**（`lastListFellBack`）——
+  年龄猜不准（刚断网时猜不到；长期没打开而网络正常时会误报），
+  而 `listWithFallback()` **确实知道**自己走了哪一支。
+  ★ 同时清掉了这块周边**已废除功能的三处残留**（见 `docs/PITFALLS.md` #19）：
+  空的 `#source-switch` 容器、整套死 CSS、以及**一段讲"本地→云端合并上传"的说明文字**
+  （那段字已经与行为相反 —— 它对用户说谎）。
 
 ---
 

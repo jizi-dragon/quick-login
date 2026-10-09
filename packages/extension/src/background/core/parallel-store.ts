@@ -67,6 +67,29 @@ import { getLogger } from '../../shared/log';
 const log = getLogger('parallel-store');
 
 /**
+ * ★★ **上一次 `list()` 是不是走的只读副本** —— 这才是"离线"的**可靠信号**。
+ *
+ * # 为什么不用"快照年龄"来判断
+ *
+ * `getOfflineStatus()` 原先用的是**启发式**："快照的 `savedAt` 距今超过 10 分钟
+ * 就认为离线"。它能猜到大多数情况，但有两个洞：
+ *
+ *  1. **刚断网时猜不到**：用户在 30 秒前刚成功同步过、然后网断了 ——
+ *     副本年龄只有 30 秒 ⇒ 判为"在线"，而**实际显示的正是那份副本**。
+ *  2. **反过来也会猜错**：放着一整天没打开扩展、今天打开且**网络正常** ——
+ *     旧的 `savedAt` 会让它判为"离线"，而列表其实是刚从云端拿的。
+ *
+ * ⇒ 而 `listWithFallback()` **确实知道**自己走的是哪一支 ——
+ *   它是那个事实的**发生地**。让发生地记下来，界面读它，就不需要猜。
+ *
+ * ★ 三个状态的语义（`undefined` 不是"在线"，是"这一轮还没问过"）：
+ *   · `false` → 上一次 `list()` 真的从云端拿到了
+ *   · `true`  → 上一次 `list()` 回落到只读副本（用户看的就是副本）
+ *   · `undefined` → 本次 SW 生命周期内还没调过 `list()`
+ */
+let lastListFellBack: boolean | undefined;
+
+/**
  * 读路径：**先云端，失败才回落到只读缓存**。
  *
  * ★ 回落是有条件的，这个条件很重要：只有**网络/超时类**失败才回落。
@@ -79,6 +102,8 @@ async function listWithFallback(): Promise<ParallelAccount[]> {
     const rows = await cloudStore.list();
     // 成功即**刷新缓存**。这是缓存唯一的写入点。
     void persistSnapshot(rows).catch(() => undefined);
+    // ★ 这一步是"在线"的**定义**：真的从云端拿到了数据。
+    lastListFellBack = false;
     return rows;
   } catch (e) {
     if (!isOfflineError(e)) {
@@ -90,11 +115,20 @@ async function listWithFallback(): Promise<ParallelAccount[]> {
       //   两者在界面上长得像（都是"没数据"），而原因完全不同 ——
       //   所以必须能分开。记 `warn` 而不是 `error`：它不是缺陷，
       //   是"第一次离线且从未同步过"的正常分支。
+      //
+      // ★ 注意**不要**在这里把 `lastListFellBack` 置 true：
+      //   这一支**没有**给用户副本（它抛错了），所以"在读副本"是假的。
+      //   置 true 会让界面显示"这是离线副本"，而用户其实**什么都看不到** ——
+      //   那是比不显示更坏的误导。
       log.warn('list() 离线且**无缓存** ⇒ 如实报错（这一支不给只读副本）');
       throw e; // 没有缓存 ⇒ 离线就是没法用，如实报错
     }
     // ★ 这是"离线只读模式"的**唯一入口**。用户接下来看到的列表、
     //   以及"为什么改不了"，都源于这一行。
+    //
+    // ★★ 而下面这一行是**本轮的关键**：它是"用户此刻看到的是副本"这个事实的
+    //   **发生地**。记下来，界面就不需要靠"快照年龄"去猜。
+    lastListFellBack = true;
     log.warn('list() 离线 ⇒ 回落只读副本（%d 个账号）', snap.accounts.length);
     return snap.accounts as ParallelAccount[];
   }
@@ -221,22 +255,51 @@ export interface OfflineStatus {
   revision?: number;
 }
 
+/**
+ * 界面的"这是副本"提示读它。
+ *
+ * ★★ 判据改成了**发生地记账**（`lastListFellBack`），不再是"快照年龄"启发式。
+ *   原因见 `lastListFellBack` 的注释（年龄有两个洞：刚断网猜不到、
+ *   长期没打开又网络正常时会误报）。
+ *
+ * ★ 三个输入合起来才是完整判断：
+ *   · `lastListFellBack === true` ⇒ 「读的是副本」（**主判据**）
+ *   · `lastListFellBack === false` ⇒ 「上一轮是云端拿的」⇒ 不提示
+ *   · `lastListFellBack === undefined` ⇒ 「本轮还没问过」⇒ **不提示**
+ *     （★ 这一支不能当成离线：扩展刚启动、用户还没打开列表页时，
+ *       报"离线"是无中生有。宁可不说，也不要错说。）
+ *
+ * ★ 仍然保留 `ageMs` / `savedAt`：界面要显示"这是多久前的副本"
+ *   （`account-cache.ts` 的设计意图就是"给出准确的离线提示"而不是含糊的"可能是旧的"）。
+ */
 export async function getOfflineStatus(): Promise<OfflineStatus> {
   const snap = await loadSnapshot();
   if (!snap) {
+    // 没有副本 ⇒ 无论连线与否，都不存在"正在看副本"这回事
     return { offline: false };
   }
   const ageMs = Date.now() - snap.meta.savedAt;
-  // 「旧」的阈值取 10 分钟：短于它的副本与在线的差别对用户不可感
-  return ageMs > 10 * 60 * 1000
-    ? { offline: true, savedAt: snap.meta.savedAt, ageMs, revision: snap.meta.revision }
-    : { offline: false };
+  const base = { savedAt: snap.meta.savedAt, ageMs, revision: snap.meta.revision };
+  // ★ 主判据：发生地记的账
+  if (lastListFellBack === true) {
+    return { offline: true, ...base };
+  }
+  // ★ 上一轮明明从云端拿到了 ⇒ 在线，别因为副本"看着旧"而误报
+  if (lastListFellBack === false) {
+    return { offline: false };
+  }
+  // ★ 本轮还没问过（`undefined`）⇒ 不报离线。
+  //   宁可不说，也不要错说 —— 而这一支正是旧实现会误报的地方。
+  return { offline: false };
 }
 
 /** 测试与"退出登录"用：把只读副本也清掉（换账号时**必须**清，见 account-cache）。 */
 export async function dropCachedSnapshot(): Promise<void> {
   const { clearSnapshot } = await import('./account-cache');
   await clearSnapshot();
+  // ★ 副本没了，"读的是副本"这个记账也必须清 ——
+  //   否则退出登录后界面还会说"这是离线副本"，而那时**一份副本都没有**。
+  lastListFellBack = undefined;
 }
 
 export { SESSION_COLORS };
