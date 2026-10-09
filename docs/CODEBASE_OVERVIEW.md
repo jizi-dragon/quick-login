@@ -70,9 +70,12 @@ ServiceWorker），同 origin 多账号天然互相污染。本项目逐层把�
 │   │                            **逐条安装 + 单条失败降级**                     │
 │   ├─ core/favorites.ts         常用页面书签（v3.16，Alt+1 轮盘的数据源）        │
 │   ├─ core/parallel-store.ts    IDB accounts CRUD                              │
-│   ├─ core/credentials.ts       PBKDF2→AES-GCM 凭证加解密                       │
+│   ├─ core/account-cache.ts    云端快照的只读缓存（v3.18，**不含口令**）        │
+│   ├─ core/auto-login-cache.ts 待登录凭据的临时缓存（storage.session，60s）      │
+│   ├─ core/offline.ts          OfflineError：区分『网络不通』与『服务端出错』   │
 │   ├─ core/site-auth.ts         授权清单/scheme 探测（**仅 list/probeScheme 活**)│
-│   └─ 遗留：navigation / session-manager / account-registry（v2「会话轮盘」路径，│
+│   └─ （v3.18 已删：navigation / session-manager / account-registry、       │
+│        credentials、cloud-migrate —— 见 AGENTS.md §6「本地数据源已废除」）            │
 │              dispatch 分支仍在但**零发送方**）                                  │
 │ content/                                                                     │
 │   ├─ shield-main.ts  MAIN world 壳（872 行，上表 7 项职责 + 网络嗅探 + 页面命名）│
@@ -95,7 +98,7 @@ ServiceWorker），同 origin 多账号天然互相污染。本项目逐层把�
 | `.../background/core/parallel-session.ts` | 运行时编排主体（见组件图）。绑定/快照/规则三者的唯一事实源；`restore()` 冷启自举 |
 | `.../background/core/tab-rules.ts` | 每个绑定标签页至多 2 条 DNR session 规则；id 分区、逐条安装、差集恢复、孤儿清理 |
 | `.../background/core/favorites.ts` | 常用页面书签：读写 `ql:favorites`、缺省回落内置默认、相对路径按基准 origin 解析成 URL |
-| `.../background/core/credentials.ts` | PBKDF2(100k, SHA-256, **固定 salt**) → AES-GCM-256；种子存 `chrome.storage.local['sb:encryptionSeed']` |
+| `.../background/core/account-cache.ts` | 云端快照的**只读**缓存（IDB `accounts` 仓）。`CachedAccount = Omit<ParallelAccount,'credentials'>` ⇒ **类型层面保证不含口令**。写缓存先写账号再写元数据（元数据的 `count` 是『写完了』的标记） |
 | `.../content/shield-main.ts` | MAIN world 壳：上表 1/1′/1.5/4/5/6 平面 + 种子直灌 + 写入上报 + fetch/XHR 嗅探 + 页面命名；激活门控见「数据与控制流」（其中两处实现已失效，见风险 C14/C15） |
 | `.../content/shield-bridge.ts` | 49 行双向中继；**SW 不可达时合成 `unbound`**（fail-open，见风险 A6） |
 | `.../content/auto-login.ts` | 自动填表：React 受控组件原生 setter + input/change、提交前回读、MutationObserver 即时填充、用户接管让位、失败感知；全流程逐事件入 `ql:forensics`（密码绝不入日志） |
@@ -177,8 +180,10 @@ node tools/e2e/probe-page.mjs   # 页面结构探针（见下方「工具链缺�
 - **消息协议集中定义**：`shared/messages.ts`（`RuntimeRequest`/`RuntimeResponse` 判别联合）、
   `shared/constants.ts`（`CONTENT_MESSAGE`/`WINDOW_CHANNEL`/存储键）。
   响应统一 `{ kind, result: { ok:true, data } | { ok:false, error } }`。
-- **存储键前缀**：`sb:` 为 v2.1 遗留（`sb:encryptionSeed`、`sb:siteGrants`、`sb:tabBindings`），
+- **存储键前缀**：`sb:` 为 v2.1 遗留（`sb:siteGrants`、`sb:tabBindings`），
   `ql:` 为现行；IDB 名仍是遗留的 `sessionbox-reborn`。
+  ★ `sb:encryptionSeed` 与本地凭据加密已在 v3.18 废除（见 AGENTS.md §6），该键**不再被写入**；
+  老库里可能仍有残留值，它现在**没有任何读取方**，留着无害但也不再有意义。
 - **DNR 规则**：显式写全 `resourceTypes`；session 规则 id 按平面对半分段（AUTH 1xxxxx / COOKIE 2xxxxx）；
   **逐条安装 + 单条失败降级**；`requestDomains` 含父域且剥离端口；`tabIds` 限死作用域。
 - **诊断埋点**：SW 侧统一写 `chrome.storage.local['ql:diag']`（人读，环形 60 条）与
@@ -205,8 +210,10 @@ node tools/e2e/probe-page.mjs   # 页面结构探针（见下方「工具链缺�
    即可直读**真实 jar**。另一处 fail-open：若原型 descriptor 不可配置，`installCookieVirtualization()` 直接
    `return`（`:118-120`）——整个 Cookie 袋平面静默缺席，无任何诊断埋点。
    （写侧还会丢弃 `path/domain/expires`，见 `:130-131` 注释，属已知取舍。）
-3. **静态加密实为混淆级**【验】。密钥种子与密文同存 `chrome.storage.local`（`credentials.ts:11-18`），
-   无硬件绑定、无用户口令；salt 固定为字面量 `'sessionbox-salt-v1'` 且无 KDF 版本字段（`:30`）。
+3. ~~**静态加密实为混淆级**~~【**v3.18 已消除**】。这条曾指出：密钥种子与密文同存
+   `chrome.storage.local`，无硬件绑定、无用户口令，salt 固定 ⇒ 防不住『扩展数据目录被整份
+   拿走』。**处理方式不是加强它，而是删掉它** —— 本地凭据存储整体废除，口令只存在于
+   云端（服务端 Fernet，密钥不在客户端）。见 AGENTS.md §6。
    它能挡住直接读 IndexedDB 的旁观者，挡不住能读扩展存储的人。
 4. **AUTH/COOKIE 规则只覆盖 10/15 种资源类型**【验+推】。`ALL_MATCH_TYPES`（`tab-rules.ts:49-60`）注释自称
    「全资源类型」，实际硬编码 10 项；Chrome DNR 另有 `object`/`ping`/`csp_report`/`webtransport`/`webbundle`。
@@ -313,11 +320,10 @@ node tools/e2e/probe-page.mjs   # 页面结构探针（见下方「工具链缺�
 ### D. 工程化与技术债
 
 30. **零自动化测试、零 CI、零 lint**【验】。回归完全依赖人工浏览器实测。
-31. **v2「会话轮盘」路径仍在且仍被接线**【验】。`session.*` 六个 kind 的 dispatch 分支
-    （`service-worker.ts:40-104`）与 `registerNavigationHandlers`/`navigation.handleSessionOpenError`
-    都在运行，但**全仓库没有任何发送方**（UI 已全部迁移到 `par.*`）。
-    连带 `session-manager.ts`、`db.sessions`、`account-registry.ts`、`SESSION_KEYS.sessionTabBindings`
-    均为死重——但「属于旧模型」不等于可安全删除，删前需确认 `navigation.getPendingAutoLogin`（仍在用）等残留依赖。
+31. ~~**v2「会话轮盘」路径仍在且仍被接线**~~【**v3.18 已消除**】。`session.*` 六个 kind 的
+    dispatch 分支、`registerNavigationHandlers`、`session-manager.ts`、`db.sessions`、
+    `account-registry.ts` **全部删除** —— 实测 `parallel-session.ts` 从不 import 它们，
+    旧模型只服务那 6 个 UI 从不发送的消息。见 AGENTS.md §6。
 32. **常量双份维护**【验】。`constants.ts` 的 `SHIELD_WATCH_KEYS`/`SHIELD_COOKIE_BAG_KEY`/`shieldNsPrefix`
     **无任何 import**；`shield-main.ts:28-34` 自行硬编码同名字面量，`parallel-session.ts:47` 再写一份，
     靠注释人肉保持一致。
@@ -327,7 +333,7 @@ node tools/e2e/probe-page.mjs   # 页面结构探针（见下方「工具链缺�
     `parallel-session.ts:166-170` 的消息通道）。
 34. **死代码**：`send.ts:9-11 okOf()`、`messages.ts` 的 `wheel.toggle`、`site.grants.*` 分支（后台恒 `[]`/恒失败）、
     `service-worker.ts:330-334` 的占位分支、`types.ts:74` 的 `journalRollbackDone`（上行但无处理分支）、
-    `parallel-store.ts:113 updateCredentials`、`shield-main` 发送的 `hello.url`（后台从不读取），
+    `updateCredentials`（**v3.18 已删**：实测无调用点，且它的签名原本要求传入本地 AES-GCM 密文、云端实现再解密——本地加密废除后这条中转已无意义）、`shield-main` 发送的 `hello.url`（后台从不读取），
     以及上文 C14/C15 两处失效实现。
 35. **硬编码**：`'tonbridge-config.aksoegmp.com'`（`service-worker.ts:150`、`parallel.ts:51`）、
     `'/login'` 路径与 `path.includes('login')` 子串判定、IDB 名 `sessionbox-reborn`、固定 salt。
