@@ -1,3 +1,4 @@
+import type { LogRecord } from './log';
 import type { ParallelAccount, ParallelAccountStatus, SiteGrant } from './types';
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string };
@@ -25,6 +26,16 @@ export type RuntimeRequest =
   | { kind: 'par.open'; id: string; forceNewTab?: boolean }
   | { kind: 'par.grantChanged' }
   | { kind: 'ql.diag' }
+  /**
+   * ★★ 前端把日志转给 SW（v3.19）。
+   *
+   * `log()` 的环形缓冲与落盘 sink 都在 **SW 里**，而 content script 与扩展页面
+   * **各有自己的 JS 环境** ⇒ 它们记的日志永远进不了诊断包（实测 `ui/` 全仓零日志，
+   * `content/` 6/7 零日志 —— 不是忘了加，而是**加了也看不到**）。
+   *
+   * `records` 里的 `msg` **必须是已打码的**（`getForwardingLogger` 保证）。
+   */
+  | { kind: 'ql.log'; records: LogRecord[] }
   | { kind: 'wheel.toggle' }
   | { kind: 'data.export' }
   | { kind: 'data.import'; data: DataBackup }
@@ -112,6 +123,8 @@ export type RuntimeResponse =
   | { kind: 'par.open'; result: Result<{ tabId: number; reused: boolean }> }
   | { kind: 'par.grantChanged'; result: Result<boolean> }
   | { kind: 'ql.diag'; result: Result<Record<string, unknown>> }
+  /** ★ 前端日志转发（v3.19）。SW **不回传内容**（避免日志变成往返流量）。 */
+  | { kind: 'ql.log'; result: Result<{ accepted: number }> }
   | { kind: 'wheel.toggle'; result: Result<{ opened: boolean }> }
   | { kind: 'data.export'; result: Result<DataBackup> }
   | { kind: 'data.import'; result: Result<{ created: number; skipped: number; hosts: string[] }> }

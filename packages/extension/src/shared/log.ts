@@ -254,7 +254,7 @@ export function restoreToRing(records: readonly LogRecord[]): number {
 }
 
 /**
- * 取一个 logger。
+ * 取一个 logger。**产出留在本环境**（见 `forwardToSw` 的说明）。
  *
  * ★ 与服务器端同形（那边是 `logging_setup.get_logger("模块名")`）——
  *   两端形状一致能让"读日志的人"少一次上下文切换。
@@ -266,5 +266,75 @@ export function getLogger(name: string): Logger {
     info: (...a: unknown[]) => log('info', ns, a),
     warn: (...a: unknown[]) => log('warn', ns, a),
     error: (...a: unknown[]) => log('error', ns, a),
+  };
+}
+
+// ---------------------------------------------------------------- 跨环境转发
+//
+// ★★ 为什么需要它（v3.19）：
+//
+//   `log()` 的环形缓冲与 `setSink()` 的落盘都在 **service worker 里**。
+//   而 **content script 与扩展页面各有自己的 JS 环境** —— 它们调 `getLogger`
+//   写进的是**另一个进程的内存**，那个环**永远不会**进诊断包
+//   （诊断包由 SW 的 `ql.diag` 产）。
+//
+//   ⇒ 实测：`ui/` 下 **9 个文件全部零日志**，`content/` 下 6/7 零日志。
+//     不是"忘了加"，而是**加了也看不到** ⇒ 于是没人加。
+//     ★ 这是 `PITFALLS #22`（落盘通道没接线）的**同类**：
+//       机制只接到了 SW 这一端，另外两个环境从来没接上。
+//
+// ★ 做法：让前端把**已打码**的 `LogRecord` 交给一个**注入的发送函数**，
+//   由它转给 SW；SW 收到后直接喂进 `restoreToRing()` ⇒ 进内存环 + 走 sink 落盘。
+//
+// ★ 为什么用**注入**而不是直接 `import` 消息类型：
+//   那会让 `shared/log.ts` 依赖 `shared/messages.ts`，而 messages 又被
+//   service-worker 引用 —— 编译期不一定成环，但**耦合方向反了**
+//   （日志是最底层的工具，不该知道业务消息契约）。注入一个
+//   `(rec: LogRecord) => void` 就够了，且**可测**。
+
+/** 前端把日志交给谁（由 UI 侧注入，通常是发一条 `ql.log` 消息给 SW）。 */
+let forwarder: ((rec: LogRecord) => void) | null = null;
+
+/**
+ * 装上跨环境转发器。传 `null` 取消。
+ *
+ * ★ **发送方自己保证不抛**（照 `setSink` 的约定）—— 日志通道的故障不该影响业务。
+ *   转发器内部抛出的异常会被这里吞掉，并且**不会再产生一条日志**
+ *   （否则失败 → 记日志 → 再失败 → 无限放大）。
+ */
+export function setForwarder(fn: ((rec: LogRecord) => void) | null): void {
+  forwarder = fn;
+}
+
+/**
+ * 取一个**会转发到 SW** 的 logger（前端环境用）。
+ *
+ * ★ 与 `getLogger` 的区别只有一点：每条日志**额外**交给 forwarder。
+ *   本环境的 console/内存环行为完全不变 ⇒ 即使 SW 不可达，DevTools 里照样看得到。
+ *
+ * ★ 转发的 `msg` 是**已打码**的（`log()` 里 `formatArgs` 的产物）——
+ *   所以跨环境不引入新的泄露面。
+ */
+export function getForwardingLogger(name: string): Logger {
+  // ★ 刻意**不**复用 `getLogger(name)` 的四个方法：这里要的是"本环境产出 + 转发"，
+  //   而直接调模块级 `log()` 更直白（复用的话还要再解析一遍 ns）。
+  const wrap = (level: LogLevel) => (...a: unknown[]) => {
+    const ns = `${NS_PREFIX}:${name}`;
+    // 先按本环境规则产出（打码 + 级别过滤都在 log() 里）
+    log(level, ns, a);
+    // 再转发**已打码的文本**
+    if (forwarder && LEVEL_ORDER[level] >= LEVEL_ORDER[currentLevel]) {
+      try {
+        forwarder({ t: Date.now(), level, ns, msg: redact(formatArgs(a)) });
+      } catch {
+        /* 转发失败不能影响业务，也不能再记一条日志（会放大） */
+      }
+    }
+  };
+  return {
+    debug: wrap('debug'),
+    info: wrap('info'),
+    warn: wrap('warn'),
+    error: wrap('error'),
   };
 }

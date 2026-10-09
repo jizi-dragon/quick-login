@@ -260,6 +260,41 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       return { kind: 'ql.diag', result: r };
     }
 
+    /* ---------------- 前端日志转发（v3.19） ----------------
+     *
+     * ★★ 为什么需要它：`log()` 的环形缓冲与落盘 sink 都在 **SW 里**，
+     *   而 content script 与扩展页面**各有自己的 JS 环境** ⇒ 它们记的日志
+     *   写进另一个进程的内存，**永远进不了诊断包**。
+     *   实测（v3.19）：`ui/` 下 **9 个文件全部零日志**、`content/` 下 6/7 零日志。
+     *   ★ 这不是"忘了加"，是**加了也看不到** ⇒ 于是没人加。
+     *     与 `PITFALLS #22`（`setSink()` 从没被调用）是**同一形态的第二处**。
+     *
+     * ★ 用 `restoreToRing()` 而不是 `log()`：
+     *   ① 记录**已经打过码**（发送方 `getForwardingLogger` 保证）⇒ 不要重复加工；
+     *   ② `log()` 会**再触发 sink**，而 sink 会把整批重写一遍（无谓 IO）；
+     *   ③ `restoreToRing` 明确是"把历史记录放回环"的 API，语义正好。
+     *   ⇒ 之后 `ql.diag` 的 `drain()` 与落盘都会**自然带上**这些前端日志。
+     *
+     * ★ 上限：单条消息最多收 50 条，防止前端异常时一次灌爆环形 200。
+     *
+     * ★ 另外**每条都落一条 `forensics`**：前端日志受**级别过滤**（默认 `info`
+     *   下 `debug` 不转发），所以"前端在什么时候发不出消息"这类**将来要查的事**
+     *   可能当时没被记下来。`forensics` 是**结构化、不受级别影响**的，
+     *   而且它会进诊断包 ⇒ 把"前端报过日志"这件事本身变成**可查的痕迹**。
+     */
+    case 'ql.log': {
+      const records = Array.isArray(req.records) ? req.records.slice(0, 50) : [];
+      const accepted = restoreToRing(records);
+      if (accepted > 0) {
+        // 只记**来源模块与级别**，不记消息正文 —— 正文已在环里，
+        // 而 forensics 的环形更小（120），不该被正文占满。
+        const namespaces = [...new Set(records.map((r) => r.ns))].join(',');
+        const levels = [...new Set(records.map((r) => r.level))].join(',');
+        forensics('ui.log.forward', { accepted, namespaces, levels });
+      }
+      return { kind: 'ql.log', result: ok({ accepted }) };
+    }
+
     /* ---------------- 浏览器并行账号（纯扩展模式） ---------------- */
     case 'par.list': {
       const r = await tryRun(async () => {

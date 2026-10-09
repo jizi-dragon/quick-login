@@ -6,7 +6,34 @@ import type {
   RuntimeResponse,
 } from '../../shared/messages';
 import { DEFAULT_FAVORITES, EXT_VERSION, LOCAL_KEYS } from '../../shared/constants';
+import { getForwardingLogger, setForwarder } from '../../shared/log';
 import { send } from '../send';
+
+/* ==================== 日志通道（v3.19） ====================
+ *
+ * ★★ 本文件此前**零日志**（1964 行、14 处静默 catch）—— 而这不是"忘了加"：
+ *   `log()` 的环形缓冲与落盘 sink 都在 **SW 里**，而扩展页面**有自己的 JS 环境**
+ *   ⇒ 在这里 `getLogger()` 记的日志写进另一个进程的内存，**永远进不了诊断包**。
+ *   （与 `PITFALLS #22` 的 `setSink()` 是同一形态的第二处：机制只接到了 SW。）
+ *
+ * ★ 所以先**装转发器**：把每条日志交给 SW（`ql.log` ⇒ `restoreToRing`）。
+ *   ★ 用 `getForwardingLogger` 而不是 `getLogger`：前者额外转发，**本环境的
+ *     console 行为不变** ⇒ 即使 SW 不可达，DevTools 里照样看得到。
+ *   ★ 发送函数用**回调形态**并忽略 `chrome.runtime.lastError` ——
+ *     转发日志**绝不能**因为"没有接收端"而抛错或产生未捕获的 Promise 拒绝。
+ */
+const log = getForwardingLogger('parallel');
+setForwarder((rec) => {
+  try {
+    chrome.runtime.sendMessage({ kind: 'ql.log', records: [rec] }, () => {
+      // 读一下 lastError 把它吞掉：SW 冷启/重载期间发消息会报"无接收端"，
+      // 而那是**正常**的（日志丢一条，业务不受影响）。
+      void chrome.runtime.lastError;
+    });
+  } catch {
+    /* 连 sendMessage 都不可用时静默 —— 本环境的 console 已经有这条了 */
+  }
+});
 
 type BrowserAccount = ParallelAccount & ParallelAccountStatus & { password: boolean };
 
@@ -166,7 +193,18 @@ async function loadBrowserAccounts(): Promise<void> {
     const off = await send({ kind: 'par.offline' });
     offlineStatus =
       off.kind === 'par.offline' && off.result.ok ? off.result.data : { offline: false };
-  } catch {
+  } catch (e) {
+    // ★★ 2026-10-09 补：这一支**此前完全静默**，而它的后果是**界面说谎**。
+    //
+    //   问不到状态 ⇒ 判 `offline: false` ⇒ 界面**不显示"只读副本"提示**。
+    //   如果此刻用户手里的列表**其实**是离线副本，他会以为那是实时数据，
+    //   于是"改了没反应"被理解成"扩展坏了"。
+    //
+    //   ★ 级别 `warn`：它是**降级**（少了一条重要提示），不是主流程失败。
+    //   ★ 不选 `debug`：默认 `info` 级下不输出 ⇒ 等于没加（规则 25）。
+    //   ★ 频率：`loadBrowserAccounts()` 每次刷新调一次 ⇒ 低频，不会挤爆环形。
+    log.warn('par.offline 取不到 ⇒ 按"在线"处理、**不显示只读副本提示**（'
+      + '若列表其实是副本，界面会误导）：%s', e instanceof Error ? e.message : String(e));
     offlineStatus = { offline: false };
   }
 
@@ -1545,7 +1583,23 @@ let deviceExpiresAt = 0;
 async function sendSafe(req: RuntimeRequest): Promise<RuntimeResponse | null> {
   try {
     return ((await send(req)) as RuntimeResponse | undefined) ?? null;
-  } catch {
+  } catch (e) {
+    // ★★ 2026-10-09 补：这是**所有**后台通信的收口，而它此前**完全静默**。
+    //
+    //   "后台重启 / 无接收端"折成 null 是对的（轮询循环不该炸），
+    //   但**静默**是错的：三种后果全都是"看起来正常"——
+    //     ① 设备流轮询**无声停住**（用户以为还在等批准）
+    //     ② `cloud.device.poll` 拿不到 ⇒ 用户等一个**永远不会来的**结果
+    //     ③ 后台真的挂了 ⇒ 界面上一切照旧，只是**什么都没发生**
+    //
+    //   ★ 级别 `debug`：它是**正常路径之一**（SW 冷启期间必然发生几次），
+    //     记 `warn` 会把环形 60 里的真失败挤掉（规则 22）。
+    //     ⇒ 默认 `info` 级下它**不输出** ⇒ 只在排障时开 `debug` 才看得到。
+    //   ★ 而"排障时才发现"是不够的 ⇒ SW 侧对 `ql.log` **额外落一条 forensics**
+    //     （结构化、带来源），这样"前端在什么时候发不出消息"在诊断包里**一直有**，
+    //     不取决于当时的日志级别。见 `service-worker.ts` 的 `ql.log` handler。
+    log.debug('sendSafe(%s) 失败 ⇒ 折成 null（后台重启/无接收端？）：%s',
+      req.kind, e instanceof Error ? e.message : String(e));
     return null;
   }
 }

@@ -220,6 +220,36 @@ const CASES = [
           + '  // 缺陷版：把记录喂回 sink（回路）\n'
           + '  if (sink) for (const r of keep) sink(r);',
   },
+  {
+    // ★ 第 15 节（跨环境转发）的反证 —— 拆掉**模块级**的 setForwarder 调用。
+    //   ⇒ 前端日志又只留在自己的环境里，永远进不了诊断包。
+    //   ★ 锚点不带 `\n`（规则 25 的教训）。
+    label: '⑲ 拆掉 parallel.ts 的 setForwarder() 调用 ⇒ 前端日志又出不去',
+    file: PANEL_TS,
+    anchor: 'setForwarder((rec) => {',
+    broken: 'const _unusedForwarder = ((rec) => {',
+  },
+  {
+    // ★ 第 15 节的第二半：SW 收到 ql.log 后**不入环** ⇒ 转发白做。
+    label: '⑳ ql.log 不再 restoreToRing（转发白做）',
+    file: SW_TS,
+    anchor: 'const accepted = restoreToRing(records);',
+    broken: 'const accepted = records.length; // 缺陷版：不入环',
+  },
+  {
+    // ★ 第 15 节：转发前不再打码 ⇒ 若前端把凭据拼进消息，跨环境会泄露。
+    label: '㉑ getForwardingLogger 转发前不打码',
+    file: LOG_TS,
+    anchor: '        forwarder({ t: Date.now(), level, ns, msg: redact(formatArgs(a)) });',
+    broken: '        forwarder({ t: Date.now(), level, ns, msg: formatArgs(a) });',
+  },
+  {
+    // ★ 第 15 节的第三条：`sendSafe` 又变回静默（用户看不到"设备流停住了"）。
+    label: '㉒ sendSafe 的 catch 又变静默 ⇒ 后台不通时界面一切照旧',
+    file: PANEL_TS,
+    anchor: "    log.debug('sendSafe(%s) 失败 ⇒ 折成 null（后台重启/无接收端？）：%s',",
+    broken: '    // 缺陷版：静默',
+  },
 ];
 
 function runCheck() {

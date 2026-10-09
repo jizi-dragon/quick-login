@@ -1015,6 +1015,89 @@ console.log('\n=== 14. 日志落盘通道必须接线（接口摆着 ≠ 接上�
   }
 }
 
+// ---------------------------------------------------------------- 15. 跨环境转发
+console.log('\n=== 15. 前端日志必须能到落盘通道（跨环境转发）===');
+{
+  // ★★ 为什么单独一节：
+  //
+  //   `log()` 的环形缓冲与 `setSink()` 的落盘都在 **service worker 里**。
+  //   而 content script 与扩展页面**各有自己的 JS 环境** ⇒
+  //   它们在**本环境**记的日志永远进不了诊断包。
+  //   实测（v3.19）：`ui/` 下 **9 个文件全部零日志**、`content/` 下 6/7 零日志。
+  //   ★ 不是"忘了加"，是**加了也看不到** ⇒ 于是没人加。
+  //     与 `PITFALLS #22`（`setSink()` 从没被调用）是**同一形态的第二处**。
+  //
+  //   与第 14 节的分工：14 节管"SW 自己的日志有没有落盘"，
+  //   本节管"**别的环境的**日志有没有到 SW"。
+  const LOG = join(SRC, 'shared', 'log.ts');
+  const MSGS = join(SRC, 'shared', 'messages.ts');
+  const SW = join(SRC, 'background', 'service-worker.ts');
+  const PANEL = join(SRC, 'ui', 'parallel', 'parallel.ts');
+
+  const logSrc = readFileSync(LOG, 'utf8');
+  const msgSrc = readFileSync(MSGS, 'utf8');
+  const swRaw = readFileSync(SW, 'utf8');
+  const panelRaw = readFileSync(PANEL, 'utf8');
+  // 剥注释（否则"解释为什么加转发"的注释会命中 —— PITFALLS #19 那条）
+  const sw = swRaw.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  const panel = panelRaw.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+
+  // ① 契约里有这个 kind（两侧都要）
+  check('RuntimeRequest 契约里有 ql.log',
+    /\{\s*kind:\s*'ql\.log';\s*records:/.test(msgSrc));
+  check('RuntimeResponse 契约里有 ql.log',
+    /\{\s*kind:\s*'ql\.log';\s*result:/.test(msgSrc));
+
+  // ② log.ts 提供转发器与"会转发的 logger"（两者缺一不可）
+  check('log.ts 导出 setForwarder', /export function setForwarder\(/.test(logSrc));
+  check('log.ts 导出 getForwardingLogger',
+    /export function getForwardingLogger\(/.test(logSrc));
+  // ★ 转发的 msg 必须**再打一次码** —— 进通道的文本必须已打码是硬约定
+  check('getForwardingLogger 转发前调用 redact()',
+    /forwarder\(\{[^}]*msg:\s*redact\(/.test(logSrc));
+
+  // ③ SW 有 handler，且**喂给 restoreToRing**（不是另起一个环）
+  check('SW 的 dispatch 里有 ql.log 分支', /case\s*'ql\.log':/.test(sw));
+  check('ql.log 用 restoreToRing 入环（与诊断包同一个环）',
+    /case\s*'ql\.log':[\s\S]{0,400}?restoreToRing\(/.test(sw));
+
+  // ④ 前端**真的装了**转发器（模块级调用，不是只定义）
+  //   ★ 与第 14 节同一个教训：判据要盯**调用**，不是"文件里出现过某个 token"。
+  check('parallel.ts 模块级调了 setForwarder',
+    /^setForwarder\(/m.test(panel));
+  check('parallel.ts 用的是 getForwardingLogger（不是 getLogger）',
+    /getForwardingLogger\(/.test(panel) && !/\bgetLogger\(/.test(panel));
+
+  // ⑤ 三条真实静默失败必须留痕（与第 13 节同一套白名单思路）
+  const CASES = [
+    { fn: 'sendSafe', minLevel: 'debug',
+      why: '所有后台通信的收口 —— 静默 null 时设备流轮询会无声停住' },
+    { fn: 'loadBrowserAccounts', minLevel: 'warn',
+      why: 'par.offline 取不到 ⇒ 不显示"只读副本"提示 ⇒ 界面说谎' },
+  ];
+  for (const c of CASES) {
+    // 取函数体（配对花括号）
+    const m = new RegExp(`(?:async\\s+)?function\\s+${c.fn}\\s*\\(`).exec(panel);
+    check(`前提：取到了 parallel.ts 的 ${c.fn}()`, m !== null);
+    if (!m) continue;
+    const open = panel.indexOf('{', m.index);
+    let depth = 0; let body = null;
+    for (let i = open; i < panel.length; i++) {
+      if (panel[i] === '{') depth++;
+      else if (panel[i] === '}') { depth--; if (!depth) { body = panel.slice(open, i + 1); break; } }
+    }
+    check(`前提：取到了 ${c.fn}() 的函数体`, body !== null);
+    if (!body) continue;
+    const levels = ['debug', 'info', 'warn', 'error'];
+    const minIdx = levels.indexOf(c.minLevel);
+    let hit = false;
+    for (const mm of body.matchAll(/\blog\.(debug|info|warn|error)\s*\(/g)) {
+      if (levels.indexOf(mm[1]) >= minIdx) hit = true;
+    }
+    check(`${c.fn}() 内有 ≥${c.minLevel} 级留痕 —— ${c.why.slice(0, 30)}…`, hit);
+  }
+}
+
 // ---------------------------------------------------------------- 汇总
 const passed = results.filter(Boolean).length;
 console.log(`\n=== 汇总：${passed}/${results.length} 通过 ===`);
