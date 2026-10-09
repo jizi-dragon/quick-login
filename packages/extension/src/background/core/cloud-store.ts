@@ -1,6 +1,14 @@
 import { LOCAL_KEYS, SESSION_COLORS } from '../../shared/constants';
 import type { ParallelAccount } from '../../shared/types';
 import { OfflineError } from './offline';
+// ★ 2026-10-09：本模块此前**一行日志都没有**，而它这条链路上全是决定性的状态跃迁
+//   （网络不通 / 401 清会话 / 代理劫持 / 服务端 5xx）。
+//   ★ 这些是**罕见但关键**的事件，所以走 `diag()`（`storage.local` 环形 60）
+//     而不是 `log.debug()` —— 后者默认 `info` 级即静默，而这些必须**事后**能看到
+//     （诊断包里）。分工见 AGENTS.md 规则 22。
+import { getLogger } from '../../shared/log';
+
+const log = getLogger('cloud-store');
 import type { ParallelStore } from './parallel-store';
 
 /**
@@ -192,6 +200,11 @@ async function requestJson<T>(
     //   「服务端 500 / 令牌过期」（**绝不能**回落 —— 回落会让用户
     //   看着一份旧数据以为还能用，于是不去重新登录）。
     //   在此之前二者都只是一句 `Error`，无法区分。
+    //
+    // ★ 记一条日志：这是"离线降级"的**触发点**，而它最容易在排障时被误判成
+    //   "服务端挂了"或"扩展坏了"。有这一行，诊断包里就能看出是网络层 abort/timeout。
+    //   （`fetch` 抛出的具体原因在 MV3 里不可靠，所以记的是"哪条请求 + 超时上限"。）
+    log.warn('网络层失败 %s %s → 抛 OfflineError（读路径可回落只读副本）', init.method ?? 'GET', path);
     throw new OfflineError('读取云端');
   } finally {
     clearTimeout(timer);
@@ -211,16 +224,28 @@ async function requestJson<T>(
       //   但**不动数据源**：数据源保持 'cloud'，绝不静默切回本地（那会让用户以为账号没了）。
       //   匿名请求（设备授权那两步不带令牌）不在此列：那种 401 与本地会话无关。
       if (init.token) {
+        // ★ 记一条日志：这一支会**清掉会话**，是"用户突然要求重新登录"的唯一原因。
+        //   没有它时，症状（被踢出登录）与原因（某个后台请求吃了 401）之间的链条是断的。
+        //   ⚠️ 只记 **HTTP 状态与路径**，绝不记令牌（`log()` 会打码，但我们也不给它机会）。
+        log.warn('云端 %s %s → %d：会话已失效，清 cloudAuth（数据源保持 cloud）',
+          init.method ?? 'GET', path, res.status);
         await setCloudAuth(null);
         invalidateCloudCache();
       }
       throw new Error(`登录已过期（HTTP ${res.status}）：请在数据源处重新登录云端账号库`);
     }
     const detail = errorDetail(data, text);
+    // ★ 5xx / 4xx 都不是"离线"，所以**不会**回落只读副本 —— 记下来才能区分二者。
+    //   ★ 只记状态码与路径，**不记 `detail`**：它可能回显服务端的额外信息，
+    //     而这条通道（`diag()`）虽然也打码，但没有必要把响应体带进来。
+    log.error('云端 %s %s → %d（非离线，读路径不会回落）',
+      init.method ?? 'GET', path, res.status);
     throw new Error(`云端请求失败（HTTP ${res.status}）${detail ? `：${detail}` : ''}`);
   }
   if (data === undefined && text.trim()) {
     // 200 但响应体不是 JSON：代理/门户劫持的典型形态，绝不能当成"空数据"吞掉
+    log.error('云端 %s %s → 200 但响应不是 JSON（疑似代理/门户劫持）',
+      init.method ?? 'GET', path);
     throw new Error('云端响应不是合法 JSON（可能被网络代理拦截），已中止以免误读数据');
   }
   return data as T;
