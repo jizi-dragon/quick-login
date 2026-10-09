@@ -4,6 +4,10 @@ import type { BridgeDownPayload, BridgeUpPayload, ParallelAccount } from '../../
 import { setTabTitle } from '../tabs/tab-title';
 import { parallelStore, resolveAccountPlaintext } from './parallel-store';
 import { tabRules, parentDomainOf, hostNoPortOf } from './tab-rules';
+// ★ 打码要在**通道**上做，所以要在这里 import 它。
+//   用 `shared/redact`（而非 `shared/log`）是为了**不把 logger 拖进来**：
+//   本文件不需要 logger，只需要那个纯函数 —— 而 `redact.ts` 是无依赖的。
+import { redact, redactDetail } from '../../shared/redact';
 
 /**
  * 「多平面隔离」运行时编排（纯扩展多账号并行，见 docs/BROWSER-ONLY-MULTILOGIN-RESEARCH.md §4）：
@@ -50,15 +54,37 @@ async function diag(msg: string): Promise<void> {
   try {
     const key = 'ql:diag';
     const cur = (await chrome.storage.local.get(key))[key] as string[] | undefined;
-    const next = [...(cur ?? []).slice(-59), `${new Date().toISOString().slice(11, 23)} ${msg}`];
+    // ★ 落盘前强制打码（见 `forensics` 的说明）。
+    const line = redact(`${new Date().toISOString().slice(11, 23)} ${msg}`);
+    const next = [...(cur ?? []).slice(-59), line];
     await chrome.storage.local.set({ [key]: next });
   } catch {
     // 埋点失败不影响业务
   }
 }
 
-/** 登录失败现场取证（v3.12.2）：结构化事件写入 storage.local['ql:forensics']（环形 120 条）。
- *  与 diag（人读文本）并行；管理页「导出诊断包」一键取走。 */
+/**
+ * 登录失败现场取证（v3.12.2）：结构化事件写入 `storage.local['ql:forensics']`
+ * （环形 120 条）。与 diag（人读文本）并行；管理页「导出诊断包」一键取走。
+ *
+ * ## ★★ 2026-10-09：这个函数原先**绕过了打码通道**
+ *
+ * 它是"第三个日志出口"，却既不经过 `shared/log.ts`、也不做任何打码 ——
+ * 而它的产物会**进诊断包被一键导出**。原来的安全假设写在
+ * `content/auto-login.ts` 的注释里："密码/用户名绝不入日志"。
+ *
+ * 实测那 7 个调用点**当时确实没有传凭据**（只传 `attempts` / `reason` / `errorSeen`），
+ * 所以**没有实际泄露**。但那条保证是**约定，不是机制** ——
+ * 它靠的是下一个人记得住，而载荷的来源是
+ * `{ tabId: sender.tab?.id, ...p }`，`p` 完全由**内容脚本**决定。
+ *
+ * ⇒ 现在打码落在**通道上**（与 `shared/log.ts` 同一条纪律）：
+ *   键名敏感的直接替换、字符串值再过一遍值形状规则。这样"不小心传了凭据"
+ *   不再等于"凭据落盘"。
+ *
+ * ★ 判据：`tools/verify/verify-log-redaction.mjs` 的 forensics 一节
+ *   （构造一个含 `password` 的事件，断言落盘的是 `«已打码»`）。
+ */
 export async function forensics(ev: string, detail: Record<string, unknown> = {}): Promise<void> {
   try {
     const key = LOCAL_KEYS.forensics;
@@ -67,7 +93,7 @@ export async function forensics(ev: string, detail: Record<string, unknown> = {}
       | undefined;
     const next = [
       ...(cur ?? []).slice(-119),
-      { t: Date.now(), ev, ...detail },
+      { t: Date.now(), ev: redact(ev), ...(redactDetail(detail) as Record<string, unknown>) },
     ];
     await chrome.storage.local.set({ [key]: next });
   } catch {

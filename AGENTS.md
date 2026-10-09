@@ -14,7 +14,7 @@
 > | 想了解 | 去哪 |
 > |---|---|
 > | **隔离平面总表（权威口径）** | [docs/CODEBASE_OVERVIEW.md](docs/CODEBASE_OVERVIEW.md) §Architecture |
-> | **踩过的坑（11 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
+> | **踩过的坑（13 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
 > | 功能清单与使用说明（给人看的） | [docs/USER-MANUAL.md](docs/USER-MANUAL.md) |
 > | 现状快照与安全边界 | [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) |
 > | 现场排障与诊断埋点怎么读 | [docs/DIAG-GUIDE.md](docs/DIAG-GUIDE.md) |
@@ -82,6 +82,7 @@
 | 18 | **删代码后必须与 HEAD 逐行对照**（不是"看 typecheck 绿不绿"）。<br>实测教训（v3.18，见 §6.3）：删"数据源按钮的 UI 状态块"时，一条跨多行正则**吞掉了紧邻的设备流代码**（三个监听器 + `openApprovalTab` + `deviceApprovalUrl`）。合成出的文件**语法合法**，`tsc` 与 `npm run build` **都通过**，唯一信号是"`deviceUserCodeOpen` 声明但未使用"——那读起来像"清理未用变量"，实际是**功能被删掉**。<br>判据：`git show HEAD:<file>` 与当前文件逐行比，列出**"HEAD 有、现在没有"**的行，**逐条确认它们在删除清单里**。<br>★ **typecheck 只说明"剩下的代码自洽"，不说明"该留的还在"。** |
 | 19 | **跨多行正则删代码时，锚点必须唯一且紧贴目标**。同上教训：那条正则用 `(?:\s*[^\n]*\n)*?` 这样的**开放量词**往后吃，把不相邻的块也吞了。<br>⇒ 优先用**精确的多行字面量**（整块原样写出来）而不是正则。 |
 | 20 | **删 DOM 标记后必须核对 `HTML id ↔ TS getElementById` 一致性**。TS 里 `getElementById('x')` 拿到 `null` 的类型仍是 `HTMLElement`（因为断言了 `as`）⇒ **编译期不报错**，运行时点一下就崩。<br>判据：`id="..."` 的集合与 `getElementById('...')` 的集合做差集，**`TS − HTML` 必须为空**。本轮的检查脚本当场抓到一处（`help-reset-confirm-btn`）。 |
+| 21 | **"零裸 `console.*`"只证明了"没有绕过 A 通道"，证明不了"没有 B 通道"。**<br>实测（`PITFALLS #12`）：扩展端有**三个**写出进程的出口 —— `console` / `chrome.storage` / 网络。其中 `forensics()` 与 `diag()` 都直接写 `chrome.storage.local` 且**不做任何打码**，而它们的产物**会进诊断包被一键导出**。"零裸 console"当时是全绿的。<br>⇒ **打码必须落在通道上，而不是靠调用点自觉**。落盘点（`storage.local.set` / `console.*` / `fetch` 的发包体）是**该有打码的地方**；调用点不是。<br>★ 找这类洞的方法是**枚举出口**（谁会写到进程外？），不是搜索已知的坏模式。<br>★ 凡是"安全靠约定"的地方，问一句：**这条约定如果被违反，谁会知道？** 答不上来 = 它是约定而不是机制。<br>判据：`node tools/verify/verify-forensics-redaction.mjs`（25 条，**真的把模块求值、真的调 `forensics()` 再读回落盘内容**）+ 反证 `verify-falsify-forensics.mjs`（3/3） |
 
 ---
 
@@ -108,8 +109,13 @@ npm ci                    # 依赖现在已显式声明（含 playwright-core）
 npm run typecheck         # tsc --noEmit，strict
 npm run build             # esbuild → dist/
 npm run check-deps        # 幽灵依赖门禁（三方裸模块必须已声明）
-node tools/verify/log-redaction.mjs          # 日志打码验收（37 条，秒级，**不需要浏览器**）
-node tools/verify/falsify-log-redaction.mjs  # 上一条的反证（3/3）
+
+# 打码通道：**四个**脚本，秒级，都**不需要浏览器**
+node tools/verify/verify-log-redaction.mjs           # 日志通道（37 条）
+node tools/verify/verify-falsify-logredaction.mjs    # ↑ 的反证（3/3）
+node tools/verify/verify-forensics-redaction.mjs     # 取证/诊断通道（25 条）
+node tools/verify/verify-falsify-forensics.mjs       # ↑ 的反证（3/3）
+
 npm run verify:list       # 列出回归脚本（不跑）
 ```
 
@@ -145,7 +151,7 @@ npm run verify -- --only jarhygiene
   与服务器端统一。
 - **每修一个"看起来正常但其实是坏的"缺陷，就把它的判据写进脚本注释或
   [`docs/PITFALLS.md`](docs/PITFALLS.md)。**
-  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（11 条）——在此之前这类教训
+  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（当前 **13 条**）——在此之前这类教训
   只散在 `CHANGELOG.md` 里，而两者的分工不同：
   `CHANGELOG.md` 记"每次发布改了什么"（历史），
   `PITFALLS.md` 记"**哪些错会静默发生、怎么一眼认出来**"（可复用的判据）。

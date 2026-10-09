@@ -116,3 +116,79 @@ export function redact(input: string): string {
 
 /** 已经打码过的占位符本身不该被二次处理（`«已打码»` 里的中文不会被规则命中，但显式保证）。 */
 export const REDACTION_RULES = RULES.map((r) => r.name);
+
+/**
+ * **按敏感键名**直接替换的名单。
+ *
+ * ## ★ 为什么光有"值形状"规则不够
+ *
+ * `RULES` 靠的是"键名 + 分隔符 + 值"的**文本形状**，它需要值和键在同一段文本里。
+ * 而结构化载荷（`forensics()` 的事件对象）在 JS 层面是 `{ password: 'x' }`，
+ * 键与值**从来没有被拼成字符串** —— 于是 `redact('x')` 什么也匹配不到。
+ *
+ * ⇒ 对象级打码必须**另有一条按键名判定的路**。两者的分工：
+ *   | 场景 | 靠什么 |
+ *   |---|---|
+ *   | 拼好的日志文本 | `RULES`（值的形状） |
+ *   | 结构化对象 | `SENSITIVE_KEYS`（键名） |
+ *   | 字符串值里嵌着凭据 | `RULES`（两者叠加） |
+ *
+ * ★ 键名匹配用**小写包含**而不是相等：`accessToken` / `userPassword` / `old_password`
+ *   这类复合键名在实际代码里比裸 `password` 更常见，而漏掉它们的代价是**明文入库**。
+ */
+const SENSITIVE_KEYS = [
+  'password', 'passwd', 'pwd', 'secret', 'token', 'credential', 'credentials',
+  'apikey', 'api_key', 'accesskey', 'access_key', 'privatekey', 'private_key',
+  'fernet', 'encryptionseed', 'cryptoseed', 'plain', 'otp', 'authorization',
+];
+
+function isSensitiveKey(key: string): boolean {
+  const k = key.toLowerCase();
+  return SENSITIVE_KEYS.some((s) => k.includes(s));
+}
+
+/**
+ * 对**任意值**做深度打码，返回"形状相同但值已打码"的副本。
+ *
+ * ## 三条硬性要求（都来自实测过的失败形态）
+ *
+ * 1. **绝不抛异常**。打码代码抛异常比丢一条日志坏得多 —— MV3 的 SW 里一个
+ *    未捕获异常会终止整个 worker。循环引用、`BigInt`、`Symbol`、getter 抛错
+ *    都必须被兜住。
+ * 2. **保留结构**。`forensics()` 的诊断价值就在于"能按字段看"，
+ *    所以不能整体 `JSON.stringify` 成一个大字符串再打码 ——
+ *    那会把键名也变成文本，而这恰恰是唯一还能识别"这是不是凭据"的东西。
+ * 3. **敏感键直接替换，不看值**。值可能是短口令、可能是数字 ID，
+ *    而**按值猜永远会漏**；键名是确定的。
+ */
+export function redactDetail(value: unknown, seen = new WeakSet<object>()): unknown {
+  try {
+    if (typeof value === 'string') return redact(value);
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return value;
+    if (typeof value === 'bigint') return `${value.toString()}n`;
+    if (typeof value === 'symbol') return value.toString();
+    if (typeof value === 'function') return '[function]';
+    if (value instanceof Error) return `${value.name}: ${redact(value.message)}`;
+
+    if (typeof value === 'object') {
+      if (seen.has(value)) return '[circular]';
+      seen.add(value);
+      if (Array.isArray(value)) {
+        // ★ 数组元素没有键名可用 ⇒ 只能靠值的形状（`redact`）。
+        //   这是本模块覆盖面的一处**已知下限**：`['mypassword']` 这种
+        //   "裸字符串数组"里的口令打不掉。⇒ 调用方不要把凭据放进数组。
+        return value.map((v) => redactDetail(v, seen));
+      }
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        out[k] = isSensitiveKey(k) ? REDACTED : redactDetail(v, seen);
+      }
+      return out;
+    }
+    return String(value);
+  } catch {
+    // 最后一道：宁可给个粗描述，也**绝不能**抛
+    return '[unredactable]';
+  }
+}

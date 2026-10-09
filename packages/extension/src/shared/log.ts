@@ -29,7 +29,7 @@ import { redact } from './redact';
 // 时报 `redact is not a function`，因为 log.ts 原来只 `import { redact }`，
 // esbuild 的**摇树**把 `redact.ts` 里没被用到的导出（包括 `REDACTED`）整段删掉了。
 // ⇒ 调用方（验证脚本、背景脚本）**只能从本模块取**，所以这里必须显式转发。
-export { redact, REDACTED, REDACTION_RULES } from './redact';
+export { redact, redactDetail, REDACTED, REDACTION_RULES } from './redact';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
