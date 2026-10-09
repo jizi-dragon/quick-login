@@ -189,21 +189,84 @@ npm run verify -- --only jarhygiene
 
 **用户 2026-10-09 决定：彻底废除扩展端的本地账号保存，强制登录云端账号。**
 
-现状是**双数据源**（`dataSource: 'local' | 'cloud'`，v3.14/v3.14.1 已实现云端），
-本次要**删掉 local 那一半**：
+### 6.1 侦察结论（2026-10-09 实测，动手前必读，不必再摸一遍）
 
-| 要删的 | 位置线索 |
+| 事实 | 数字 / 位置 |
 |---|---|
-| `local` 数据源分支与切换 UI | `ui/parallel/parallel.ts` 的 `switchDataSource` / `source-local` / `source-cloud` |
-| 本地 → 云端迁移合并 | `background/core/cloud-migrate.ts`、`cloud.migrate` 消息 |
-| 本地凭据加密存储 | `credentials` / `hasPassword` 的本地分支（云端模式下口令在服务端 Fernet 密文里） |
-| 切换确认弹窗（含"不再提示"标志） | `LOCAL_KEYS.skipSwitchConfirm` |
+| `dataSource` 相关命中 | **36 处**：`ui/parallel/parallel.ts` **29**、`cloud-store.ts` 10、`service-worker.ts` 6、`messages.ts` 3、`constants.ts` 3、`parallel-store.ts` 2、`cloud-migrate.ts` 2 |
+| 本地实现 | `parallel-store.ts` 的 `localStore`（10 个方法，走 IndexedDB） |
+| 本地凭据加密 | `background/core/credentials.ts`（**95 行**）—— AES-GCM，**密钥种子就在 `chrome.storage.local` 的 `sb:encryptionSeed` 里** |
+| 门面 | `parallelStore` 按 `dataSource` 分发到 `localStore` / `cloudStore` |
+| ★ **`db.accounts` 的调用点** | **只有** `localStore` 与 `cloud-migrate` ⇒ 云端化后**没有任何调用点**，可整体改造成只读缓存 |
+| ★ **`db.sessions` 的调用点** | **只有** `session-manager.ts`（它自己 12 处） |
+| 要删的 UI | `parallel.ts` 的 `switchDataSource`（~L1741）/ `sourceLocalBtn` / `sourceCloudBtn` / `ql:skipSwitchConfirm` 确认弹窗 |
 
-**保留**：云端会话、设备流、以及**离线时的"列表只读缓存"**（不含口令；可看、可开页签，
-**不可新增/编辑，填表失效**）——这是用户在"彻底删本地"与"离线可用"之间选的折中。
+### 6.2 ★★ 一条必须先解决的发现：`session.*` **不是死代码**，它与被废除的本地模型交叉
 
-⇒ **动这块之前先读本节**。这条改造会让"数据源"这个概念消失，
-凡是按 `dataSource === 'cloud'` 分支的地方都要一并简化。
+第一眼它像遗留物：`session.*` 的 5 个消息 + `sessionManager` + `db.sessions`，
+而 **UI 一处都不发这些消息**（实测 UI 只发 `par.*`：`par.list` 7、`par.open` 3、`par.delete` 3、
+`par.create` 2、`par.update` 1、`par.moveBox` 1、`par.renameBox` 1、`par.deleteBox` 1…）。
+
+**但它不是死代码**：
+
+- `navigation.switchAccount(session, creds)` 收的是 **`Session`**（不是 `ParallelAccount`）；
+- `account-registry.ts` 用 `sessionManager.get(sessionId)` 取**标签页标题**；
+- `parallel-session.ts` 也调 `registerNavigationHandlers`。
+
+⇒ **两个模型在 `navigation` / `account-registry` 处交叉。**
+
+★ 所以"删掉本地数据源"之前必须回答一个问题：
+**`sessionId` 与 `accountId` 是不是同一个 id？**
+判定入口：`parallel-session.ts` 调 `navigation` 时传的是哪个 id ——
+它传 `session.id`，而它的 `session` 来自 `parallelStore.get(accountId)`
+（即云端 `ParallelAccount.id`）。**先把这个关系定下来，再动手** ——
+它一次性牵动 `navigation` / `account-registry` / `session-manager` / `types.ts` 四处，
+改一半必然返工。
+
+### 6.3 已完成但**未提交**（在 `git stash` 里，见 6.5）
+
+- 新增 `background/core/account-cache.ts` —— 只读快照缓存，
+  `CachedAccount = Omit<ParallelAccount,'credentials'>`（**类型层面就保证不含口令**）
+- 新增 `background/core/offline.ts` —— `OfflineError` + `isOfflineError`。
+  ★ 独立文件是**刻意的**：`cloud-store`（抛它）与 `parallel-store`（判它）互相 import，
+  而循环依赖在 `iife` 打包下不报错，只在运行时给出 `undefined` ⇒
+  `instanceof` 永远 false ⇒ **离线回落静默失效**。所以判定用标记字段而不是 `instanceof`。
+- `storage/db.ts` —— IDB 升到 v3，`accounts` 仓**先删再建**（清掉旧的凭据密文），
+  新增 `replaceAll`（清空 + 写入在**同一个事务**里，避免崩在中间留下空缓存）
+- `parallel-store.ts` —— `localStore` 与分发逻辑已删，只剩云端 + **有条件**的只读回落
+  （只有 `OfflineError` 才回落；401/403/5xx **绝不回落** ——
+  那会让用户看着旧数据以为"还能用"而不去重新登录）
+- 已删 `credentials.ts`、`cloud-migrate.ts`
+- service-worker / cloud-store / constants 里摘掉了 `dataSource` / `cloud.migrate` / `cloud.source.set`
+
+### 6.4 剩余（撤回时是 **15 个 `tsc` 错误**，全部已定位）
+
+| 位置 | 要做什么 |
+|---|---|
+| `cloud-store.ts:612` | 删掉"解密本机密文口令"那条分支（本地没了，这条路不存在） |
+| `service-worker.ts` 5 处 | 摘 `session.*` 那 5 个 case —— **先按 6.2 定下 id 关系** |
+| `service-worker.ts` ~261-305 | **导出/导入**：现在的备份带 `cryptoSeed` + 账号 `credentials`，全依赖本地加密 ⇒ 要么降级成"只导元数据（站点/标题/盒子/用户名）"，要么整体删掉。**这是产品决策，需要用户确认** |
+| `ui/parallel/parallel.ts` ~29 处 | 删数据源切换按钮与 `switchDataSource`（含"不再提示"标志） |
+| `messages.ts` 3 处 | 删 `cloud.migrate` / `cloud.source.set` 的消息类型；`cloud.state` 去掉 `source` |
+| `types.ts` | `Session` 与 `EncryptedCredentials` 的去留（随 6.2 的结论） |
+
+### 6.5 处置：半成品已撤回，绿色基线优先
+
+上述改动**已 `git stash`**（`stash@{0}`，message 前缀 `b7-wip`），**没有提交**。
+
+理由是本仓**没有 CI**，而"工作区里躺着 15 个编译错误"会让**下一个人（或下一个会话）
+无法判断哪些错是他自己引入的** —— 这是规则 17 的同一推理：
+**一个一直红着的基线，等于没有基线。**
+
+⇒ 继续这块时：
+
+```powershell
+git stash list          # 看有没有 b7-wip
+git stash pop           # 有就接着做
+```
+
+★ **不要**把 6.3 的成果和 6.4 的收尾拆成两次、中间隔很久 ——
+那会让 `stash` 长期存在，而 stash 是最容易被忘掉的地方。
 
 ---
 
