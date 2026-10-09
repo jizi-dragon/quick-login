@@ -1,5 +1,9 @@
 import { LOCAL_KEYS } from '../../shared/constants';
+import { getLogger } from '../../shared/log';
 import type { SiteGrant } from '../../shared/types';
+
+/** ★ 2026-10-09 补：这个模块此前**没有任何日志**。 */
+const log = getLogger('site-auth');
 
 const MENU_ID = 'sessionbox-add-site';
 
@@ -118,14 +122,29 @@ async function probeOnce(url: string): Promise<boolean> {
 export async function probeScheme(host: string): Promise<Scheme> {
   const hint = await getSchemeHint(host);
   if (hint) {
+    // ★ `debug`：命中 hint 是**正常路径**（只有第一次探测才会走网络），
+    //   记它只是为了回答"这个站点当初是怎么定下 scheme 的"。
+    log.debug('probeScheme(%s) → %s（命中已存 hint，未探测）', host, hint);
     return hint;
   }
   if (await probeOnce(`https://${host}/favicon.ico`)) {
+    // ★ `debug` —— 每次新站点只发生一次，是中频轨迹不是热路径。
+    log.debug('probeScheme(%s) → https（网络探测得出）', host);
     return 'https';
   }
   if (await probeOnce(`http://${host}/favicon.ico`)) {
+    log.debug('probeScheme(%s) → http（https 不可达，回落到 http）', host);
     return 'http';
   }
+  // ★★ 两个都探测失败 ⇒ 注释里说的"自签 https 会被误判为不可用"就是这里。
+  //   最终仍返回 `https`（安全偏好），由「打开失败自学习」兜底纠正。
+  //
+  //   ★ 为什么必须留痕：`probeOnce` 的 catch 把**一切**异常都变成 `false` ——
+  //     包括"网络真的不通"（预期）与"fetch 用法/环境出问题"（缺陷）。
+  //     两者在这里**不可区分**，而我们**能**区分的是"两个探测都失败了"这件事。
+  //     用户看到的只有"页签打开后是一片错误页"，没有别的信号。
+  log.warn('probeScheme(%s) 两个探测都失败（https 与 http 的 favicon 都不通）⇒ '
+    + '按安全偏好回落 https，靠「打开失败自学习」纠正', host);
   return 'https';
 }
 

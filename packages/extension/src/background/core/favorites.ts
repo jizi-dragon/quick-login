@@ -13,7 +13,11 @@
  *     本次调用传入的 baseOrigin → 当前活动页签的 origin → 放弃并报错（不猜一个域名）。
  */
 import { DEFAULT_FAVORITES, FAVORITES_MAX, LOCAL_KEYS } from '../../shared/constants';
+import { getLogger } from '../../shared/log';
 import type { FavoriteItem } from '../../shared/messages';
+
+/** ★ 2026-10-09 补：这个模块此前**没有任何日志**，而它的读失败会让用户的收藏静默消失。 */
+const log = getLogger('favorites');
 
 function normalizeOne(raw: unknown): FavoriteItem | null {
   const o = (raw ?? {}) as Record<string, unknown>;
@@ -31,7 +35,22 @@ export async function listFavorites(): Promise<FavoriteItem[]> {
   try {
     const o = await chrome.storage.local.get(LOCAL_KEYS.favorites);
     stored = o[LOCAL_KEYS.favorites];
-  } catch {
+  } catch (e) {
+    // ★★ 2026-10-09 补：这一支**此前完全静默**，而它的表现是**对用户说谎**。
+    //
+    //   读失败 ⇒ `stored = undefined` ⇒ 下面回落到 `DEFAULT_FAVORITES`
+    //   ⇒ **用户自建的收藏整份不见了，界面上显示的是内置默认书签**。
+    //
+    //   ★ 用户看到的是"我的书签被换掉了"，而不是"读取失败了" ——
+    //     他会以为扩展改了他的数据（而其实一个字节都没动）。
+    //     没有这一行时，我们的排查方向会完全错（去查存储写入 / 同步 / 迁移）。
+    //
+    //   ★ 级别 `warn`：它是降级（数据没坏，只是这次读不出来），不是主流程失败。
+    //   ★ 不选 `debug`：默认 `info` 下不输出 ⇒ 等于没加（规则 25）。
+    //   ★ 触发频率：`listFavorites` 在轮盘（Alt+1）与管理页被调用，是**用户动作级**
+    //     频率，不是热路径 ⇒ 不会挤掉 `ql:diag` 环形 60 里更重要的记录。
+    log.warn('listFavorites 读 storage.local 失败 ⇒ 回落到内置默认书签（用户的收藏这次看不到）：%s',
+      (e as Error)?.message ?? e);
     stored = undefined;
   }
   const arr = Array.isArray(stored) ? stored : [];

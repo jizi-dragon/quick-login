@@ -37,6 +37,10 @@ const MSGS_TS = join(SRC, 'shared', 'messages.ts');
 const TABRULES_TS = join(SRC, 'background', 'core', 'tab-rules.ts');
 const CDEV_TS = join(SRC, 'background', 'core', 'cloud-device.ts');
 const PH_TS = join(SRC, 'ui', 'parallel', 'parallel.html');
+// ★ 第 13 节（静默失败必须留痕）的三个目标
+const ACACHE_TS = join(SRC, 'background', 'core', 'account-cache.ts');
+const FAV_TS = join(SRC, 'background', 'core', 'favorites.ts');
+const SAUTH_TS = join(SRC, 'background', 'core', 'site-auth.ts');
 
 const CASES = [
   {
@@ -151,6 +155,34 @@ const CASES = [
     broken: '          <span id="cloud-account" class="cloud-account hidden"></span>\n'
           + '          <div id="definitely-orphan-id"></div>',
   },
+  {
+    // ★ 第 13 节（静默失败必须留痕）的反证 —— 形态 A：`catch` 里的留痕被拆掉。
+    //   ★★ 关键：把 `log.warn(` 拆成两半会让 marker **仍然留在源码里** ⇒ 判据不红
+    //      ⇒ 反证 SKIP（"验的是空气"）。规则 25 已经踩过这个坑。
+    //      所以这里改成**整个调用换成一句注释**，让被断言的字符串真的消失。
+    //   ★ 锚点用**实测原文**（不带 `\n` —— 行尾可能是 CRLF）。
+    label: '⑬ 拆掉 loadSnapshot 的 catch 留痕 ⇒ 离线读缓存失败又变静默',
+    file: ACACHE_TS,
+    anchor: "    log.warn('loadSnapshot 读缓存失败 ⇒ 离线时没有可回落的数据：%s', (e as Error)?.message ?? e);",
+    broken: '    // 缺陷版：留痕被拆掉，失败与"从未同步过"又长得一样',
+  },
+  {
+    // ★ 形态 B：`fallback` 形态（函数里没有 catch）的留痕被拆掉。
+    //   ⇒ 这一条验的是第 13 节认的**第二种形态** —— 如果判据只写"catch 里有 log"，
+    //     那么这条反证不会红（因为 probeScheme 里根本没有 catch 可查）。
+    label: '⑭ 拆掉 probeScheme 的失败留痕 ⇒ 两个探测都失败又变静默',
+    file: SAUTH_TS,
+    anchor: "  log.warn('probeScheme(%s) 两个探测都失败（https 与 http 的 favicon 都不通）⇒ '",
+    broken: "  void 0; // 缺陷版：失败留痕被拆掉",
+  },
+  {
+    // ★ 形态 A 的第二个目标 —— 验"逐条白名单"不是只保住了第一个。
+    //   ★ 它防的形态很具体：**用户自建的收藏整份消失，界面显示默认书签**。
+    label: '⑮ 拆掉 listFavorites 的 catch 留痕 ⇒ 收藏静默变成默认书签',
+    file: FAV_TS,
+    anchor: "    log.warn('listFavorites 读 storage.local 失败 ⇒ 回落到内置默认书签（用户的收藏这次看不到）：%s',",
+    broken: '    // 缺陷版：留痕被拆掉',
+  },
 ];
 
 function runCheck() {
@@ -201,7 +233,8 @@ console.log('\n=== 还原核对 ===');
 //   —— 下一轮的全量验收会红，但原因指向别处。
 //   判据（自证）：本列表与 CASES 里出现的 `file` **集合相等**。
 const touched = [...new Set(CASES.map((c) => c.file))];
-const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS, MSGS_TS, TABRULES_TS, CDEV_TS, PH_TS];
+const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS, MSGS_TS, TABRULES_TS, CDEV_TS, PH_TS,
+  ACACHE_TS, SAUTH_TS, FAV_TS];
 const uncovered = touched.filter((f) => !COVERED.includes(f));
 if (uncovered.length) failures.push(`还原核对漏了：${uncovered.join(', ')}`);
 
@@ -218,13 +251,19 @@ for (const f of COVERED) {
     : f === MSGS_TS ? "| { kind: 'par.list' }"
     : f === TABRULES_TS ? "log.error('addRule #%d **失败**：%s',"
     : f === PH_TS ? 'id="cloud-account"'
+    // ★ 第 13 节那三个 marker = 各自的**留痕语句**仍在（不是注释里的转述）。
+    : f === ACACHE_TS ? 'log.warn(\'loadSnapshot 读缓存失败'
+    : f === SAUTH_TS ? "log.warn('probeScheme(%s) 两个探测都失败"
+    : f === FAV_TS ? 'log.warn(\'listFavorites 读 storage.local 失败'
     // ★ `cloud-device.ts` 的 marker = 那条"只记有没有凭据"的既有形态仍在。
     : "token ? '有' : '无'";
   const restored = readFileSync(f, 'utf8');
   const ok = restored.includes(marker)
     // 反证用的那些"缺陷版痕迹"必须**已经不在**（否则还原没做成）
     && !restored.includes('definitely.not.implemented')
-    && !restored.includes('// 缺陷版：不记 error');
+    && !restored.includes('// 缺陷版：不记 error')
+    && !restored.includes('// 缺陷版：留痕被拆掉')
+    && !restored.includes('// 缺陷版：失败留痕被拆掉');
   if (!ok) failures.push(`${short} 还原不完整（marker=${marker}）`);
   console.log(`  ${ok ? 'OK  ' : 'FAIL'} ${short} 已还原（含 ${marker.slice(0, 40)}）`);
 }

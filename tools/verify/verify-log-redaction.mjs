@@ -784,6 +784,127 @@ console.log('\n=== 12. DOM 一致性：HTML ↔ TS 双向 ===');
     + `白名单 ${Object.keys(STATIC_ONLY_IDS).length} 个）`);
 }
 
+// ---------------------------------------------------------------- 13. 静默失败
+console.log('\n=== 13. 静默失败必须留痕（"失败与成功长得一样"的那几条）===');
+{
+  // ★★ 为什么单独一节、且**逐条白名单**，而不是"扫所有空 catch"：
+  //
+  //   本仓有 100+ 个 catch，其中**绝大多数是有意的静默** ——
+  //   存储命名空间清扫、单键回滚、CacheStorage 封控、"读失败不阻断写入"…
+  //   它们的共同点是"**一条失败不阻断其余**"，而且**跑在热路径上**
+  //   （每个页面每次存储操作）。给它们加 `diag/error` 会挤爆 `ql:diag` 环形 60，
+  //   把真正重要的记录挤掉（规则 22）。
+  //
+  //   ⇒ 所以"哪个 catch 必须留痕"**不能机械化**（这与规则 28 的教训同源：
+  //     语义判断没有便宜的判据）。这里用**显式白名单**：每条写明
+  //     "失败时用户看到什么"，只有答案是"和成功一样"的才进来。
+  //
+  //   ★ 关键实现细节：判据必须落在 **catch 块内部**。
+  //     如果只查"函数体里有 log"，那么函数里**别处**的 log 会让它假绿 ——
+  //     而那种假绿正是本条要防的形态。
+  //
+  //   ★★ 而这里承认**两种形态**（第一版只认第一种，于是对 `probeScheme` 假红）：
+  //     · `kind: 'catch'`  —— 函数里有 catch，留痕必须在 **catch 块内**
+  //     · `kind: 'fallback'` —— 函数里**根本没有 catch**，失败路径是一个
+  //       兜底 `if` 链的末端（`probeScheme` 就是这种：异常在 `probeOnce` 里被
+  //       吞成 `false`，`probeScheme` 只看到"都没探到"）。这时断言改为
+  //       "**函数体内**有 ≥minLevel 的留痕"。
+  //     ⇒ 把不适用的形态硬套一个判据，就会得到 `[].every()` 那种"恒真/恒假"
+  //       （规则 24）。**先确认形态，再选判据。**
+  const CASES = [
+    {
+      file: 'background/core/account-cache.ts',
+      fn: 'loadSnapshot',
+      kind: 'catch',
+      minLevel: 'warn',
+      why: '读缓存抛错 ⇒ 静默返回 null ⇒ 离线时列表是空的，'
+        + '与"从未同步过"长得一样。用户归因到网络，真因是本机缓存读不出来',
+    },
+    {
+      file: 'background/core/favorites.ts',
+      fn: 'listFavorites',
+      kind: 'catch',
+      minLevel: 'warn',
+      why: '读 storage 失败 ⇒ 回落内置默认 ⇒ **用户自建的收藏整份消失，'
+        + '界面上显示的是默认书签**（对用户说谎）',
+    },
+    {
+      file: 'background/core/site-auth.ts',
+      fn: 'probeScheme',
+      kind: 'fallback',
+      minLevel: 'warn',
+      why: '两个 scheme 探测都失败 ⇒ 静默按 https 兜底 ⇒ '
+        + '用户只看到"页签打开后一片错误页"，没有别的信号',
+    },
+  ];
+
+  /** 取出 `function <name>(...)` 之后**配对**的花括号体（不靠缩进，靠计数）。 */
+  const fnBody = (src, name) => {
+    const m = new RegExp(`function\\s+${name}\\s*\\(`).exec(src);
+    if (!m) return null;
+    const open = src.indexOf('{', m.index);
+    if (open < 0) return null;
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}') {
+        depth--;
+        if (depth === 0) return src.slice(open, i + 1);
+      }
+    }
+    return null;
+  };
+
+  /** 取出**每一个** catch 子句的块体。 */
+  const catchBodies = (src) => {
+    const out = [];
+    for (const m of src.matchAll(/catch\s*(?:\([^)]*\))?\s*\{/g)) {
+      const open = src.indexOf('{', m.index + m[0].length - 1);
+      let depth = 0;
+      for (let i = open; i < src.length; i++) {
+        if (src[i] === '{') depth++;
+        else if (src[i] === '}') {
+          depth--;
+          if (depth === 0) { out.push(src.slice(open, i + 1)); break; }
+        }
+      }
+    }
+    return out;
+  };
+
+  const LEVELS = ['debug', 'info', 'warn', 'error'];
+  const hasLog = (text, minIdx) => {
+    for (const m of text.matchAll(/\blog\.(debug|info|warn|error)\s*\(/g)) {
+      if (LEVELS.indexOf(m[1]) >= minIdx) return true;
+    }
+    // 也接受 diag()/forensics()（它们是落盘通道）
+    return /\b(diag|forensics)\s*\(/.test(text);
+  };
+
+  for (const c of CASES) {
+    const src = readFileSync(join(SRC, c.file), 'utf8');
+    const body = fnBody(src, c.fn);
+    // ★ 自证前提（规则 23）：先确认真的取到了那段代码
+    check(`前提：取到了 ${c.file} 的 ${c.fn}()`, body !== null);
+    if (!body) continue;
+
+    const minIdx = LEVELS.indexOf(c.minLevel);
+    const short = c.why.slice(0, 34);
+
+    if (c.kind === 'catch') {
+      const catches = catchBodies(body);
+      check(`前提：${c.fn}() 里有 catch`, catches.length > 0, `${catches.length} 个`);
+      check(`${c.fn}() 的 catch 里有 ≥${c.minLevel} 级留痕 —— ${short}…`,
+        catches.some((b) => hasLog(b, minIdx)));
+    } else {
+      // `fallback`：函数里**没有** catch，失败路径是兜底分支 ⇒ 断言整个函数体。
+      check(`前提：${c.fn}() 是 fallback 形态（无 catch）`,
+        catchBodies(body).length === 0);
+      check(`${c.fn}() 内有 ≥${c.minLevel} 级留痕 —— ${short}…`, hasLog(body, minIdx));
+    }
+  }
+}
+
 // ---------------------------------------------------------------- 汇总
 const passed = results.filter(Boolean).length;
 console.log(`\n=== 汇总：${passed}/${results.length} 通过 ===`);

@@ -1,5 +1,9 @@
 import { db } from '../../storage/db';
+import { getLogger } from '../../shared/log';
 import type { ParallelAccount } from '../../shared/types';
+
+/** ★ 2026-10-09 补：这个模块此前**没有任何日志**，而它的读失败是静默的。 */
+const log = getLogger('account-cache');
 
 /**
  * 离线**只读**账号缓存（v3.18：废除本地数据源之后的"离线可用"折中）。
@@ -74,7 +78,25 @@ export async function loadSnapshot(): Promise<CacheSnapshot | null> {
       return null;
     }
     return { accounts, meta };
-  } catch {
+  } catch (e) {
+    // ★★ 2026-10-09 补：这一支**此前完全静默**，而它与上面那几个"有意的 null"
+    //   在用户那里**长得一模一样** —— 都是"离线时列表是空的"。
+    //
+    //   而两者的原因完全不同：
+    //     · 上面 `!meta` / 条数不符 ⇒ **自检如实丢弃**（正常，不需要日志）
+    //     · 这里             ⇒ **读缓存真的抛了**（IndexedDB 坏了 / 配额 / 结构迁移残渣）
+    //
+    //   ★ 没有这一行时的归因是错的：用户报"离线时列表空了"，
+    //     我们会去查网络与云端，而真因是本机缓存**读不出来**。
+    //
+    //   ★ 级别选 `warn` 不选 `error`：它是**降级**（离线只读能力没了），
+    //     不是主流程失败 —— 在线时一切照常。
+    //   ★ 也**不选 `debug`**：默认 `info` 级下 `debug` 一个字都不输出，
+    //     那就等于没加（规则 25）。
+    //
+    //   ★ 它与 `parallel-store.persistSnapshot` 的 `log.error` 是**镜像**的：
+    //     "写失败有留痕、读失败没有"曾是这里的一个不对称。
+    log.warn('loadSnapshot 读缓存失败 ⇒ 离线时没有可回落的数据：%s', (e as Error)?.message ?? e);
     return null;
   }
 }
