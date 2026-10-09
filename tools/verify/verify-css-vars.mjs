@@ -76,6 +76,12 @@ const htmls = readdirSync(UI, { recursive: true })
 check('至少有一个扩展自有页面', htmls.length > 0, `${htmls.length} 个`);
 if (!htmls.length) process.exit(1);
 
+//: 全目录的样式文件（"定义的变量有没有人用"要按**全目录**算，见 ③b 的注释）
+const allUi = readdirSync(UI, { recursive: true })
+  .map((f) => path.join(UI, String(f)))
+  .filter((f) => f.endsWith('.css'));
+check('至少有一个样式文件', allUi.length > 0, `${allUi.length} 个`);
+
 let totalChainFiles = 0;
 for (const html of htmls) {
   const rel = path.relative(UI, html).replace(/\\/g, '/');
@@ -116,6 +122,22 @@ for (const html of htmls) {
     .map(([name, where]) => `${name}(在 ${[...where].join(',')})`);
   check(`${rel} 无「var() 无 fallback 又解析不到」`, unresolved.length === 0,
     unresolved.join(' ') || `检查了 ${usedNoFb.size} 个`);
+
+  // ── ③b ★★ **反方向**：链上定义的变量，在**整个 UI 目录**里有没有人用
+  //
+  // ★ 为什么把范围放到"整个 UI 目录"而不是"本页的链"：
+  //   `theme.css` 里的 `--sb-brand-hover` / `--sb-bg` **只在 theme.css 自己的
+  //   第 36/48/56 行被用**（按钮渐变、页面底色）——
+  //   按"本页的链"算它们是"被用了"，但它们**确实只服务定义它们的那个文件**。
+  //   那些是**合法的**（文件内部的自用变量），所以判据必须**按全目录的引用**来算，
+  //   而不是按链 —— 否则会把 `theme.css` 的自用变量报成死变量。
+  //   ★★ 我第一版探针就栽在这里：它**把 `theme.css` 排除在"使用者"之外** ⇒
+  //      造出了两个假缺陷。**"谁算使用者"这个范围，划错一次就是一次假红。**
+  const allUiText = allUi.map((p) => stripComments(readFileSync(p, 'utf8'))).join('\n');
+  const unused = [...defs.keys()].filter(
+    (name) => !new RegExp(`var\\(\\s*${name.replace(/[-]/g, '\\-')}\\b`).test(allUiText));
+  check(`${rel} 定义的变量都有人用（反方向）`, unused.length === 0,
+    unused.join(' ') || `检查了 ${defs.size} 个`);
 
   // ── ④ 自引用
   check(`${rel} 无自引用变量（--x: var(--x)）`, selfRef.length === 0, selfRef.join(' '));
