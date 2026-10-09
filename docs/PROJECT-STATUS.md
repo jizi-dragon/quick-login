@@ -1,4 +1,16 @@
-# QuickLogin 项目现状快照（2026-08-29 · v3.9.2）
+# QuickLogin 项目现状快照（**2026-08-29 · v3.9.2**）
+
+> ★★ **这份"现状快照"已经落后 8 个中版本**（当前 **v3.17.1**，2026-10-09）。
+> 它叫"现状"但内容是 **v3.9.2 时点的**——这个标题本身就会误导人。
+>
+> ⇒ 读之前先看这两处**已校正**的小节：§二（隔离平面，原写「四平面」而表内 6 行、
+> 且缺平面 1.5）、§七（文件表里仍列 `credentials.ts`）。
+> 现状请以 [`docs/CODEBASE_OVERVIEW.md`](CODEBASE_OVERVIEW.md)（**架构权威源**）
+> 与 [`CHANGELOG.md`](../CHANGELOG.md)（逐版本变化）为准。
+>
+> ★ **为什么保留标题里的旧版本号**：这份文档的价值在于"v3.9.2 时项目长什么样"
+> —— 把它改成当前版本号会让它变成一份**看起来新、实际只有一半是新的**的文档，
+> 那比明说"我旧了"更坏。
 
 > 配套阅读：版本明细见根目录 `CHANGELOG.md`；代码库导读见 `docs/CODEBASE_OVERVIEW.md`；
 > 功能与使用说明见 `docs/USER-MANUAL.md`（用户手册）。
@@ -11,9 +23,23 @@
 - 并行管理主页：`ui/parallel/`；启动弹窗：`ui/popup/`；账号轮盘：`ui/wheel/`（独立小窗）+ `content/wheel-overlay.ts`（页面内浮层）；
 - 构建产物 `dist/`（esbuild），装载即测。
 
-## 二、核心架构：四平面隔离（网络栈现状）
+## 二、隔离平面总表
 
-绑定到标签页后，后台为每个 tab 安装至多三条 DNR session 规则（id 区间互不重叠，见 `background/core/tab-rules.ts`）：
+> ★★ **2026-10-09 校正（本节的表不能当权威口径读）**：
+>
+> | 问题 | 说明 |
+> |---|---|
+> | 小标题原写「**四平面**」 | 而**本表自己就有 6 行** —— 自相矛盾。实际是**七个**平面 |
+> | **缺平面 1.5**（BroadcastChannel 命名空间化） | v3.x 新增，本表从未收录。**README 里那张表同样缺** |
+> | 小标题里「（网络栈现状）」 | 也不准：存储 / SW / IDB 三个平面**是页面层**实现的，不走网络栈 |
+>
+> ⇒ **权威口径只有一个**：[`docs/CODEBASE_OVERVIEW.md`](CODEBASE_OVERVIEW.md) §Architecture 的
+> 「隔离平面总表（权威口径以代码为准）」。**本表保留是历史对照，不要再往这里加平面**（规则 12）。
+> 本节其余内容（配套机制、泄漏根因）仍然有效。
+
+绑定到标签页后，后台为每个 tab 安装 DNR session 规则（id 区间互不重叠，见 `background/core/tab-rules.ts`）；
+★ 规则现在是**逐条安装**的（`updateSessionRules` 是**原子批量** —— 一批里有一条被拒会连坐整批，
+历史事故见下文「网络平面全死」）：
 
 | 平面 | 规则 | 覆盖范围 | 版本 |
 |---|---|---|---|
@@ -105,12 +131,19 @@ npm run build       # esbuild → dist/
 
 ## 七、关键文件索引
 
+> ★★ **本表是 v3.9.2 时点的，有已删文件仍在列**（2026-10-09 校正）。
+> v3.18 废除本地数据源删掉的文件：`core/credentials.ts`（本表原仍列）、
+> `core/cloud-migrate.ts`、`core/navigation.ts`、`core/session-manager.ts`、
+> `core/account-registry.ts`。新增：`core/account-cache.ts`、`core/offline.ts`、
+> `core/auto-login-cache.ts`。
+> ⇒ **当前文件清单以 `docs/CODEBASE_OVERVIEW.md` 的组件图为准**（规则 12）。
+
 | 文件 | 职责 |
 |---|---|
 | `manifest.json` | MV3 清单（permissions / commands quick-wheel / 静态 MAIN-world content scripts @document_start） |
 | `src/background/core/tab-rules.ts` | 两条 DNR 规则族（AUTH 改写 + COOKIE 回放/剥离）构建、换值重建、冷启恢复、孤儿清理；**逐条安装降级**；父域覆盖 |
 | `src/background/core/parallel-session.ts` | 绑定表/token 双通道捕获/Cookie 登录快照与回放（身份键黑名单）/种子下发/导航重推/授权健康门控；诊断埋点 `ql:diag` |
-| `src/background/core/credentials.ts` | 账号密码 AES-GCM 加密（设备绑定种子） |
+| ~~`src/background/core/credentials.ts`~~ | **v3.18 已删除** —— 本地 AES-GCM 凭据存储整体废除。账号存云端账号库，口令由服务端加密；本机只留不含口令的只读缓存（`core/account-cache.ts`） |
 | `src/background/service-worker.ts` | 总装：`par.*`/`ql.diag` 消息分发、轮盘触发链、角标诊断、commands/onRemoved |
 | `src/content/shield-main.ts` | MAIN 壳六项职责：存储命名空间、Cookie 袋虚拟化、种子直灌、写入上报、SW/CacheStorage 封控、IndexedDB 命名空间 + 页面层 `_qlck` 缓存分区 |
 | `src/content/shield-bridge.ts` | ISOLATED 桥：window.postMessage ↔ chrome.runtime 双向通路 |
