@@ -14,6 +14,7 @@
 > | 想了解 | 去哪 |
 > |---|---|
 > | **隔离平面总表（权威口径）** | [docs/CODEBASE_OVERVIEW.md](docs/CODEBASE_OVERVIEW.md) §Architecture |
+> | **踩过的坑（11 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
 > | 功能清单与使用说明（给人看的） | [docs/USER-MANUAL.md](docs/USER-MANUAL.md) |
 > | 现状快照与安全边界 | [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) |
 > | 现场排障与诊断埋点怎么读 | [docs/DIAG-GUIDE.md](docs/DIAG-GUIDE.md) |
@@ -53,7 +54,7 @@
 |---|---|
 | 1 | **七个平面缺一不可，且每个平面都要问"这条路径绕过了谁"**。历史教训：平面 4（HTTP 缓存）曾用 DNR 的 `redirect.urlTransform` 实现——**该字段是 Firefox 专属、Chrome 从未支持**（Chromium 以 `Unexpected property: 'urlTransform'` 拒绝），而 `updateSessionRules` 是**原子批量** ⇒ 同批的 COOKIE/AUTH 规则被一起拒绝，**网络平面全死**。现在改为页面层实现 + **逐条安装降级**。<br>判据（**必须是精确的**）：`Get-ChildItem packages/extension/src -Recurse -Filter *.ts \| Select-String -Pattern 'urlTransform\s*:'` ⇒ **零命中**。<br>★ 判据要匹配**作为键**的 `urlTransform:`，**不要**只搜这个词——它在解释"为什么不用它"的注释里有 4 处（`types.ts` / `shield-main.ts` / `tab-rules.ts`），只搜词会**永远为红**。已实测：精确判据零命中，且构造一个真实使用后**能红**（反证通过） |
 | 2 | **MAIN 世界与 ISOLATED 世界的分工不能混**：`shield-main.ts`（`"world": "MAIN"`）负责**补丁页面 API**；`shield-bridge.ts`（ISOLATED）负责**与 background 通信**。补丁必须落在 MAIN，通信必须落在 ISOLATED。判据：`manifest.json` 里 `shield-main` 的 `"world": "MAIN"` 必须存在 |
-| 3 | **平台口令加密存放，且永不入日志、永不出现在诊断埋点里**。历史教训：`mergeCookieSnapshot` 的 token 门禁、`IDENTITY_COOKIE_BLACKLIST` 的身份键过滤——**凭据类的键名要在一处集中声明**，不要在各个调用点各写一份黑名单。 |
+| 3 | **平台口令加密存放，且永不入日志、永不出现在诊断埋点里**。历史教训：`mergeCookieSnapshot` 的 token 门禁、`IDENTITY_COOKIE_BLACKLIST` 的身份键过滤——**凭据类的键名要在一处集中声明**，不要在各个调用点各写一份黑名单。<br>★ **日志落盘/输出只有一个通道**：`shared/log.ts` 的 `log()`，它**无条件先打码**（`shared/redact.ts`）。取 logger 一律 `getLogger('模块名')`。<br>★ **`src/` 下除 `shared/log.ts` 外不许出现裸 `console.*`** —— `console.debug('...', obj)` 这种**对象直传**是最容易顺手泄密的形态（今天对象里只有计数，明天有人塞 `{ username, password }` 做"排障方便"）。<br>★ **打码顺序固定：先做 `%s` 替换 → 再拼多余参数 → 最后整体打码。** 顺序反了会失效：`logger.info('password=%s', pw)` 若先拼成 `password=%s pw`，`%s` 把**键和值分开**，打码规则完全命中不了（`PITFALLS #4`）。<br>判据：`node tools/verify/log-redaction.mjs`（37 条，含对象直传、分隔参数、结构性扫描三侧）+ 反证 `node tools/verify/falsify-log-redaction.mjs`（3/3）。见 `PITFALLS #3`、`#4`、`#5` |
 | 4 | **真实 cookie jar 不得驻留扩展账号的会话**（会话卫生三层防线：`preJar` 基线 → 快照差集清扫 → `cookies.onChanged` 持续驱逐），**且全部按写入者归属门控**——原生页签自己写的 cookie **不能动**，否则会破坏用户不用扩展时的正常登录 |
 | 5 | **DNR 规则按 `tabIds` 限定，不要写全局规则**。全局规则会改到用户自己开的普通标签页，那是"帮倒忙" |
 | 6 | **`main_frame` 导航刻意不改写**（保护静态资源与 SSO 跳转语义）。改这条之前先读 `docs/CODEBASE_OVERVIEW.md` 的风险清单 |
@@ -104,7 +105,9 @@ npm ci                    # 依赖现在已显式声明（含 playwright-core）
 npm run typecheck         # tsc --noEmit，strict
 npm run build             # esbuild → dist/
 npm run check-deps        # 幽灵依赖门禁（三方裸模块必须已声明）
-npm run verify:list       # 列出 12 个回归脚本（不跑）
+node tools/verify/log-redaction.mjs          # 日志打码验收（37 条，秒级，**不需要浏览器**）
+node tools/verify/falsify-log-redaction.mjs  # 上一条的反证（3/3）
+npm run verify:list       # 列出回归脚本（不跑）
 ```
 
 ### 改了什么 → 必须额外跑什么
@@ -137,10 +140,15 @@ npm run verify -- --only jarhygiene
 
 - **提交信息用 Conventional Commits**（`feat:` / `fix:` / `chore:` / `docs:` / `tools:`），
   与服务器端统一。
-- **每修一个"看起来正常但其实是坏的"缺陷，就把判据写进脚本注释或 `docs/`。**
-  本仓目前**没有 `docs/PITFALLS.md`**——这类教训散在 `CHANGELOG.md` 里。
-  要新建时**照服务器端 `akso-vault/docs/PITFALLS.md` 的形态**：
-  五段（症状/根因/判据/处置/推广）、编号是稳定 ID 永不重编、**每条必须有可执行判据**。
+- **每修一个"看起来正常但其实是坏的"缺陷，就把它的判据写进脚本注释或
+  [`docs/PITFALLS.md`](docs/PITFALLS.md)。**
+  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（11 条）——在此之前这类教训
+  只散在 `CHANGELOG.md` 里，而两者的分工不同：
+  `CHANGELOG.md` 记"每次发布改了什么"（历史），
+  `PITFALLS.md` 记"**哪些错会静默发生、怎么一眼认出来**"（可复用的判据）。
+  **不要在两处都写全量**（规则 12）——叙事抄一遍，两处迟早不一致。
+  格式照服务器端 `akso-vault/docs/PITFALLS.md`：五段（症状/根因/判据/处置/推广）、
+  编号是稳定 ID 永不重编、**每条必须有可执行判据**，已修的改状态标注而不是删除。
 
 ---
 

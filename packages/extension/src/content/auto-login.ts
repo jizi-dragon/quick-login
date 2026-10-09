@@ -1,4 +1,5 @@
 import { CONTENT_MESSAGE } from '../shared/constants';
+import { getLogger } from '../shared/log';
 
 /**
  * Auto-Login：自动填充登录表单并提交。
@@ -10,6 +11,16 @@ import { CONTENT_MESSAGE } from '../shared/constants';
  * v3.12.2：全流程逐事件上报 background 取证（点击/填充/让位/被拒 → ql:forensics）。
  */
 let credentials: { username: string; password: string } | null = null;
+
+/**
+ * 本模块的 logger。
+ *
+ * ★ **不要在这里用裸 `console.*`**：本模块手上就有用户的真实口令
+ *   （`credentials`），而 `console.debug('...', obj)` 这种**对象直传**
+ *   是最容易顺手泄密的形态。`getLogger` 出来的方法在写出前**强制打码**。
+ *   判据：`node tools/verify/log-redaction.mjs` 的第 5 节会扫出所有裸 console。
+ */
+const log = getLogger('auto-login');
 
 function isTopFrame(): boolean {
   return window === window.top;
@@ -141,7 +152,7 @@ function runTopFrameFlow(): void {
       const t = e.target as HTMLInputElement | null;
       if (e.isTrusted && t instanceof HTMLInputElement && (t.type === 'text' || t.type === 'password' || t.type === '')) {
         userTouched = true;
-        console.debug('[ql-auto] user edits credentials field, stand down');
+        log.debug('user edits credentials field, stand down');
       }
     },
     { capture: true },
@@ -155,7 +166,7 @@ function runTopFrameFlow(): void {
       const t = e.target as HTMLElement | null;
       if (e.isTrusted && t?.closest?.('button')) {
         userTouched = true;
-        console.debug('[ql-auto] user clicks a button, stand down');
+        log.debug('user clicks a button, stand down');
       }
     },
     { capture: true },
@@ -241,7 +252,7 @@ function runTopFrameFlow(): void {
           errorFlagged = true;
           errorSeen++;
           report('rejected', { errorSeen, attempts });
-          console.debug('[ql-auto] submit rejected by server', { errorSeen });
+          log.debug('submit rejected by server', { errorSeen });
           if (errorSeen >= 2) {
             stop('server-rejected-twice');
             return;
