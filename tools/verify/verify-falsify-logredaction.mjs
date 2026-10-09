@@ -33,6 +33,7 @@ const PS_TS = join(SRC, 'background', 'core', 'parallel-session.ts');
 // ★ 名字相近、容易拿错的两个文件：`parallel-session`（运行时编排）
 //   与 `parallel-store`（数据层门面）。第 ⑥ 条要改的是**后者**。
 const PSTORE_TS = join(SRC, 'background', 'core', 'parallel-store.ts');
+const MSGS_TS = join(SRC, 'shared', 'messages.ts');
 
 const CASES = [
   {
@@ -77,6 +78,24 @@ const CASES = [
     anchor: "export { OfflineError, isOfflineError } from './offline';\n",
     broken: "export { OfflineError, isOfflineError } from './offline';\n"
           + 'export class OfflineError extends Error { readonly isOfflineError = true; }\n',
+  },
+  {
+    // ★ 第 9 节（SW 入口不静默落空）的反证 ①：拆掉 `default`
+    label: '⑦ 拆掉 `dispatch` 的 `default` ⇒ 未知 kind 又静默落空',
+    file: SW_TS,
+    anchor: '    default: {\n',
+    broken: '    // 缺陷版：把 default 注释掉\n    // default: {\n',
+  },
+  {
+    // ★ 反证 ②：契约里加一个 kind 而 dispatch 不实现。
+    //   ★★ 这一条**必须**有：第 9 节的"契约同步"判据曾经**退化成永远绿** ——
+    //     因为 `stripLiterals` 把 `kind: 'x'` 里的字符串剥成了 `''`，
+    //     于是契约 kind 集合为空，而 `[].every()` **恒返回 true**。
+    //     ⇒ 只有真的加一个 kind 才能证明它现在会红。
+    label: '⑧ 契约加一个 kind 而 dispatch 不实现 ⇒ 契约同步判据必须红',
+    file: MSGS_TS,
+    anchor: "  | { kind: 'par.list' }\n",
+    broken: "  | { kind: 'par.list' }\n  | { kind: 'definitely.not.implemented' }\n",
   },
 ];
 
@@ -128,7 +147,7 @@ console.log('\n=== 还原核对 ===');
 //   —— 下一轮的全量验收会红，但原因指向别处。
 //   判据（自证）：本列表与 CASES 里出现的 `file` **集合相等**。
 const touched = [...new Set(CASES.map((c) => c.file))];
-const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS];
+const COVERED = [LOG_TS, SW_TS, PANEL_TS, PS_TS, PSTORE_TS, MSGS_TS];
 const uncovered = touched.filter((f) => !COVERED.includes(f));
 if (uncovered.length) failures.push(`还原核对漏了：${uncovered.join(', ')}`);
 
@@ -139,9 +158,15 @@ for (const f of COVERED) {
     : f === SW_TS ? 'out.logs = drain();'
     : f === PANEL_TS ? 'appLogs:'
     : f === PS_TS ? "log.debug('isEnforceable(%s) → 缓存 %s', host, cached);"
-    : "export { OfflineError, isOfflineError } from './offline';";
-  const ok = readFileSync(f, 'utf8').includes(marker);
-  if (!ok) failures.push(`${short} 还原后缺少 ${marker}`);
+    : f === PSTORE_TS ? "export { OfflineError, isOfflineError } from './offline';"
+    // ★ `messages.ts` 的 marker = 那个**真 kind** 仍在。
+    //   配合下面那条"假 kind 必须不在"，两侧都钉住还原真的发生了。
+    : "| { kind: 'par.list' }";
+  const restored = readFileSync(f, 'utf8');
+  const ok = restored.includes(marker)
+    // 反证用的那个"假 kind"必须**已经不在**（否则还原没做成）
+    && !restored.includes('definitely.not.implemented');
+  if (!ok) failures.push(`${short} 还原不完整（marker=${marker}）`);
   console.log(`  ${ok ? 'OK  ' : 'FAIL'} ${short} 已还原（含 ${marker.slice(0, 40)}）`);
 }
 

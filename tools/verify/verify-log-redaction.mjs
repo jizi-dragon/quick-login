@@ -389,6 +389,94 @@ console.log('\n=== 8. 离线判定：`OfflineError` / `isOfflineError` 只有一
     || /loadSnapshot\(\)[\s\S]{0,120}?log\.warn\(/.test(psrc));
 }
 
+// ---------------------------------------------------------------- ⑨ SW 入口不静默
+console.log('\n=== 9. SW 入口：消息分流不许静默落空 ===');
+{
+  // ## 这一节防的是什么
+  //
+  // 实测（2026-10-09）：`service-worker.ts` 的 `dispatch()` 的 switch **没有 `default`**。
+  //
+  // 后果很隐蔽：一个未知（拼错 / 已删 / UI 与 SW **版本不匹配**）的 `kind`
+  // 让 switch 静默落空，而 `dispatch()` 的返回类型是 `Promise<RuntimeResponse>`
+  // ⇒ TypeScript 认为**一定有返回值** ⇒ `undefined` 静默流向 `sendResponse(undefined)`。
+  // UI 侧拿到 `undefined`，一句"点了没反应"背后**没有任何线索**，
+  // 而 `fail()`（所有 handler 失败的收口）当时也**完全静默**。
+  //
+  // ⇒ 三件事一起钉住：① 有 `default`；② `default` 与 `fail` 都记日志；
+  //   ③ `dispatch` 的 case 与消息契约**同步**（那是"两处声明同一事实"，
+  //      不一致时的失败形态正是上面那个静默落空）。
+  // ★★ 这里的**剥离范围**踩了两个坑，都值得记：
+  //
+  //   ① `@ts-expect-error` **本身是注释** ⇒ 在 `stripLiterals` 之后**查不到**。
+  //      它必须去**原始**源码里找。
+  //   ② 契约里的 `kind: 'par.list'` —— 那个 `'par.list'` **是字符串字面量**，
+  //      被剥成 `''` ⇒ 提取到 **0 个 kind**。
+  //      而 `[...].every()` 对**空集合返回 true** ⇒ "契约同步"那条判据
+  //      会**退化成永远绿**（正是 akso-vault PITFALLS #10 那个形态：
+  //      `check_deps.mjs` 的检查数掉到 0 而它打印「检查 0 处」看起来完全正常）。
+  //
+  //   ⇒ 规则：**"剥注释"只用于"怕被自己的解释性文字弄红"的断言**；
+  //     凡是要**读字符串字面量的内容**的断言，必须用**原始**源码。
+  //     并且对"集合可能为空"的判据一律加**自证前提**。
+  const swSrc = readFileSync(join(SRC, 'background', 'service-worker.ts'), 'utf8');
+  const swCode = stripLiterals(swSrc);
+
+  // dispatch 的函数体：结构（有 default / 有 log.error）用剥过的版本，
+  // 但 `@ts-expect-error` 要从**原始**里取对应区间。
+  const dispatchBody = /async function dispatch\(req: RuntimeRequest\)[\s\S]*?\n\}/.exec(swCode);
+  check('判据前提：取到了 `dispatch` 的函数体', dispatchBody !== null);
+  const d = dispatchBody ? dispatchBody[0] : '';
+
+  check('`dispatch` 有 `default` 分支（未知 kind 不再静默落空）', /^\s*default:\s*\{/m.test(d));
+  check('`default` 分支记了日志', /default:\s*\{[\s\S]{0,400}?log\.error\(/.test(d));
+
+  // ★ 用**原始**源码取 default 分支那一段，再找注释
+  const rawDispatch = /async function dispatch\(req: RuntimeRequest\)[\s\S]*?\n  \}\n\}/.exec(swSrc);
+  const rawDefault = (rawDispatch ? rawDispatch[0] : '').split(/^\s*default:\s*\{/m)[1] ?? '';
+  check('`default` 用 `@ts-expect-error` 显式标注类型逃逸',
+    /@ts-expect-error/.test(rawDefault));
+  check('判据前提：确实取到了 `default` 分支的原文', rawDefault.length > 0);
+
+  // `fail()` 是全部 26 个消息类型的失败收口 —— 它必须记日志
+  const failBody = /function fail\(error: unknown\)[\s\S]*?\n\}/.exec(swCode);
+  check('判据前提：取到了 `fail` 的函数体', failBody !== null);
+  check('`fail()` 记了日志（26 个 handler 的失败收口）',
+    !!failBody && /log\.error\(/.test(failBody[0]));
+
+  // `dispatch` 入口有 trace（"消息到底有没有到 SW"）
+  check('`dispatch` 入口有 `log.debug` trace', /log\.debug\(/.test(d));
+
+  // ---------- 契约与实现同步（用**原始**源码：kind 名是字符串字面量） ----------
+  const msgsRaw = readFileSync(join(SRC, 'shared', 'messages.ts'), 'utf8');
+  const reqUnion = /export type RuntimeRequest =([\s\S]*?);\n/.exec(msgsRaw);
+  check('判据前提：取到了 `RuntimeRequest` 联合', reqUnion !== null);
+  const reqKinds = new Set(
+    (reqUnion ? reqUnion[1] : '').match(/kind:\s*'[^']+'/g)?.map((s) => /'([^']+)'/.exec(s)[1]) ?? [],
+  );
+  const caseKinds = new Set(
+    (swSrc.match(/case\s*'[^']+':/g) ?? []).map((s) => /'([^']+)'/.exec(s)[1]),
+  );
+  // 在 `onMessage` 里**前置分流**（不进 dispatch 的 switch）的 kind
+  const preKinds = new Set(
+    (swSrc.match(/\.kind === '[^']+'/g) ?? []).map((s) => /'([^']+)'/.exec(s)[1]),
+  );
+
+  // ★★ 空集自证：集合为空时下面两条 `every` 会**恒真**（假绿）。
+  //   实测踩过：剥离把 kind 名弄成空串，于是 `reqKinds` 为空，
+  //   两条断言"都通过"而其实什么都没验。
+  check('判据前提：契约 kind 集合非空', reqKinds.size > 0, `${reqKinds.size} 个`);
+  check('判据前提：dispatch case 集合非空', caseKinds.size > 0, `${caseKinds.size} 个`);
+
+  check('契约里的每个 kind 都有处理分支（dispatch 或前置分流）',
+    [...reqKinds].every((k) => caseKinds.has(k) || preKinds.has(k)),
+    [...reqKinds].filter((k) => !caseKinds.has(k) && !preKinds.has(k)).join(', '));
+  check('`dispatch` 没有契约之外的孤例 case',
+    [...caseKinds].every((k) => reqKinds.has(k)),
+    [...caseKinds].filter((k) => !reqKinds.has(k)).join(', '));
+  console.log(`      （契约 ${reqKinds.size} 个 kind；dispatch 侧 ${caseKinds.size} 个 case；`
+    + `前置分流 ${preKinds.size} 个）`);
+}
+
 // ---------------------------------------------------------------- 汇总
 const passed = results.filter(Boolean).length;
 console.log(`\n=== 汇总：${passed}/${results.length} 通过 ===`);

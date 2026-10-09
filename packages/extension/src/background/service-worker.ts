@@ -3,7 +3,16 @@ import type { BridgeUpPayload } from '../shared/types';
 import { CONTENT_MESSAGE, EXT_VERSION, LOCAL_KEYS } from '../shared/constants';
 // ★ 日志的**唯一公开面**（AGENTS.md 规则 3）：取 logger 与读缓冲都从这里。
 //   直接 `console.*` 会绕过强制打码；直接读 ring 会绕过 `drain()` 的游标还原。
-import { drain, getLogLevel } from '../shared/log';
+import { drain, getLogLevel, getLogger } from '../shared/log';
+
+/**
+ * 本模块的 logger。
+ *
+ * ★ 这个文件是**入口 + 消息分流**，所以它是"点了没反应"类问题唯一能开始查的地方。
+ *   在此之前它一行日志都没有 —— 一条消息进来、走错分支、`sendResponse(undefined)`，
+ *   全过程**在日志里完全不存在**。
+ */
+const log = getLogger('sw');
 import { getPendingAutoLogin } from './core/auto-login-cache';
 import { siteAuth, probeScheme } from './core/site-auth';
 import {
@@ -36,6 +45,19 @@ function ok<T>(data: T): Result<T> {
 }
 
 function fail(error: unknown): Result<never> {
+  // ★★ 2026-10-09：这里原来是**完全静默**的 —— 它把错误变成
+  //   `{ ok: false, error }` 交给调用方，而**自己不留任何痕迹**。
+  //
+  //   后果：handler 的失败只有在**UI 记得显示它**时才被人看到。
+  //   而诊断包里一条都没有 ⇒ 排障时无法回答"这个请求到底报错了没有"。
+  //
+  //   ⇒ `fail()` 是**所有 handler 失败的唯一收口**（每个 `tryRun` 都经过它），
+  //     所以在这一处记，就等于给全部 25 个消息类型加了错误日志。
+  //     ★ 这是"打码/日志落在通道上，而不是靠调用点自觉"的同一招（AGENTS.md 规则 21）。
+  //
+  //   ★ 用 `error` 级：它是真失败，不是轨迹。`log()` 会打码，
+  //     而错误消息里**可能带 URL / 邮箱**（都不该明文），所以必须走它。
+  log.error('请求失败：%s', error instanceof Error ? error.message : String(error));
   return { ok: false, error: error instanceof Error ? error.message : String(error) };
 }
 
@@ -48,6 +70,15 @@ async function tryRun<T>(fn: () => Promise<T>): Promise<Result<T>> {
 }
 
 async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
+  // ★ 入口 trace。**`debug` 级**（默认 `info` ⇒ 生产静默、零存储开销），
+  //   因为它是**每条消息都走**的热路径 —— 照 AGENTS.md 规则 22：
+  //   "判断这条日志会不会挤掉别的：看它所在的控制流多久走一次"。
+  //
+  //   ★ 它解决的问题是"消息到底有没有到 SW"。
+  //     在此之前这个问题**无法回答**：UI 点了、没反应、日志空白，
+  //     于是你分不清是"消息没发出去"、"SW 没醒"、还是"分支走错了"。
+  //   排障时：`Site.setLogLevel('debug')` 或看诊断包的 `appLogs`。
+  log.debug('dispatch kind=%s', String((req as { kind?: unknown }).kind));
   switch (req.kind) {
     case 'site.grants.list':
       // v2.4：旧站点清单入口已移除；保留空实现避免旧调用报 unhandled
@@ -348,6 +379,38 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
     case 'cloud.device.cancel': {
       const r = await tryRun(async () => ({ cancelled: cancelDeviceFlow() }));
       return { kind: 'cloud.device.cancel', result: r };
+    }
+    // ★★ 2026-10-09：这里原来**没有 default**。
+    //
+    //   后果很隐蔽：一个未知（或拼错、或已被删除）的 `kind` 会让 switch 静默落空，
+    //   而 `dispatch()` 的返回类型是 `Promise<RuntimeResponse>` —— TypeScript 因为
+    //   这个类型断言**认为一定有返回值**，所以 `undefined` 静默流向
+    //   `sendResponse(undefined)`。UI 侧拿到 `undefined`，
+    //   一句"点了没反应"背后**没有任何线索**。
+    //
+    //   ⇒ 记一条 `error`：走到这里**一定是缺陷**（要么发错了 kind，
+    //     要么某个 kind 被删了而调用点没跟着改）。
+    //     ★ 只记 kind，不记整个 req：req 里可能有 `data.import` 的账号数据。
+    //
+    // ★★ 而"补上 default"这件事本身遇到一个类型墙，值得写下来：
+    //   `RuntimeRequest['kind']` 是**封闭联合** ⇒ 穷尽之后 TS 把 `req` 收窄成 `never`，
+    //   于是 `(req as { kind?: unknown }).kind` 与返回值都过不了类型检查
+    //   （`Type 'string' is not assignable to type '"par.list" | ...'`）。
+    //
+    //   也就是说：**"语法上不可能有未知 kind" 与 "运行时完全可能有未知 kind"**
+    //     是两件事，而类型系统只表达前者。
+    //   现实来源：UI 与 SW 的**版本不匹配**（扩展刚更新、某个页面还是旧的）、
+    //   手写消息、以及"kind 被删了但调用点漏改"。
+    //
+    //   ⇒ 用 `@ts-expect-error` 显式标注这次**刻意的**类型逃逸，
+    //     而不是放宽 `dispatch` 的签名（那会让 25 个 case 全部失去收窄）。
+    default: {
+      const kind = String((req as { kind?: unknown }).kind);
+      log.error('未知的消息 kind=%s ⇒ 无处理分支（发错、被删、或 UI/SW 版本不匹配）', kind);
+      // 判据自证：这行必须真的"有类型错误"，否则说明联合不再是封闭的，
+      // 那时该改成正常的返回而不是保留这个逃逸。
+      // @ts-expect-error 未知 kind 在类型上不存在，但运行时能到达 —— 见上面的说明
+      return { kind, result: fail(`未知的消息类型：${kind}`) };
     }
   }
 }
