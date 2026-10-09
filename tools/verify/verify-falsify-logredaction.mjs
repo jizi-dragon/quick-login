@@ -1,11 +1,17 @@
 /**
- * 反证：证明 `log-redaction.mjs` 真的会红。
+ * 反证：证明 `verify-log-redaction.mjs` 真的会红。
  *
- * 依据 quick-login AGENTS.md 规则 17 与 akso-vault PITFALLS #21：
- * **写完判据先问"拆掉什么它才会红？"** 答不上来说明它没在验任何东西。
+ * 依据 quick-login AGENTS.md 规则 17：**写完判据先问"拆掉什么它才会红？"**
+ * 答不上来说明它没在验任何东西。
  *
- * 做法：临时把打码改成"直接返回原文"，跑验收并断言**必须失败**，
+ * 做法：临时制造缺陷版，跑验收并断言**必须失败**，
  *       最后无论成败都把文件逐字节还原（放 `finally`）。
+ *
+ * ★ 2026-10-09 泛化：原先只支持改 `log.ts` 一个文件，而验收脚本后来长出了
+ *   **闭环**那一节（第 6 节：日志必须有消费者）—— 那节改的是
+ *   `service-worker.ts` 与 `parallel.ts`。单文件版**没法反证它**
+ *   ⇒ 一条没人反证过的判据，正是"永远绿"的候选。
+ *   现在每个用例自带 `file` 字段。
  *
  * 跑法：node tools/verify/verify-falsify-logredaction.mjs
  */
@@ -17,21 +23,47 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..'); // tools/verify/ → 仓库根（两层）
-const LOG_TS = join(ROOT, 'packages', 'extension', 'src', 'shared', 'log.ts');
 const CHECK = join(HERE, 'verify-log-redaction.mjs');
+
+const SRC = join(ROOT, 'packages', 'extension', 'src');
+const LOG_TS = join(SRC, 'shared', 'log.ts');
+const SW_TS = join(SRC, 'background', 'service-worker.ts');
+const PANEL_TS = join(SRC, 'ui', 'parallel', 'parallel.ts');
+const PS_TS = join(SRC, 'background', 'core', 'parallel-session.ts');
 
 const CASES = [
   {
     label: '① 打码被绕过（formatArgs 直接返回原文）⇒ 凭据原样输出',
+    file: LOG_TS,
     anchor: '  return redact(text);',
     broken: '  return text;  // 缺陷版：不调用 redact',
-    expectRed: true,
   },
   {
     label: '② 只打码第一个参数（漏掉分隔参数）⇒ password=%s 形态失效',
+    file: LOG_TS,
     anchor: "  const text = typeof first === 'string' ? interpolate(first, rest) : args.map(stringify).join(' ');",
     broken: "  const text = typeof first === 'string' ? first : args.map(stringify).join(' ');",
-    expectRed: true,
+  },
+  {
+    // ★ 本节判据（闭环）的反证 —— 原先没有
+    label: '③ 拆掉 `ql.diag` 里的 drain() ⇒ 日志又没人读了',
+    file: SW_TS,
+    anchor: '        out.logs = drain();\n',
+    broken: '',
+  },
+  {
+    label: '④ 拆掉诊断包的 `appLogs` ⇒ handler 带了前端也不收',
+    file: PANEL_TS,
+    anchor: '      appLogs: (diagRes as { result?: { data?: { logs?: unknown[]; logLevel?: string } } } | null)\n'
+          + '        ?.result?.data?.logs ?? [],\n',
+    broken: '',
+  },
+  {
+    // ★ 第 7 节（三通道分工）的反证 —— 把**热路径**改回写 storage 缓冲
+    label: '⑤ 热路径改回 `diag()` ⇒ 环形 60 又被刷满、真实失败被挤掉',
+    file: PS_TS,
+    anchor: "    log.debug('isEnforceable(%s) → 缓存 %s', host, cached);\n",
+    broken: '    void diag(`isEnforceable(${host}) → 缓存 ${cached}`);\n',
   },
 ];
 
@@ -53,14 +85,15 @@ console.log(`  ${baselineGreen ? 'OK  ' : 'FAIL'} 基线${baselineGreen ? '通�
 if (!baselineGreen) failures.push('基线就不通过');
 
 for (const c of CASES) {
-  const original = readFileSync(LOG_TS, 'utf8');
+  const original = readFileSync(c.file, 'utf8');
+  const short = c.file.slice(ROOT.length + 1);
   if (!original.includes(c.anchor)) {
-    console.log(`\n=== ${c.label} ===\n  SKIP 锚点没找到（源码变了？）`);
+    console.log(`\n=== ${c.label} ===\n  SKIP 锚点没找到（源码变了？）${short}`);
     failures.push(`${c.label}：锚点没找到`);
     continue;
   }
   try {
-    writeFileSync(LOG_TS, original.replace(c.anchor, c.broken), 'utf8');
+    writeFileSync(c.file, original.replace(c.anchor, c.broken), 'utf8');
     console.log(`\n=== ${c.label} ===`);
     const red = runCheck();
     if (red) {
@@ -71,14 +104,31 @@ for (const c of CASES) {
     }
   } finally {
     // ★ 写回时用 utf8 且内容与原文完全一致 —— 逐字节还原
-    writeFileSync(LOG_TS, original, 'utf8');
-    const same = readFileSync(LOG_TS, 'utf8') === original;
-    if (!same) failures.push(`${c.label}：还原失败`);
+    writeFileSync(c.file, original, 'utf8');
+    if (readFileSync(c.file, 'utf8') !== original) failures.push(`${c.label}：还原失败`);
   }
 }
 
 console.log('\n=== 还原核对 ===');
-console.log(`  ${readFileSync(LOG_TS, 'utf8').includes('return redact(text);') ? 'OK  ' : 'FAIL'} log.ts 已还原（含 redact 调用）`);
+// ★ 每个"被用例改过的文件"都必须出现在这里。
+//   漏一个的后果：那个文件的还原失败不会被发现，而工作区会留下一个**缺陷版**
+//   —— 下一轮的全量验收会红，但原因指向别处。
+//   判据（自证）：本列表与 CASES 里出现的 `file` **集合相等**。
+const touched = [...new Set(CASES.map((c) => c.file))];
+const uncovered = touched.filter((f) => ![LOG_TS, SW_TS, PANEL_TS, PS_TS].includes(f));
+if (uncovered.length) failures.push(`还原核对漏了：${uncovered.join(', ')}`);
+
+for (const f of [LOG_TS, SW_TS, PANEL_TS, PS_TS]) {
+  const short = f.slice(ROOT.length + 1);
+  // 每个文件里那个"本轮修好的东西"必须仍在
+  const marker = f === LOG_TS ? 'return redact(text);'
+    : f === SW_TS ? 'out.logs = drain();'
+    : f === PANEL_TS ? 'appLogs:'
+    : "log.debug('isEnforceable(%s) → 缓存 %s', host, cached);";
+  const ok = readFileSync(f, 'utf8').includes(marker);
+  if (!ok) failures.push(`${short} 还原后缺少 ${marker}`);
+  console.log(`  ${ok ? 'OK  ' : 'FAIL'} ${short} 已还原（含 ${marker.slice(0, 40)}）`);
+}
 
 const total = CASES.length + 1;
 const passed = total - failures.length;

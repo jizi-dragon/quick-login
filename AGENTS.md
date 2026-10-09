@@ -14,7 +14,7 @@
 > | 想了解 | 去哪 |
 > |---|---|
 > | **隔离平面总表（权威口径）** | [docs/CODEBASE_OVERVIEW.md](docs/CODEBASE_OVERVIEW.md) §Architecture |
-> | **踩过的坑（13 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
+> | **踩过的坑（14 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
 > | 功能清单与使用说明（给人看的） | [docs/USER-MANUAL.md](docs/USER-MANUAL.md) |
 > | 现状快照与安全边界 | [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) |
 > | 现场排障与诊断埋点怎么读 | [docs/DIAG-GUIDE.md](docs/DIAG-GUIDE.md) |
@@ -54,7 +54,7 @@
 |---|---|
 | 1 | **七个平面缺一不可，且每个平面都要问"这条路径绕过了谁"**。历史教训：平面 4（HTTP 缓存）曾用 DNR 的 `redirect.urlTransform` 实现——**该字段是 Firefox 专属、Chrome 从未支持**（Chromium 以 `Unexpected property: 'urlTransform'` 拒绝），而 `updateSessionRules` 是**原子批量** ⇒ 同批的 COOKIE/AUTH 规则被一起拒绝，**网络平面全死**。现在改为页面层实现 + **逐条安装降级**。<br>判据（**必须是精确的**）：`Get-ChildItem packages/extension/src -Recurse -Filter *.ts \| Select-String -Pattern 'urlTransform\s*:'` ⇒ **零命中**。<br>★ 判据要匹配**作为键**的 `urlTransform:`，**不要**只搜这个词——它在解释"为什么不用它"的注释里有 4 处（`types.ts` / `shield-main.ts` / `tab-rules.ts`），只搜词会**永远为红**。已实测：精确判据零命中，且构造一个真实使用后**能红**（反证通过） |
 | 2 | **MAIN 世界与 ISOLATED 世界的分工不能混**：`shield-main.ts`（`"world": "MAIN"`）负责**补丁页面 API**；`shield-bridge.ts`（ISOLATED）负责**与 background 通信**。补丁必须落在 MAIN，通信必须落在 ISOLATED。判据：`manifest.json` 里 `shield-main` 的 `"world": "MAIN"` 必须存在 |
-| 3 | **平台口令加密存放，且永不入日志、永不出现在诊断埋点里**。历史教训：`mergeCookieSnapshot` 的 token 门禁、`IDENTITY_COOKIE_BLACKLIST` 的身份键过滤——**凭据类的键名要在一处集中声明**，不要在各个调用点各写一份黑名单。<br>★ **日志落盘/输出只有一个通道**：`shared/log.ts` 的 `log()`，它**无条件先打码**（`shared/redact.ts`）。取 logger 一律 `getLogger('模块名')`。<br>★ **`src/` 下除 `shared/log.ts` 外不许出现裸 `console.*`** —— `console.debug('...', obj)` 这种**对象直传**是最容易顺手泄密的形态（今天对象里只有计数，明天有人塞 `{ username, password }` 做"排障方便"）。<br>★ **打码顺序固定：先做 `%s` 替换 → 再拼多余参数 → 最后整体打码。** 顺序反了会失效：`logger.info('password=%s', pw)` 若先拼成 `password=%s pw`，`%s` 把**键和值分开**，打码规则完全命中不了（`PITFALLS #4`）。<br>判据：`node tools/verify/log-redaction.mjs`（37 条，含对象直传、分隔参数、结构性扫描三侧）+ 反证 `node tools/verify/falsify-log-redaction.mjs`（3/3）。见 `PITFALLS #3`、`#4`、`#5` |
+| 3 | **平台口令加密存放，且永不入日志、永不出现在诊断埋点里**。历史教训：`mergeCookieSnapshot` 的 token 门禁、`IDENTITY_COOKIE_BLACKLIST` 的身份键过滤——**凭据类的键名要在一处集中声明**，不要在各个调用点各写一份黑名单。<br>★ **日志落盘/输出只有一个通道**：`shared/log.ts` 的 `log()`，它**无条件先打码**（`shared/redact.ts`）。取 logger 一律 `getLogger('模块名')`。<br>★ **`src/` 下除 `shared/log.ts` 外不许出现裸 `console.*`** —— `console.debug('...', obj)` 这种**对象直传**是最容易顺手泄密的形态（今天对象里只有计数，明天有人塞 `{ username, password }` 做"排障方便"）。<br>★ **打码顺序固定：先做 `%s` 替换 → 再拼多余参数 → 最后整体打码。** 顺序反了会失效：`logger.info('password=%s', pw)` 若先拼成 `password=%s pw`，`%s` 把**键和值分开**，打码规则完全命中不了（`PITFALLS #4`）。<br>判据：`node tools/verify/verify-log-redaction.mjs`（**49 条**：含对象直传、分隔参数、结构性扫描、**闭环**、**三通道分工**）+ 反证 `node tools/verify/verify-falsify-logredaction.mjs`（**6/6**）。见 `PITFALLS #3`、`#4`、`#5`、`#14` |
 | 4 | **真实 cookie jar 不得驻留扩展账号的会话**（会话卫生三层防线：`preJar` 基线 → 快照差集清扫 → `cookies.onChanged` 持续驱逐），**且全部按写入者归属门控**——原生页签自己写的 cookie **不能动**，否则会破坏用户不用扩展时的正常登录 |
 | 5 | **DNR 规则按 `tabIds` 限定，不要写全局规则**。全局规则会改到用户自己开的普通标签页，那是"帮倒忙" |
 | 6 | **`main_frame` 导航刻意不改写**（保护静态资源与 SSO 跳转语义）。改这条之前先读 `docs/CODEBASE_OVERVIEW.md` 的风险清单 |
@@ -83,6 +83,8 @@
 | 19 | **跨多行正则删代码时，锚点必须唯一且紧贴目标**。同上教训：那条正则用 `(?:\s*[^\n]*\n)*?` 这样的**开放量词**往后吃，把不相邻的块也吞了。<br>⇒ 优先用**精确的多行字面量**（整块原样写出来）而不是正则。 |
 | 20 | **删 DOM 标记后必须核对 `HTML id ↔ TS getElementById` 一致性**。TS 里 `getElementById('x')` 拿到 `null` 的类型仍是 `HTMLElement`（因为断言了 `as`）⇒ **编译期不报错**，运行时点一下就崩。<br>判据：`id="..."` 的集合与 `getElementById('...')` 的集合做差集，**`TS − HTML` 必须为空**。本轮的检查脚本当场抓到一处（`help-reset-confirm-btn`）。 |
 | 21 | **"零裸 `console.*`"只证明了"没有绕过 A 通道"，证明不了"没有 B 通道"。**<br>实测（`PITFALLS #12`）：扩展端有**三个**写出进程的出口 —— `console` / `chrome.storage` / 网络。其中 `forensics()` 与 `diag()` 都直接写 `chrome.storage.local` 且**不做任何打码**，而它们的产物**会进诊断包被一键导出**。"零裸 console"当时是全绿的。<br>⇒ **打码必须落在通道上，而不是靠调用点自觉**。落盘点（`storage.local.set` / `console.*` / `fetch` 的发包体）是**该有打码的地方**；调用点不是。<br>★ 找这类洞的方法是**枚举出口**（谁会写到进程外？），不是搜索已知的坏模式。<br>★ 凡是"安全靠约定"的地方，问一句：**这条约定如果被违反，谁会知道？** 答不上来 = 它是约定而不是机制。<br>判据：`node tools/verify/verify-forensics-redaction.mjs`（25 条，**真的把模块求值、真的调 `forensics()` 再读回落盘内容**）+ 反证 `verify-falsify-forensics.mjs`（3/3） |
+| 22 | **"加日志"是三件事，缺一件就等于没加**：① 有出口、② **有人读**、③ **有用的那条活得到被读的时候**。<br>实测（`PITFALLS #14`）：打码全绿、零裸 console 全绿，但 `drain()` **零调用点**（日志只进 DevTools，**诊断包里一条都没有**），而 `diag()` 被一个**每次调用都会走到**的热路径占满（`ql:diag` 是**环形 60**、45 个写入点）。⇒ 病不是"日志少"，是**日志系统没闭环**。<br>★ **三通道分工是硬约定，不要混用**：<br>&nbsp;&nbsp;· `log.debug()` → 内存环形 200 + DevTools。**热路径**用它（默认 `info` 级 ⇒ 生产静默、零存储开销）<br>&nbsp;&nbsp;· `diag()` → `storage.local` 环形 **60**。**罕见但关键**：失败 / 降级 / 状态跃迁<br>&nbsp;&nbsp;· `forensics()` → `storage.local` 环形 **120**。**结构化事件**（可按字段过滤）<br>★ 判断"这条日志会不会挤掉别的"：看**它所在的控制流多久走一次**，不是看"它是不是写在一个重要函数里"。<br>判据：`verify-log-redaction.mjs` 第 6 节（闭环）+ 第 7 节（分工）⇒ **49 条**；反证 **6/6**（拆 `drain` / 拆 `appLogs` / 热路径改回 `diag` 各自变红） |
+| 23 | **写"零命中"或"某函数里没有 X"这类判据时，先剥注释与字符串字面量**，并且**把范围按代码的真实控制流划**。<br>实测（`PITFALLS #14`，本仓第四次踩第一个坑）：我在代码旁写了"这里原先写的是 `diag(...)`"来解释降级，而裸正则命中了**那句注释**。历史：`urlTransform`（#1）、`RETURNING`（akso-vault #13）、`is_admin`（akso-vault #19）。规律：**"解释为什么不用 X"的文本必然包含 X**。<br>★★ 而**第二次假红推翻的是判据的「范围」**：我断言"整个 `isEnforceable` 里没有 `diag()`"，实证打印函数体后发现另外两处 `diag()` **每个 host 只走一次**（之后进缓存）、**根本不是热路径**。真正每次调用都走到的是**缓存命中那一支**。<br>⇒ 顺序：① **实证打印**你要断言的那段（别猜）；② 剥注释/字符串；③ 断言落到**那个具体分支**；④ 加一条**自证前提**的断言（"我确实取到了这段代码"）。<br>★ 剥离顺序：**先剥字符串再剥行注释** —— 否则 `'//'` 这类字面量会把后面的真代码当注释吃掉（反向失效更坏）。 |
 
 ---
 
@@ -110,9 +112,9 @@ npm run typecheck         # tsc --noEmit，strict
 npm run build             # esbuild → dist/
 npm run check-deps        # 幽灵依赖门禁（三方裸模块必须已声明）
 
-# 打码通道：**四个**脚本，秒级，都**不需要浏览器**
-node tools/verify/verify-log-redaction.mjs           # 日志通道（37 条）
-node tools/verify/verify-falsify-logredaction.mjs    # ↑ 的反证（3/3）
+# 打码通道 + 闭环：**四个**脚本，秒级，都**不需要浏览器**
+node tools/verify/verify-log-redaction.mjs           # 日志通道（**49 条**）
+node tools/verify/verify-falsify-logredaction.mjs    # ↑ 的反证（**6/6**）
 node tools/verify/verify-forensics-redaction.mjs     # 取证/诊断通道（25 条）
 node tools/verify/verify-falsify-forensics.mjs       # ↑ 的反证（3/3）
 
@@ -151,7 +153,7 @@ npm run verify -- --only jarhygiene
   与服务器端统一。
 - **每修一个"看起来正常但其实是坏的"缺陷，就把它的判据写进脚本注释或
   [`docs/PITFALLS.md`](docs/PITFALLS.md)。**
-  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（当前 **13 条**）——在此之前这类教训
+  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（当前 **14 条**）——在此之前这类教训
   只散在 `CHANGELOG.md` 里，而两者的分工不同：
   `CHANGELOG.md` 记"每次发布改了什么"（历史），
   `PITFALLS.md` 记"**哪些错会静默发生、怎么一眼认出来**"（可复用的判据）。

@@ -173,6 +173,165 @@ console.log('\n=== 5. 结构：除 log.ts 外不许直接调 console ===');
   );
 }
 
+// ---------------------------------------------------------------- ⑥ 闭环：日志必须有人读
+console.log('\n=== 6. 闭环：`shared/log.ts` 的产出必须有消费者 ===');
+{
+  // ★ 这一节是"零裸 console"的**对偶**，两者缺一不可：
+  //
+  //   | 判据 | 防的是 |
+  //   |---|---|
+  //   | 零裸 console | 绕开通道**写**出去（凭据外泄） |
+  //   | 有人 `drain()` | 写进通道**没人读**（等于没有日志） |
+  //
+  // 实测发现（2026-10-09）：`drain()` 的调用点是**零** ——
+  // `shared/log.ts` 只被 `content/auto-login.ts` import（取 `getLogger`），
+  // 而环形缓冲是**纯内存**的。于是日志只出现在 DevTools 控制台，
+  // **诊断包里一条都没有**，SW 一被回收就永远看不到了。
+  // 那不是"日志少"，是**日志系统没闭环**。
+  const consumers = [];
+  const walk2 = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) { walk2(full); continue; }
+      if (!name.endsWith('.ts') || full === LOG_TS) continue;
+      const text = readFileSync(full, 'utf8');
+      text.split('\n').forEach((line, i) => {
+        if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;
+        if (/\bdrain\s*\(/.test(line)) {
+          consumers.push(`${full.replace(ROOT + '\\', '').replace(ROOT + '/', '')}:${i + 1}`);
+        }
+      });
+    }
+  };
+  walk2(SRC);
+  check('`drain()` 至少有一个消费者（否则日志没人读）', consumers.length > 0,
+    consumers.length ? consumers.join(', ') : '★ 零调用点');
+
+  // 消费者必须是**能带上诊断包**的那条路：`ql.diag` handler。
+  const sw = readFileSync(join(SRC, 'background', 'service-worker.ts'), 'utf8');
+  const diagCase = /case 'ql\.diag'[\s\S]*?return \{ kind: 'ql\.diag'/.exec(sw);
+  check('`ql.diag` handler 把日志缓冲带上（诊断包才拿得到）',
+    !!diagCase && /out\.logs\s*=\s*drain\(\)/.test(diagCase[0]));
+
+  // 前端诊断包必须**收**它（否则 handler 带了也没人写进文件）
+  const panel = readFileSync(join(SRC, 'ui', 'parallel', 'parallel.ts'), 'utf8');
+  const bundle = /const bundle = \{[\s\S]*?\n    \};/.exec(panel);
+  check('诊断包的 bundle 里含 `appLogs`', !!bundle && /appLogs\s*:/.test(bundle[0]));
+  check('诊断包的 bundle 里含 `logLevel`', !!bundle && /logLevel\s*:/.test(bundle[0]));
+
+  // ★ 判据自身的前提：确认我读到了那两段代码（见 PITFALLS #13 —— 取不到时代码
+  //   会静默返回空串、断言恒假，而报错读起来像"被测代码有问题"）
+  check('判据前提：确实取到了 `ql.diag` 的 case 块', !!diagCase);
+  check('判据前提：确实取到了诊断包的 bundle 块', !!bundle);
+}
+
+// ---------------------------------------------------------------- ⑦ 三通道分工
+console.log('\n=== 7. 三通道分工：`diag()` 不许写在热路径上 ===');
+{
+  // ## 为什么需要这一节
+  //
+  // `ql:diag` 是 **环形 60** 的 `storage.local` 缓冲，而写它的调用点有 **45 个**
+  // （`tab-rules.ts` 5 + `parallel-session.ts` 40）。也就是说它的容量是**稀缺资源**。
+  //
+  // 实测发现（2026-10-09）：`parallel-session.ts` 的 `isEnforceable()` **缓存命中**
+  // 那一支在**每次调用**时都写一条 `diag()` —— 而它在每一次导航 / 每一次请求判定上
+  // 都会被调用。后果不是"日志多"，而是**把有用的日志挤掉**：
+  // `tab-rules.ts` 的 `addRule #N 失败`（DNR 规则装不上 —— 历史上整个网络平面
+  // 因此一起死过）会在几秒内被"缓存命中"刷出缓冲。
+  //
+  // ⇒ 这是一条**设计规则**，不是风格偏好：
+  //
+  //   | 通道 | 存储 | 谁该用 |
+  //   |---|---|---|
+  //   | `log.debug()` | 内存环形 200 + DevTools | **热路径**（默认 `info` 级 ⇒ 生产静默、零存储开销） |
+  //   | `diag()` | `storage.local` 环形 60 | **罕见但关键**：失败 / 降级 / 状态跃迁 |
+  //   | `forensics()` | `storage.local` 环形 120 | **结构化事件**（可按字段过滤、进诊断包） |
+  const ps = readFileSync(join(SRC, 'background', 'core', 'parallel-session.ts'), 'utf8');
+
+  // 取指定函数体（跳过参数表再配平 —— 见 PITFALLS #13，别从签名开头数花括号）
+  const bodyOf = (src, name) => {
+    const head = new RegExp(
+      `(?:^|\\n)\\s*(?:export\\s+)?(?:async\\s+)?function\\s+${name}\\s*\\(`,
+    ).exec(src);
+    if (!head) return null;
+    let depth = 0;
+    let bodyStart = -1;
+    for (let j = src.indexOf('(', head.index); j < src.length; j++) {
+      if (src[j] === '(') depth++;
+      else if (src[j] === ')') {
+        depth--;
+        if (depth === 0) {
+          const brace = src.indexOf('{', j);
+          if (brace < 0) return null;
+          bodyStart = brace;
+          break;
+        }
+      }
+    }
+    if (bodyStart < 0) return null;
+    let d = 0;
+    for (let j = bodyStart; j < src.length; j++) {
+      if (src[j] === '{') d++;
+      else if (src[j] === '}') { d--; if (d === 0) return src.slice(bodyStart, j + 1); }
+    }
+    return null;
+  };
+
+  const enfBody = bodyOf(ps, 'isEnforceable');
+  check('判据前提：确实取到了 `isEnforceable` 的函数体', enfBody !== null);
+
+  /**
+   * 剥掉**注释**与**字符串字面量**后的代码。
+   *
+   * ## ★ 为什么必须剥（本仓第四次踩同一个坑）
+   *
+   * 我在这段代码旁边写了"这里原先写的是 `diag(...)`"来解释降级原因 ——
+   * 而裸的 `/\bdiag\s*\(/` **命中了那句注释**。
+   * 同一个坑的历史：`urlTransform`（PITFALLS #1）、`RETURNING`（#14）、
+   * `is_admin`（akso-vault #19）。规律：**"解释为什么不用 X"的文本必然包含 X。**
+   *
+   * ⇒ 判据只看**运行时会执行的东西**。这里没有 AST 可用（是 TS 源码正则检查），
+   *   所以退一步剥注释 + 清空字符串内容。
+   *   ★ 顺序要紧：**先剥字符串再剥行注释**，否则 `'//'` 这种字面量会把后面的
+   *     真代码当注释吃掉（反向失效，那是更坏的一类）。
+   */
+  const stripLiterals = (code) => code
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')                       // ① 块注释
+    .replace(/`(?:\\[\s\S]|[^`\\])*`/g, '``')                // ② 模板串
+    .replace(/'(?:\\[\s\S]|[^'\\\n])*'/g, "''")              // ③ 单引号串
+    .replace(/"(?:\\[\s\S]|[^"\\\n])*"/g, '""')              // ④ 双引号串
+    .replace(/\/\/[^\n]*/g, ' ');                            // ⑤ 行注释（必须在字符串之后）
+
+  const enfCode = enfBody ? stripLiterals(enfBody) : '';
+
+  // ★★ 判据必须落在**那个具体分支**上，不能落在整个函数体上。
+  //
+  // 第一版写的是"整个 `isEnforceable` 里没有 `diag()`" —— 实测**假红**，
+  // 而且假红得**很有道理**：函数里另外两处 `diag()`（停用名单 / 授权实查）
+  // **每个 host 只走一次**（之后进 `enforcement` 缓存）⇒ 它们根本不是热路径，
+  // 留在 `diag()` 里是对的（它们是"罕见但关键"：网络平面能否执行的判定依据）。
+  //
+  // 真正每次调用都会走到的是**缓存命中**那一支。⇒ 只断言它。
+  // （教训：判据的范围要按**代码的真实控制流**划，不能按"我改过这个函数"划。）
+  const quickReturn = /if\s*\(\s*cached\s*!==\s*undefined\s*\)\s*\{([\s\S]*?)\n\s*\}/.exec(enfCode);
+  check('判据前提：确实取到了 `isEnforceable` 的缓存命中分支', quickReturn !== null);
+  const branch = quickReturn ? quickReturn[1] : '';
+  check(
+    '缓存命中分支（真热路径）里没有 `diag()` —— 它每次调用都会走到',
+    !!quickReturn && !/\bdiag\s*\(/.test(branch),
+    /\bdiag\s*\(/.test(branch) ? '★ 热路径又在写 storage 缓冲了' : '',
+  );
+  check('缓存命中分支有 `log.debug` 轨迹（降级不是删掉）', /log\.debug\(/.test(branch));
+
+  // 反向：`diag()` 必须**仍然**用在罕见失败面（否则这次"降级"被误读成"日志都该删"）
+  check('`diag()` 仍被用于罕见失败面（未被一刀切删掉）',
+    /\bvoid diag\(/.test(stripLiterals(ps)));
+
+  // 三通道的命名空间前缀必须一致（都经 `getLogger`，不直接 console）
+  check('`parallel-session` 模块取 logger 走 `getLogger`',
+    /getLogger\('parallel-session'\)/.test(ps));
+}
+
 // ---------------------------------------------------------------- 汇总
 const passed = results.filter(Boolean).length;
 console.log(`\n=== 汇总：${passed}/${results.length} 通过 ===`);

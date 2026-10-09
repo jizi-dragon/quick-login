@@ -8,6 +8,19 @@ import { tabRules, parentDomainOf, hostNoPortOf } from './tab-rules';
 //   用 `shared/redact`（而非 `shared/log`）是为了**不把 logger 拖进来**：
 //   本文件不需要 logger，只需要那个纯函数 —— 而 `redact.ts` 是无依赖的。
 import { redact, redactDetail } from '../../shared/redact';
+// ★ 热路径用的内存日志。与 `diag()`/`forensics()` 的分工见 `isEnforceable` 里的表。
+import { getLogger } from '../../shared/log';
+
+/**
+ * 本模块的 logger。
+ *
+ * ★ 用它打**热路径**（每次调用都会走到的地方）—— 它写内存环形 200 + DevTools，
+ *   默认 `info` 级 ⇒ 生产静默、零存储开销。
+ * ★ `diag()`（下面那个）只留给**罕见但关键**的事件：失败 / 降级 / 状态跃迁。
+ *   两处不要混用，否则 `ql:diag` 的环形 60 会被噪声刷满，
+ *   而真实失败（如 DNR 规则装不上）就看不见了。
+ */
+const log = getLogger('parallel-session');
 
 /**
  * 「多平面隔离」运行时编排（纯扩展多账号并行，见 docs/BROWSER-ONLY-MULTILOGIN-RESEARCH.md §4）：
@@ -110,7 +123,27 @@ async function readBlockedHosts(): Promise<Set<string>> {
 async function isEnforceable(host: string): Promise<boolean> {
   const cached = enforcement.get(host);
   if (cached !== undefined) {
-    void diag(`isEnforceable(${host}) → 缓存 ${cached}`);
+    // ★★★ 2026-10-09：这行**从 `diag()` 降级为 `log.debug()`**。
+    //
+    // 它原先每次缓存命中就写一次——而 `isEnforceable` 在**每一次导航 / 每一次
+    // 请求判定**上都会被调用 ⇒ 这是个**热路径**。
+    //
+    // 代价不是"日志多"，而是**把有用的日志挤掉**：`ql:diag` 是**环形 60**
+    // （`background/core/tab-rules.ts` 与 `parallel-session.ts` 共写同一个键），
+    // 而写它的有 45 个调用点。也就是说 ——
+    // **`addRule #N 失败`（DNR 规则装不上，历史上整个网络平面因此一起死过）
+    // 会在几秒内被这一类"缓存命中"刷出缓冲。**
+    //
+    // ⇒ 分工是有意的，不是顺手：
+    //   | 通道 | 存储 | 用途 |
+    //   |---|---|---|
+    //   | `log.debug()` | 内存（环形 200）+ DevTools | **热路径轨迹**。默认 `info` 级 ⇒ 生产静默、零存储开销 |
+    //   | `diag()` | `storage.local`（环形 60） | **罕见但关键的事件**（失败 / 降级 / 状态跃迁） |
+    //   | `forensics()` | `storage.local`（环形 120） | **结构化事件**（可按字段过滤、进诊断包） |
+    //
+    // ★ 判据：`diag()` 里**不该出现"每次调用都会走到"的行**。
+    //   已由 `verify-log-redaction.mjs` 第 6 节的闭环检查附近约定（见 AGENTS.md 规则 22）。
+    log.debug('isEnforceable(%s) → 缓存 %s', host, cached);
     return cached;
   }
   const blocked = await readBlockedHosts();

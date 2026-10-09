@@ -1765,8 +1765,26 @@ exportDiagBtn.addEventListener('click', () => {
       })),
       boxes,
       rulesState: (diagRes as { result?: { data?: { tabRules?: unknown; parallel?: unknown } } } | null)?.result?.data ?? null,
+      // ★ `diagLog` 是 `parallel-session.ts` 的**人读文本**埋点（`ql:diag`，环形 60）。
       diagLog: (await chrome.storage.local.get('ql:diag').then((s) => s['ql:diag'] ?? []).catch(() => [])) as string[],
       forensics: forensicsData,
+      // ★ 2026-10-09 补：`shared/log.ts` 的**带级别文本轨迹**（`ql.diag` handler 用
+      //   `drain()` 取出来带回来的）。
+      //
+      //   三者的分工是**刻意**的，不要合并：
+      //     | 字段 | 是什么 | 回答的问题 |
+      //     |---|---|---|
+      //     | `appLogs` | 带级别的文本轨迹（`ql:xxx` 命名空间 + 已打码） | "按什么顺序、在哪一层退出的" |
+      //     | `diagLog` | 人读的一行行文本埋点 | "这一步走到了吗" |
+      //     | `forensics` | **结构化事件**（可按字段过滤） | "发生了什么、带什么参数" |
+      //
+      //   ⚠️ `appLogs` 是 SW **内存**里的东西（`log.ts` 的约束 2：不落盘）。
+      //      SW 被终止后它就没了吗 —— MV3 的 SW 约 30 秒空闲即回收，
+      //      所以**导出前请先复现一次问题**，否则拿到的是空数组。
+      //      这也是它必须进诊断包的原因：晚一步就永远看不到了。
+      appLogs: (diagRes as { result?: { data?: { logs?: unknown[]; logLevel?: string } } } | null)
+        ?.result?.data?.logs ?? [],
+      logLevel: (diagRes as { result?: { data?: { logLevel?: string } } } | null)?.result?.data?.logLevel ?? null,
     };
     const text = JSON.stringify(bundle, null, 2);
     try {

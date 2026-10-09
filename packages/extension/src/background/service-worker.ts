@@ -1,6 +1,9 @@
 import type { RuntimeRequest, RuntimeResponse, Result, StatusContext, StatusList } from '../shared/messages';
 import type { BridgeUpPayload } from '../shared/types';
 import { CONTENT_MESSAGE, EXT_VERSION, LOCAL_KEYS } from '../shared/constants';
+// ★ 日志的**唯一公开面**（AGENTS.md 规则 3）：取 logger 与读缓冲都从这里。
+//   直接 `console.*` 会绕过强制打码；直接读 ring 会绕过 `drain()` 的游标还原。
+import { drain, getLogLevel } from '../shared/log';
 import { getPendingAutoLogin } from './core/auto-login-cache';
 import { siteAuth, probeScheme } from './core/site-auth';
 import {
@@ -104,6 +107,19 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
         }
         out.parallel = parallelSession.debugState();
         out.tabRules = tabRules.debugState();
+        // ★ 2026-10-09：把 `shared/log.ts` 的环形缓冲**接进诊断包**。
+        //
+        // 原先这个 handler 返回了 storage / manifest / DNR / parallel / tabRules，
+        // 唯独没有日志 —— 而 `shared/log.ts` 的 `drain()` **零调用点**。
+        // 后果是：日志只写到 DevTools 控制台，而**诊断包里一条都没有**。
+        // 这很要紧，因为 `forensics` 与 `diag` 是**结构化事件**（"发生了什么"），
+        // 而这里是**带级别的文本轨迹**（"按什么顺序、在哪一层退出的"）——
+        // 排一个"为什么没生效"的问题时，后者往往才是关键。
+        //
+        // ★ 用 `drain()` 而不是自己读 ring：`drain()` 是本模块的**唯一公开面**，
+        //   而且它做了环形游标的顺序还原（乱序读会让时间线看起来是错的）。
+        out.logs = drain();
+        out.logLevel = getLogLevel();
         return out;
       });
       return { kind: 'ql.diag', result: r };
