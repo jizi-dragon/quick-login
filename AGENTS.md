@@ -14,7 +14,7 @@
 > | 想了解 | 去哪 |
 > |---|---|
 > | **隔离平面总表（权威口径）** | [docs/CODEBASE_OVERVIEW.md](docs/CODEBASE_OVERVIEW.md) §Architecture |
-> | **踩过的坑（25 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
+> | **踩过的坑（27 条，只增不改，含判据）** | [docs/PITFALLS.md](docs/PITFALLS.md) |
 > | 功能清单与使用说明（给人看的） | [docs/USER-MANUAL.md](docs/USER-MANUAL.md) |
 > | 现状快照与安全边界 | [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) |
 > | 现场排障与诊断埋点怎么读 | [docs/DIAG-GUIDE.md](docs/DIAG-GUIDE.md) |
@@ -95,6 +95,8 @@
 | 31 | **"产物对"不能推出"源对" —— 每组「源 → 产物」都要问：源在仓库里吗 / 源与产物一致吗 / 有判据能识破源被换掉吗？**<br>实测（`PITFALLS #23`）：审计【两端图标】时产物**全对**（128/48 是源的 **LANCZOS 直缩、逐像素全等**；32/16 **有意**手调；两端 4 档**逐字节相同**；`manifest` 声明齐全）。<br>★★ 而往回查"源在哪"时发现：**仓库里被跟踪的"图标源"没有一个是真 logo** ——<br>&nbsp;&nbsp;· `assets/src-icon.svg` / `src-icon512.svg` 是**另一个设计的占位图**（圆角渐变方块 + 三段圆弧，`#2E7BFF`/`#7CE0C3`/`#FFD166`，**不含任何品牌色**）<br>&nbsp;&nbsp;· `src-icon-master.png` / `src-icon512.png` 与它们**同源**（也是占位图）<br>&nbsp;&nbsp;· 真 logo（422×422 蓝 `A` + 橘 `W` + **®**）**根本不在仓库里**，只在工作区 `tmp/icons/`<br>★ 危险不是"多了几个文件"：它们**零引用**（`manifest` 只引 4 个 `Icon*.png`）却因 `build.mjs` 的 `cpSync(assets → dist/assets, recursive)` **全被打进 dist**；★★ 更坏的是**下一个人会以为那是源** —— 拿它重渲染得到一个**完全不同的图标**，而全过程"看起来就是从源生成的"。<br>★ 为什么所有门禁都绿：`akso-vault` 侧的 favicon 判据管住了 **404 坏引用**与**非方形**，但管不住"**这张方形图画的是什么**"。<br>⇒ 处置：真 logo 入库为 `assets/logo-master-422.png`（唯一权威源）；删掉那 5 个假源；**新增 `tools/verify/verify-icons.mjs`（39 条）** + 反证（**4/4**）。<br>★★ **判据要盯「这个东西区别于冒牌货的那个性质」**，而不是"它存在" —— 本例是"**源必须同时含品牌蓝与强调橘**"，那正是占位图不具备的。<br>★ 另外两条有价值的判据：① 大档的不透明覆盖率与源相近（把"确实来自这个源"钉死）；② ★ **小档覆盖率必须与大档不同** —— 断言"它们**有意**不是简单缩放"，防止有人"顺手统一成缩放"而毁掉 16px 可读性（16px 上 ® 只有 1–2px）。<br>★ 还有一条**运行时**判据：manifest 里的相对路径要在**它真正被解析的位置**（`dist/`）存在 —— `build.mjs` 若忘了拷 assets，图标全裂而 `chrome://extensions` 只报"找不到文件"。<br>★★★ **没写生成脚本是刻意的**：32/16 的算法我试了三种模型都**复现不出来**。写一个"复现不出来"的生成器是**假的可复现性**（它会让人以为产出可重建），比不写更坏 ⇒ 如实记下"大档可复现、小档是手工挑选"。<br>★ 实现坑：仓库**没有任何 PNG 解码依赖**，为它新加一个正是**幽灵依赖**的入口（规则 14）⇒ 用 Node 内置 `zlib` **手写最小解码器**（只支持 8-bit 非隔行 RGBA/RGB，遇别的形态**明确抛错**而不是给错像素）。<br>★ 又一次"**我『知道』某件事该在哪，并据此写判据**"：我以为 ® 在**右下**，只扫右下 35% ⇒ 报"没找到"（实际在**右上**）。**先看图再写判据**（规则 23）。 |
 | 32 | **"工具不可用"会伪装成"没人用" —— 看到一个环境里某项实践**系统性缺失**时，先查"那件事在那个环境里能不能做成"，再查"要不要做"。**<br>实测（`PITFALLS #24`）：三个环境的日志覆盖面差得**有规律**，而不是零散遗漏 ——<br>&nbsp;&nbsp;· `background/`（SW）13 个文件，**9 个有 logger**<br>&nbsp;&nbsp;· `content/` 7 个文件，**1 个有**（静默 catch 30）<br>&nbsp;&nbsp;· `ui/` 9 个文件，**0 个有**（静默 catch 22）<br>★★ 根因不是"勤快程度"，而是**通道可达性**：`log()` 的环形缓冲与 `setSink()` 的落盘**都在 SW 里**，而 content script 与扩展页面**各有自己的 JS 环境** ⇒ 它们记的日志**永远进不了诊断包**。**在那里加日志是白加 ⇒ 于是没人加。**<br>★ 这是 `PITFALLS #22`（`setSink()` 从没被调用）的**同一形态第二处**：机制只接到了 SW 这一端。而 #22 修完后**判据变绿了**，"其他环境够得到吗"**又一次**没被问到。<br>⇒ 处置：新增 `setForwarder()` + **`getForwardingLogger()`**（`log.ts`），契约加 `ql.log`，SW 侧 `restoreToRing(records.slice(0,50))` **入同一个环**并额外落一条 `forensics`；`parallel.ts` 模块级接线 + 三条静默失败补留痕。<br>★ 四个刻意设计：① 转发器用**注入**而非 import 消息类型（否则 `shared/log.ts` 会依赖业务契约 —— **耦合方向反了**，而且注入可测）；② `getForwardingLogger` **不改变本环境行为**（SW 不可达时 DevTools 照样看得到 —— 转发是**增强**不是替代）；③ **转发前再打一次码**（进通道的文本必须已打码是**通道级**约定，不靠调用点自觉 —— 规则 21 的思路）；④ `sendSafe` 用 **`debug`** 而非 `warn`（它是**正常路径之一**，SW 冷启必然发生几次 ⇒ `warn` 会挤掉环形 60 里的真失败，规则 22），并在 SW 侧用 `forensics` 兜住"排障时才发现"的缺口。<br>判据：`verify-log-redaction.mjs` **第 15 节**（⇒ **121 条**）+ 反证 **23/23**。★ 第 15 节与第 14 节的分工：14 管"**SW 自己**的日志有没有落盘"，15 管"**别的环境的**日志有没有到 SW"。 |
 | 33 | **文档审计要按「读者是谁」分层，不能只按「文件里有没有提这个概念」。**<br>实测（`PITFALLS #25`）：【扩展端】的文档同步做过一轮，`CODEBASE_OVERVIEW.md` / `PROJECT-STATUS.md` / `DESIGN.md` 都维护得不错（命中处**绝大多数带"v3.18 已删"标注**）—— **唯独漏了 `docs/USER-MANUAL.md`**。<br>★★ 因为那三份是**给开发者看的**，而 `USER-MANUAL.md` 是**唯一一份给用户看的**。上一轮按"文件里有没有提这个概念"去找，**没有问"这句话的读者是谁"**。<br>而它同时有**五处纯粹的现状陈述、且全部与代码相反**：<br>&nbsp;&nbsp;· §4.1「密码 **AES-GCM 加密保存在本机**，不上传任何服务器」<br>&nbsp;&nbsp;· §十「密码 **AES-GCM 加密存放本机**（IndexedDB），任何服务器都拿不到」<br>&nbsp;&nbsp;· §十「备份文件**等效密码本（内含解密种子）**」<br>&nbsp;&nbsp;· §4.3「导出物含**全部账号（含加密密码）**」+「用**文件自带的密钥种子解密**」<br>&nbsp;&nbsp;· ★ Q7「账号与加密密码**存在本机浏览器配置**里，换机走导出→导入」<br>★★ **这比崩溃更坏**：它不是报错，是**对用户撒谎**，而且**两个方向都误导** ——<br>&nbsp;&nbsp;· 用户以为口令只在本机 ⇒ **低估"云端账号库被拖库"的影响**，可能复用口令；<br>&nbsp;&nbsp;· 用户以为备份是密码本 ⇒ 过度紧张；<br>&nbsp;&nbsp;· ★ Q7 最坏：**教他"换机走导出→导入"，而导出搬不走口令** ⇒ 他在新机器上会以为**数据丢了**。<br>⇒ 判据：`tools/verify/verify-user-docs.mjs`（**7 条**）+ 反证 `verify-falsify-userdocs.mjs`（**5/5**）。<br>★★ **判据怎么划才不被自己的历史留痕弄红**：<br>&nbsp;&nbsp;① **不走关键词**（查 `AES-GCM` 会命中一堆**正确的历史留痕**）；模式必须是**整体的现状断言**（`/AES-GCM\s*加密(保存|存放)在?本机/`）—— 同本文件规则 28；<br>&nbsp;&nbsp;② **显式跳过带时间标记的行**（`v3.18` / `已废除` / `再也解不开` / `原先那套`）—— 改掉它们等于让人以为从来没存在过；<br>&nbsp;&nbsp;③ **跳过带否定词的句子**（`不含` / `不再等同于` / `没有`）—— 那是**澄清**不是断言。★ 实测我的探针把「**不含**任何解密种子」误判了两处；<br>&nbsp;&nbsp;④ ★★ **并如实写下局限**：一句折成两行、时间标记在**上一行**时，逐行扫描会误判。⇒ 遇到 `FAIL` 先**读那一句**，**不要为了过判据去删正确的历史标注**；<br>&nbsp;&nbsp;⑤ **而"真相"也必须被明说** —— 否则有人可以把假陈述删掉却不补真相，判据照样绿。<br>★ 反证的缺陷版用**从修复前内容里逐字取出的原句**（规则 31 / `PITFALLS #23`：我构造过假的缺陷版 ⇒ 反证 GREEN ⇒ 一度以为判据失效）。<br>★ 还原用**文件副本**而非 `git checkout` —— 本轮实测踩过：`git checkout -- site.css` 把同一轮里**其他未提交的成功改动**一起还原了，而没有任何提示。<br>★ 顺带核实一处**我自己的过时断言**：我以为 `manifest.description` 还写着"凭证加密保存"，**实测它已经写的是"账号存云端账号库"**（已修正我的叙述）。 |
+| 34 | **"产物对"要问两件事，本仓此前只问了一件：**内容对不对**（`check-dist` / `verify-icons` 管）与**它该不该在包里**（**没人管**）。**<br>实测（`PITFALLS #26`）：`build.mjs` 用 `cpSync(assets → dist/assets, recursive)` ⇒ 把 `assets/` 下的**一切**带进扩展包，包括 **`logo-master-422.png`（11.1 KB 的源文件**，图标派生链的起点）。它是 `dist/` 里**唯一一个 manifest 没引用的文件**（24 个文件 / 392.8 KB）。<br>★★ 这与 `PITFALLS #20` 的 favicon 是**镜像形态**：那边是"**产物存在但没人引用**"，这边是"**源被打进了包**"。两者都**不报错、装载正常、无门禁覆盖**。<br>⇒ 处置：`build.mjs` 改成**按文件名白名单**拷 `Icon{16,32,48,128}.png`（与 `copyUiStatics` 同一条原则：只拷运行期真正要用的）；`verify-icons.mjs` 加第 7 节（**42 条**）。实测 `dist` **24 → 23 个文件，392.8 → 381.7 KB**。<br>★ 判据要盯**"这个目录里恰好该有哪些文件"**（集合相等），不是"每个该有的都在" —— 后者对"多出来的"永远是绿的。 |
+| 35 | **"manifest 合法" ≠ "Chrome 装得上" —— 而失败信息只在 `chrome://extensions` 上，人不去点就看不到。**<br>实测（`PITFALLS #27`）：本仓此前的判据都读 `dist/manifest.json` 的**内容**，**没有一条验过"它真的能被装载"**。而 `content_scripts` 指向不存在的产物 / `service_worker` 路径写错 / 图标少一档 —— manifest 依然合法、`check-dist` 依然绿，**装载直接失败**。<br>⇒ 新增 `tools/verify/verify-load.mjs`（**17 条**）：真起 Chromium + `--load-extension`，验 ① 扩展被装载 ② 产物齐全性 ③ 三个自有页面能开且无未捕获错误 ④ ★ **SW 真的活着**（能应答 `ql.diag` 且回了 `logs` 数组 ⇒ 落盘通道在线，而不只是"注册了"）⑤ 装载期无致命错误。<br>★ 它**不验**登录/列表/开页签/盒子/设备流/离线降级 —— 那些要真实云端账号 + 真实内网平台，**必须人工走**（B7 的剩余部分）。<br>★★ **四条踩坑，都值得照抄**：<br>&nbsp;&nbsp;· **`headless: true` + 系统 Chrome 稳定版不加载扩展**；要 `executablePath` 指向 `ms-playwright/chromium-<ver>/chrome-win64/chrome.exe`；<br>&nbsp;&nbsp;· **扩展 ID 从 `manifest.key` 推导**（`sha256(Base64(key))` 前 32 位 → a–p），**不要靠 `ctx.serviceWorkers()`** —— headless 下 SW 懒启动，常常等不到；<br>&nbsp;&nbsp;· ★ **content script 按设计不在 `web_accessible_resources` 里** ⇒ 用扩展协议**取不到**它。我第一版把全部产物都用 HTTP 取，于是 4 个 content script 全报"缺失"，而它们**就在磁盘上** —— **那条判据测的是访问控制边界，不是"文件在不在"**。⇒ 分两类判：**能取的从页面内 `fetch()`**、**不能取的查磁盘**；<br>&nbsp;&nbsp;· ★★ 而"取图标"也别用 Playwright 的 `page.request.get('chrome-extension://…')` —— 同一批图标我先后看到"能取到"与"全部 ERR"**两次不同结果**（request 上下文不在扩展的 origin 里）。用 `page.evaluate(() => fetch(chrome.runtime.getURL(...)))`。<br>★ 还有一条**语法**坑：注释里写出**星号紧跟斜杠**会提前闭合块注释 ⇒ `SyntaxError`。★ 而我**在解释这个坑的那一行里又写了一遍**，于是第二次才修对。 |
 
 ---
 
@@ -129,10 +131,15 @@ node tools/verify/verify-forensics-redaction.mjs     # 取证/诊断通道（25 
 node tools/verify/verify-falsify-forensics.mjs       # ↑ 的反证（3/3）
 
 # 图标源 + 用户文档：**四个**脚本，同样秒级、不需要浏览器
-node tools/verify/verify-icons.mjs                   # 图标源与派生产物（**39 条**）
+node tools/verify/verify-icons.mjs                   # 图标源与派生产物（**42 条**）
 node tools/verify/verify-falsify-icons.mjs           # ↑ 的反证（**4/4**）
 node tools/verify/verify-user-docs.mjs               # 用户可见的功能描述（**7 条**）
 node tools/verify/verify-falsify-userdocs.mjs        # ↑ 的反证（**5/5**）
+
+# 装载冒烟：真起 Chromium + --load-extension（**17 条**，约 15 秒）
+#   ★ 它验「manifest 合法 ≠ Chrome 装得上」那一步；**不验**登录/列表/开页签/盒子/
+#     设备流/离线降级 —— 那些要真实云端账号 + 真实内网平台，**必须人工走**（B7 的剩余部分）。
+node tools/verify/verify-load.mjs
 
 npm run verify:list       # 列出回归脚本（不跑）
 ```
@@ -169,7 +176,7 @@ npm run verify -- --only jarhygiene
   与服务器端统一。
 - **每修一个"看起来正常但其实是坏的"缺陷，就把它的判据写进脚本注释或
   [`docs/PITFALLS.md`](docs/PITFALLS.md)。**
-  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（当前 **25 条**）——在此之前这类教训
+  ★ 本仓 **2026-10-09 起有 `docs/PITFALLS.md` 了**（当前 **27 条**）——在此之前这类教训
   只散在 `CHANGELOG.md` 里，而两者的分工不同：
   `CHANGELOG.md` 记"每次发布改了什么"（历史），
   `PITFALLS.md` 记"**哪些错会静默发生、怎么一眼认出来**"（可复用的判据）。

@@ -32,7 +32,7 @@
  * 5. `assets/` 下**不许再有** `src-icon*`（假源曾在那里）。
  */
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inflateSync } from 'node:zlib';
@@ -260,9 +260,30 @@ check('manifest.icons 声明了 16/32/48/128',
 for (const [size, rel] of Object.entries(declared)) {
   check(`manifest 声明的 ${rel} 在 dist/ 下存在`, existsSync(join(DIST, rel)));
 }
-// ★ 源码侧：图标来自**仓库根**的 `assets/`（`build.mjs` 的 cpSync 源）
+// ★ 源码侧：图标来自**仓库根**的 `assets/`（`build.mjs` 的两处 copyFileSync 源）
 check('仓库根 assets/ 里有 4 档源图标',
   ['16', '32', '48', '128'].every((n) => existsSync(join(ASSETS, `Icon${n}.png`))));
+
+// ---------------------------------------------------------------- 7. 包里不许有源文件
+console.log('\n=== 7. `dist/assets/` 只许有那 4 档图标（源文件不进包）===');
+// ★★ 为什么加这条：`build.mjs` 原先是 `cpSync(assets → dist/assets, recursive)`，
+//   于是 `logo-master-422.png`（**11.1 KB 的源文件**，图标派生链的起点）被打进扩展包。
+//   实测它是 `dist/` 里**唯一一个 manifest 没引用的文件**（24 个文件 / 392.8 KB）。
+//   ⇒ 源文件不该发给用户；而**"没人引用的文件静静躺在包里"没有任何门禁会说话**
+//     （与 `PITFALLS #20` 的 favicon 是**镜像形态**：那边是"产物没人引用"，
+//       这边是"源被打进包"）。
+const distAssets = join(DIST, 'assets');
+check('前提：dist/assets/ 存在（跑本脚本前必须先 npm run build）', existsSync(distAssets));
+if (existsSync(distAssets)) {
+  const present = readdirSync(distAssets).sort();
+  const expected = ['Icon128.png', 'Icon16.png', 'Icon32.png', 'Icon48.png'];
+  check('dist/assets/ 里恰好是那 4 档图标',
+    JSON.stringify(present) === JSON.stringify(expected), present.join(' '));
+  const stray = present.filter((f) => f.startsWith('logo-') || f.startsWith('src-')
+    || f.endsWith('.svg'));
+  check('dist/assets/ 里没有任何源文件（logo-* / src-* / *.svg）', stray.length === 0,
+    stray.join(' '));
+}
 
 // ---------------------------------------------------------------- 汇总
 const passed = results.filter(Boolean).length;

@@ -1,5 +1,5 @@
 import { build, context as createContext } from 'esbuild';
-import { copyFileSync, cpSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -26,7 +26,21 @@ function copyUiStatics(from, to) {
 }
 
 function copyExtensionStatics() {
-  cpSync(path.join(root, 'assets'), path.join(dist, 'assets'), { recursive: true });
+  // ★★ **不是** `cpSync(assets → dist/assets, recursive)`。
+  //
+  // 那条 recursive 拷贝会把 `assets/` 下的**一切**带进包里 ——
+  // 包括 `logo-master-422.png`（**11.1 KB 的源文件**，图标派生链的起点）。
+  // 实测（2026-10-09）：`dist` 共 24 个文件 / 392.8 KB，而它是**唯一一个
+  // manifest 没引用的**。⇒ **源文件不该发给用户。**
+  //
+  // ★ 与 `copyUiStatics` 同一条原则：**只拷运行期真正要用的**。
+  //   `assets/` 是"源 + 产物"混放（`logo-master-422.png` 是源、`Icon*.png` 是产物），
+  //   所以这里**按文件名白名单**挑，而不是整目录递归。
+  mkdirSync(path.join(dist, 'assets'), { recursive: true });
+  for (const n of [16, 32, 48, 128]) {
+    copyFileSync(path.join(root, 'assets', `Icon${n}.png`),
+                 path.join(dist, 'assets', `Icon${n}.png`));
+  }
   copyFileSync(path.join(extDir, 'manifest.json'), path.join(dist, 'manifest.json'));
   copyUiStatics(path.join(extDir, 'src', 'ui'), path.join(dist, 'ui'));
 }
