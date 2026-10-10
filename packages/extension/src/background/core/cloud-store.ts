@@ -404,6 +404,26 @@ async function loadBoxes(force = false): Promise<{ rows: CloudBox[]; default: st
   return boxCache;
 }
 
+/**
+ * ★★ 2026-10-12：**权威盒子名单**（云端那一份）。
+ *
+ * 用户报"盒子的数据没有做好同步"：实测**扩展 5 个盒子、云端 2 个**，两边都不报错。
+ * 扩展侧的根因是 `parallel.ts` 的盒子列表把"**本地记住的**"取了并集，
+ * 而那份名单（`ql:boxes`）**只会被加、不会被减** ⇒ 云端删掉/改名的盒子永远留着。
+ *
+ * ⇒ 这里把"云端那一份"单独导出，让 UI 侧能在**云可用时**对账（剪掉多余的）。
+ *   ★ 调用方必须容错：**拿不到就什么也别动**（离线时本地那份是唯一的真相）。
+ *   ★ `force` 默认 false：走 `META_TTL_MS` 缓存，别为一次渲染多打一次网络。
+ */
+export async function fetchCloudBoxNames(force = false): Promise<{ names: string[]; default: string } | null> {
+  try {
+    const { rows, default: def } = await loadBoxes(force);
+    return { names: rows.map((b) => b.name).filter(Boolean), default: def };
+  } catch {
+    return null;   // ★ 不抛：这是"对账用的参考数据"，取不到不该让任何调用点炸
+  }
+}
+
 /** 默认盒名（上传时要把等于它的 box 名翻译回空串） */
 async function defaultBoxName(): Promise<string> {
   try {

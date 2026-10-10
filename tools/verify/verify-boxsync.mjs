@@ -1,0 +1,137 @@
+/**
+ * ★★ 盒子与**云端**对账的验证（2026-10-12）。
+ *
+ * 用户报："云端账号库，盒子的数据没有做好同步。"
+ * 实测：**扩展显示 5 个盒子、云端只有 2 个**，而两边都不报错。
+ *
+ * ## 验的是什么（以及为什么不是端到端）
+ *
+ * `verify-boxmgmt.mjs` 覆盖"扩展**自己**的重命名/删除"；
+ * 本脚本覆盖**它没覆盖的那一半**：`ql:boxes`（本地记住的）与云端名单不一致时怎么收敛。
+ *
+ * ★ 第一版我写成真起 Chromium + 真打云端 —— 结果**只能 SKIP**：
+ *   扩展在验证档案里没有云端授权（`par.create` 回"云端未授权"），
+ *   于是"对账"那条路径**从来没被执行过**，而那正是要验的东西。
+ *   ⇒ 把规则抽成**纯函数** `shared/box-reconcile.ts`（不碰 chrome / 不碰 DOM），
+ *     本脚本用 **esbuild 就地把它转成 CJS** 再加载，用**合成数据**把三种情形钉住。
+ *   （用 esbuild 而不是手搓 TS 剥离器：后者在源码形状一变就会**静默错**，
+ *     而那正是本仓规则 31「产物对不能推出源对」的镜像。）
+ *
+ * ## 三条判据里有两条是**反方向**的
+ *
+ * 只验"剪掉了多余的"是不够的 —— "一律清空"也能过那一条。所以还要验：
+ *   · 云端**没答复**（离线）时**一个都不许剪**；
+ *   · **账号里正在用的**盒名**永远不许剪**（哪怕它暂时不在云端名单里）。
+ */
+import { build } from 'esbuild';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const SRC = path.join(ROOT, 'packages', 'extension', 'src', 'shared', 'box-reconcile.ts');
+const OUT = path.join(ROOT, 'tmp', 'box-reconcile.cjs');
+
+let bad = 0;
+const fail = (m) => { console.log(`  ✗ ${m}`); bad++; };
+const ok = (m) => console.log(`  ✓ ${m}`);
+
+if (!fs.existsSync(SRC)) {
+  console.error(`✗ 找不到 ${SRC} —— 对账规则被挪走了？本判据的锚点需要跟着改`);
+  process.exit(2);
+}
+
+// ★ 就地转译（不写进 dist/，也不手工剥类型）
+fs.mkdirSync(path.dirname(OUT), { recursive: true });
+await build({
+  entryPoints: [SRC],
+  outfile: OUT,
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent',
+});
+const { reconcileBoxes } = await import(pathToFileURL(OUT).href);
+if (typeof reconcileBoxes !== 'function') {
+  console.error('✗ box-reconcile.ts 没有导出 reconcileBoxes');
+  process.exit(2);
+}
+
+const DEF = '默认盒子';
+
+// ══════════════════════════ ① 云端有答复：多余的本地盒名必须被剪掉
+console.log('=== ① 云端有答复时：本地记住的多余盒名必须被剪掉 ===');
+{
+  const out = reconcileBoxes({
+    remembered: ['通桥', '本地幽灵盒子A', '本地幽灵盒子B'],
+    fromAccounts: ['通桥'],
+    cloudNames: [DEF, '通桥'],
+    defaultBox: DEF,
+  });
+  console.log(`     boxes=${JSON.stringify(out.boxes)}  dropped=${JSON.stringify(out.dropped)}  changed=${out.changed}`);
+  if (out.boxes.includes('本地幽灵盒子A') || out.boxes.includes('本地幽灵盒子B')) {
+    fail('云端没有的盒名还在列表里（对账没生效）');
+  } else ok('云端没有的盒名已被剪掉');
+  if (!out.dropped.includes('本地幽灵盒子A')) fail('dropped 没记下被剪掉的名字（调用点无法记账）');
+  else ok('dropped 记下了被剪掉的名字');
+  if (!out.boxes.includes('通桥')) fail('把**云端确实有的**盒子也剪掉了');
+  else ok('云端确实有的盒子保留着');
+  if (out.boxes[0] !== DEF) fail(`默认盒不在第一位（${out.boxes[0]}）—— 它是"未归盒账号的归宿"`);
+  else ok('默认盒在第一位');
+  if (!out.changed) fail('changed 应为 true');
+}
+
+// ══════════════════════════ ② 离线：一个都不许剪（反方向）
+console.log('\n=== ② 云端没答复（离线）：一个都不许剪 ===');
+{
+  const out = reconcileBoxes({
+    remembered: ['通桥', '离线时也要看得见的盒子'],
+    fromAccounts: ['通桥'],
+    cloudNames: [],            // ★ 没拿到
+    defaultBox: DEF,
+  });
+  console.log(`     boxes=${JSON.stringify(out.boxes)}  changed=${out.changed}`);
+  if (!out.boxes.includes('离线时也要看得见的盒子')) {
+    fail('离线时把本地记住的盒子剪掉了 —— 用户会看到"自己的盒子全没了"');
+  } else ok('离线时本地那份完好（刻意：离线时它是唯一真相）');
+  if (out.changed) fail('离线时不该报 changed（调用点会白写一次 storage）');
+  else ok('离线时不报 changed');
+}
+
+// ══════════════════════════ ③ 账号在用的盒名：永远不许剪（反方向）
+console.log('\n=== ③ 账号里正在用的盒名：云端名单里没有也不许剪 ===');
+{
+  const out = reconcileBoxes({
+    remembered: ['账号在用但云端暂时没有'],
+    fromAccounts: ['账号在用但云端暂时没有'],
+    cloudNames: [DEF],          // 云端名单里确实没有它
+    defaultBox: DEF,
+  });
+  console.log(`     boxes=${JSON.stringify(out.boxes)}  dropped=${JSON.stringify(out.dropped)}`);
+  if (!out.boxes.includes('账号在用但云端暂时没有')) {
+    fail('账号在用的盒名被剪掉了 —— 用户会看到"账号挂在一个不存在的盒子上"');
+  } else ok('账号在用的盒名保住了（它不依赖云端名单）');
+  if (out.dropped.length) fail('它不该出现在 dropped 里');
+}
+
+// ══════════════════════════ ④ 默认盒去重 + 空值兜底
+console.log('\n=== ④ 默认盒去重与空值兜底 ===');
+{
+  const out = reconcileBoxes({
+    remembered: [DEF, '通桥', ''],
+    fromAccounts: [DEF, '通桥'],
+    cloudNames: [DEF, '通桥'],
+    defaultBox: DEF,
+  });
+  const dup = out.boxes.filter((b) => b === DEF).length;
+  console.log(`     boxes=${JSON.stringify(out.boxes)}  默认盒出现 ${dup} 次`);
+  if (dup !== 1) fail(`默认盒出现了 ${dup} 次（应恰好 1 次）`);
+  else ok('默认盒恰好一次');
+  if (out.boxes.some((b) => b === '')) fail('空串混进了盒子列表');
+  else ok('空串被兜掉');
+}
+
+fs.rmSync(OUT, { force: true });
+console.log(bad === 0 ? '\nRESULT: OK' : `\nRESULT: ${bad} 处不符`);
+process.exit(bad === 0 ? 0 : 1);

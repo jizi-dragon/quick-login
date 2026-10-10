@@ -16,6 +16,13 @@ export type RuntimeRequest =
    * ★ 判据是**发生地记账**（`lastListFellBack`），不是"快照年龄"启发式 ——
    *   见 `background/core/parallel-store.ts` 里那段注释。 */
   | { kind: 'par.offline' }
+  /* ---- 云端权威的**盒子名单**（2026-10-12）----
+   * 用户报"盒子的数据没有做好同步"：实测**扩展 5 个盒子、云端 2 个**。
+   * 扩展侧的根因是 UI 的盒子列表把"本地记住的"取了并集，而那份名单只会被加、
+   * 不会被减 ⇒ 云端删掉/改名的盒子永远留着。
+   * ★ 这条消息给 UI 一个**对账依据**：`result.data` 为 `null` 表示"没拿到"
+   *   （离线），那时 UI 的约定是**一个字都不动**。 */
+  | { kind: 'par.boxes' }
   | { kind: 'par.create'; siteHost: string; tabName: string; username: string; password: string; open: boolean; box?: string; scheme?: 'http' | 'https' }
   | { kind: 'par.probeScheme'; host: string }
   | { kind: 'par.update'; id: string; patch: Partial<Pick<ParallelAccount, 'tabName'>> }
@@ -113,6 +120,7 @@ export type RuntimeResponse =
    * `savedAt` / `ageMs` 让界面能说准"这是多久前的副本"，
    * 而不是含糊的"可能是旧的"（`account-cache.ts` 的设计意图）。 */
   | { kind: 'par.offline'; result: Result<{ offline: boolean; savedAt?: number; ageMs?: number; revision?: number }> }
+  | { kind: 'par.boxes'; result: Result<{ names: string[]; default: string } | null> }
   | { kind: 'par.create'; result: Result<ParallelAccount> }
   | { kind: 'par.probeScheme'; result: Result<'http' | 'https'> }
   | { kind: 'par.update'; result: Result<ParallelAccount> }

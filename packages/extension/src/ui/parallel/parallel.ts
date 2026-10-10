@@ -8,6 +8,7 @@ import type {
 import { DEFAULT_FAVORITES, EXT_VERSION, LOCAL_KEYS } from '../../shared/constants';
 import { getForwardingLogger, setForwarder } from '../../shared/log';
 import { send } from '../send';
+import { reconcileBoxes } from '../../shared/box-reconcile';
 
 /* ==================== 日志通道（v3.19） ====================
  *
@@ -392,6 +393,52 @@ async function loadBoxes(): Promise<void> {
   const fromAccounts = browserAccounts.map((a) => boxOf(a));
   boxes = [...new Set([defaultBox, ...remembered.filter((b) => b !== defaultBox), ...fromAccounts])];
   setStat('stat-boxes', boxes.length);
+  // ★★ 2026-10-12（用户报"盒子的数据没有做好同步"）：**云端那份是权威**。
+  //   上面那个并集里带着"本地记住的"，而 `ql:boxes` **只会被加、不会被减** ⇒
+  //   云端删掉/改名的盒子会永远留在界面上（实测：扩展 5 个、云端 2 个）。
+  //   ⇒ 拿到云端答复后对账；**拿不到就一个字都不动**（离线时本地那份是唯一真相）。
+  await reconcileBoxesWithCloud();
+}
+
+/**
+ * 用**云端的**盒子名单剪掉本地记住的多余项。
+ *
+ * ## 三条不能省的约束（每一条都对应一种"看起来正常但是坏的"）
+ *
+ * 1. **拿不到就不动**：`par.boxes` 在离线时会失败（`tryRun` 的结果带 error）。
+ *    那时若把本地那份当成"多余的"清掉，用户会看到**自己的盒子全没了** ——
+ *    而离线是扩展的**主要使用场景之一**（`par.offline` 那套本地只读副本就是为此存在的）。
+ * 2. **只剪"记住的"，不剪"账号里出现的"**：某个盒名可能因为"账号还没同步过来"
+ *    暂时不在云端名单里。剪掉它，用户会看到**自己的账号挂在一个不存在的盒子上**。
+ * 3. **只在真的变了时才写盘**：否则每次 `loadBoxes()` 都写一次 `chrome.storage.local`，
+ *    而它在每次渲染里都会跑。
+ */
+async function reconcileBoxesWithCloud(): Promise<void> {
+  // ★ 类型来自 `shared/messages.ts`（本仓规则：协议单一定义，调用点不就地 cast）。
+  const res = await send({ kind: 'par.boxes' }).catch(() => null);
+  const truth = res && res.kind === 'par.boxes' && res.result.ok ? res.result.data : null;
+
+  // ★★ 对账的**规则**在 `shared/box-reconcile.ts`（纯函数）—— 这里只负责
+  //   "取云端名单 + 写回 storage"。抽出去的理由是那三条约束里有两条是**反方向**的
+  //   （离线不许剪、账号在用的不许剪），而它们跑起来要云端授权 ⇒ 不抽出来就
+  //   永远验不到（本脚本的第一版正是因此只能 SKIP）。
+  //   ★ 云端没答复时 `cloudNames` 传空数组，纯函数会**原样返回**。
+  const out = reconcileBoxes({
+    remembered: boxes.filter((b) => b !== defaultBox),
+    fromAccounts: browserAccounts.map((a) => boxOf(a)),
+    cloudNames: truth?.names ?? [],
+    defaultBox,
+  });
+  if (!out.changed) return;
+
+  boxes = out.boxes;
+  setStat('stat-boxes', boxes.length);
+  // ★ 只把"记住的"那一份写回：默认盒由 `ql:defaultBox` 表达，
+  //   账号在用的名字由账号数据自己表达 —— 别让它们互相污染。
+  const used = new Set(browserAccounts.map((a) => boxOf(a)));
+  await chrome.storage.local.set({
+    [LOCAL_KEYS.boxList]: boxes.filter((b) => b !== defaultBox && !used.has(b)),
+  });
 }
 
 async function saveBoxes(): Promise<void> {

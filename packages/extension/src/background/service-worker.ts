@@ -132,6 +132,7 @@ import { getOfflineStatus, parallelStore } from './core/parallel-store';
 import {
   CLOUD_DEFAULT_BASE_URL,
   exchangeDeviceCode,
+  fetchCloudBoxNames,
   getCloudAuth,
 } from './core/cloud-store';
 import { cancelDeviceFlow, pollDeviceFlow, startDeviceFlow } from './core/cloud-device';
@@ -318,6 +319,18 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
     case 'par.offline': {
       const r = await tryRun(() => getOfflineStatus());
       return { kind: 'par.offline', result: r };
+    }
+    /* ---- 云端权威的**盒子名单**（2026-10-12）----
+     * 用户报"盒子的数据没有做好同步"：实测扩展 5 个盒子、云端 2 个。
+     * 扩展侧的根因是 UI 的盒子列表把"本地记住的"取了并集，而那份名单
+     * （`ql:boxes`）**只会被加、不会被减** ⇒ 云端删掉/改名的盒子永远留着。
+     * ★ 这条消息给 UI 一个**对账依据**；`result.data === null` 表示"没拿到"
+     *   （离线），那时 UI 的约定是**一个字都不动**。
+     * ★ 走消息而不是让 UI 直接 import `cloud-store`：实测 `src/ui/**` 里
+     *   没有任何直接 import background 的先例，那层分工是清楚的（AGENTS §2）。 */
+    case 'par.boxes': {
+      const r = await tryRun(() => fetchCloudBoxNames(true));
+      return { kind: 'par.boxes', result: r };
     }
     case 'par.create': {
       const r = await tryRun(async () => {
