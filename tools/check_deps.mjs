@@ -2,7 +2,7 @@
 //
 // ## 它防的是什么（2026-10 实测事故）
 //
-// quick-login 的验证脚本 `import ... from 'playwright-core'`，而 package.json 的
+// akso-pass 的验证脚本 `import ... from 'playwright-core'`，而 package.json 的
 // devDependencies 里**没有**它。它们能跑，只因为本机 node_modules/ 里有一次
 // `npm install --no-save` 的残留（package-lock.json 里也查不到）。
 // ⇒ 换机器 / 新 clone / CI：脚本全部 ERR_MODULE_NOT_FOUND，而且不报"缺依赖"。

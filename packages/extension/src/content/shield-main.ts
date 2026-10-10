@@ -484,7 +484,7 @@
             configurable: true,
             writable: true,
             // 阻断注册：站点回调 .catch 分支即可，不中断业务代码
-            value: () => Promise.reject(new Error('QuickLogin: site Service Worker disabled for bound tab')),
+            value: () => Promise.reject(new Error('Akso Pass: site Service Worker disabled for bound tab')),
           });
         }
         // 注销既有注册（SW 按 origin 共享：对全部标签页一致生效，消除共享缓存层）

@@ -8,9 +8,13 @@ packages/engine/data/
 packages/engine/profiles/
 
 # 分发包不入库（见 docs 打包说明）
-quicklogin-chrome-*.zip
+# ★ 2026-10-11 更名：产物前缀改为 `akso-pass-`
+akso-pass-*.zip
 # ★ 2026-10 修正：原规则只覆盖 `quicklogin-chrome-*.zip`，而实际产出过分发包
 #   `quicklogin-3.13.2-dist.zip`（实测存在且未被忽略）⇒ 会随 `git add -A` 误入库。
+#   ⇒ 更名后统一用前缀通配 `akso-pass-*.zip`（不再有"漏掉 -dist 后缀"那个缺口）。
+# ★ 旧名 `quicklogin-*.zip` 的包已被 4.0.0 更名取代、不再产出；这条规则保留，
+#   只为让改名之前就已落盘的旧包继续留在忽略列表里（删掉它 = 它们会变成待入库文件）。
 quicklogin-*.zip
 
 # 图标母版（2026-10 从 tmp/ 归档）：只入库矢量源，PNG 是可从 SVG 再生的大文件

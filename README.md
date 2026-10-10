@@ -1,19 +1,22 @@
-# QuickLogin · 多账号并行
+# Akso Pass · 多账号并行
 
-纯浏览器 Chrome MV3 扩展：在**同一个浏览器窗口**内，对内部低代码平台（`tonbridge-config.aksoegmp.com`，无状态 JWT Bearer 鉴权）**并行在线多个账号**。每个账号一个独立标签页，账号间呈现层与网络层全链路隔离；账号轮盘（Alt+Q / Ctrl+Shift+Q）一键切换，密码 AES-GCM 加密存本机。
+纯浏览器 Chrome MV3 扩展：在**同一个浏览器窗口**内，对内部低代码平台（`tonbridge-config.aksoegmp.com`，无状态 JWT Bearer 鉴权）**并行在线多个账号**。每个账号一个独立标签页，账号间呈现层与网络层全链路隔离；账号轮盘（Alt+Q / Ctrl+Shift+Q）一键切换，账号与口令由**服务端**加密存放（必须登录云端账号库）。
 
 ## 它解决什么问题
 
-该平台的登录态是多份共享资源的叠加（localStorage、Cookie jar、HTTP 缓存、IndexedDB、Service Worker），同 origin 多账号天然互相污染——「先开谁，谁的身份分发给别人」。QuickLogin 用**六平面隔离**逐层切断：
+该平台的登录态是多份共享资源的叠加（localStorage、Cookie jar、HTTP 缓存、IndexedDB、Service Worker、BroadcastChannel），同 origin 多账号天然互相污染——「先开谁，谁的身份分发给别人」。Akso Pass 用**七平面隔离**逐层切断：
 
 | # | 平面 | 机制 | 实现位置 |
 |---|---|---|---|
 | 1 | 存储 | localStorage 重定向到 `__ql_ns_<accountId>__` 命名空间；`document.cookie` 虚拟化为账号「Cookie 袋」 | `content/shield-main.ts` |
+| 1.5 | 广播 | `BroadcastChannel` 命名空间化（同源所有页签共享频道；`storage` 事件因键名前缀天然安全） | `shield-main.ts` |
 | 2 | AUTH | DNR 按 tabId 强制改写 `Authorization: Bearer <token>`（xhr / websocket / sub_frame，host+父域） | `background/core/tab-rules.ts` |
 | 3 | COOKIE | 出站 Cookie 头**按账号回放**（登录时点经 `chrome.cookies` 采集含 HttpOnly 的全量快照，身份类键过滤；空快照回退剥离） | `tab-rules.ts` + `parallel-session.ts` |
 | 4 | CACHE | 同源 GET 请求追加 `_qlck=t<tabId>`，共享 HTTP 缓存按标签硬分区（页面层实现——Chrome DNR 无 `urlTransform`） | `shield-main.ts` |
 | 5 | SW/Cache | 拦截站点 `serviceWorker.register` + 注销既有注册；`CacheStorage` 按账号命名空间键控 | `shield-main.ts` |
 | 6 | IndexedDB | `indexedDB.open/deleteDatabase/databases()` 按账号前缀化（平台把 `isAdmin`+菜单树缓存在共享 IDB，是四象限串号的直接载体） | `shield-main.ts` |
+
+> 平面编号沿用 `docs/CODEBASE_OVERVIEW.md` 的权威口径（存储 / **1.5 广播** / AUTH / COOKIE / CACHE / SW·Cache / IDB 共 **7** 个）。
 
 > 历史教训：v3.3 的 CACHE 平面曾用 DNR `redirect.urlTransform` 实现——该字段 Chrome 从未支持（Firefox 专属），且 `updateSessionRules` 是原子批量，导致同批 COOKIE/AUTH 规则全部被拒、网络平面全死。v3.5 起改为页面层实现 + **逐条安装降级**。
 
@@ -33,7 +36,7 @@ npm run typecheck  # tsc --noEmit
 | 文档 | 内容 |
 |---|---|
 | [`docs/USER-MANUAL.md`](docs/USER-MANUAL.md) | **用户手册**：功能点清单 + 使用说明 |
-| [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) | **现状快照**：六平面架构表、版本里程碑、安全边界 |
+| [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md) | **现状快照**：隔离平面总表（历史对照）、版本里程碑、安全边界 |
 | [`docs/CODEBASE_OVERVIEW.md`](docs/CODEBASE_OVERVIEW.md) | 代码库导读：架构、关键模块、数据流、约定、风险 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本明细（含每轮缺陷的根因定位过程） |
 | [`docs/BROWSER-ONLY-MULTILOGIN-RESEARCH.md`](docs/BROWSER-ONLY-MULTILOGIN-RESEARCH.md) | 历史调研：纯扩展多账号并行的方案论证与先例（v3.4 时代） |
@@ -49,3 +52,5 @@ npm run typecheck  # tsc --noEmit
 ---
 
 版本号约定：根 `package.json`、`packages/extension/manifest.json`、`src/shared/constants.ts` 的 `EXT_VERSION` 三处必须一致。
+
+> **更名说明（2026-10-11）**：本项目由 `quick-login` 更名为 `akso-pass`，品牌名 `QuickLogin` → **Akso Pass**，版本 4.0.0。历史条目中的旧名保留不动。

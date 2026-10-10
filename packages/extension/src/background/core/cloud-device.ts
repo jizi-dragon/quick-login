@@ -34,7 +34,7 @@ const log = getLogger('cloud-device');
  */
 
 /** 设备自报的名字（批准页会显示它，用户据此确认"是我这台浏览器"） */
-export const DEVICE_CLIENT_NAME = 'Chrome 扩展 · QuickLogin';
+export const DEVICE_CLIENT_NAME = 'Chrome 扩展 · Akso Pass';
 /** 服务端没给 `interval` 时的兜底秒数（观测到服务端会给，这只是"读不到别拿 0 去压测"的兜底） */
 const FALLBACK_INTERVAL_S = 3;
 

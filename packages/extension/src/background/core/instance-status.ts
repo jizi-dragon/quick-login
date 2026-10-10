@@ -3,7 +3,7 @@
  *
  * ## 架构约束（决定了本模块为什么长这样）
  *
- * 1. **请求必须在目标页签的页面世界发起**。QuickLogin 的 AUTH / COOKIE 改头是 DNR session 规则，
+ * 1. **请求必须在目标页签的页面世界发起**。Akso Pass 的 AUTH / COOKIE 改头是 DNR session 规则，
  *    条件含 `tabIds:[tabId]`（见 `tab-rules.ts`）—— 后台自己 `fetch` 没有 tabId，
  *    既拿不到本账号的 Bearer，也拿不到 Cookie 回放，会读到共享 jar（跨账号）。
  *    所以本模块一律 `chrome.scripting.executeScript({ world: 'MAIN' })`。

@@ -410,7 +410,7 @@ async function dispatch(req: RuntimeRequest): Promise<RuntimeResponse> {
       const r = await tryRun(async () => {
         const data = req.data;
         if (data?.format !== 'quicklogin-backup' || data.version !== 1) {
-          throw new Error('不是有效的 QuickLogin 备份文件（format/version 不符）');
+          throw new Error('不是有效的 Akso Pass 备份文件（format/version 不符）');
         }
         // ★ v3.18：备份**只含元数据，不含任何凭据**。
         //

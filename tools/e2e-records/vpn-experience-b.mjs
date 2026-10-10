@@ -1,4 +1,4 @@
-/** B: QuickLogin 扩展全流程复现——预期 https 硬编码导致打开失败 */
+/** B: Akso Pass 扩展全流程复现——预期 https 硬编码导致打开失败 */
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import path from 'node:path';

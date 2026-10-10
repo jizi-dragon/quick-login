@@ -195,7 +195,7 @@ npm run verify -- --only jarhygiene
   `CHANGELOG.md` 记"每次发布改了什么"（历史），
   `PITFALLS.md` 记"**哪些错会静默发生、怎么一眼认出来**"（可复用的判据）。
   **不要在两处都写全量**（规则 12）——叙事抄一遍，两处迟早不一致。
-  格式照服务器端 `akso-vault/docs/PITFALLS.md`：五段（症状/根因/判据/处置/推广）、
+  格式照服务器端 `akso-cloud/docs/PITFALLS.md`：五段（症状/根因/判据/处置/推广）、
   编号是稳定 ID 永不重编、**每条必须有可执行判据**，已修的改状态标注而不是删除。
 
 ---
@@ -210,7 +210,7 @@ npm run verify -- --only jarhygiene
 | 类型检查 | `tsc --noEmit`，`strict` + `noUnusedLocals/Parameters` + `noFallthroughCasesInSwitch` |
 | **没有的东西** | **无单元测试框架、无 lint、无 CI**（`.github/` 不存在）。这不是遗漏，是现状——所以**规则 13–17 的验证资产就是全部保障** |
 | 浏览器 | Chrome / Edge，**`minimum_chrome_version: 110`**。装载：`chrome://extensions` → 开发者模式 → 加载已解压的 `dist/` |
-| 云端服务 | `https://www.dragonrain.top:8443`（`akso-vault`）。设备流（RFC 8628）授权，`CLOUD_ORIGIN_PATTERN` 在 `parallel.ts` 里 |
+| 云端服务 | `https://www.dragonrain.top:8443`（`akso-cloud`）。设备流（RFC 8628）授权，`CLOUD_ORIGIN_PATTERN` 在 `parallel.ts` 里 |
 | 目标平台 | `tonbridge-config.aksoegmp.com`（无状态 JWT Bearer）。内网形态为 **纯 http**（`10.100.0.105`）⇒ scheme 必须数据化（v3.10.9 的教训） |
 | **测试档案** | 脚本在 `tmp/` 下建 Chrome 档案（`tmp/ui-*`）。**`tmp/` 是 gitignored**——脚本入库、运行产物不入库。这些档案会占数百 MB，可随时删 |
 | **Node 的坑** | `npm install --no-save` 装的包**不会进 `package.json`**，但会留在 `node_modules` ⇒ 这正是 3 个幽灵依赖的成因（规则 14）。**加依赖一律走 `npm install --save-dev`** |

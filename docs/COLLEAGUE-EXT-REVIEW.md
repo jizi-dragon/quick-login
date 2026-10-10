@@ -2,7 +2,7 @@
 
 > 用途：**融合决策用**。请直接在 §五 决策表上勾选（回复编号即可，如「要 A1 A9 B1 B3 B4 C1 D1」）。
 > 评审对象：`akso-config-assistant.zip`（同事提供），解压于 `tmp/colleague/x/`（`tmp/` 已 gitignore）。
-> 评审日期：2026-10-08 · QuickLogin 侧基线：`3.14.1`
+> 评审日期：2026-10-08 · Akso Pass 侧基线：`3.14.1`
 
 ---
 
@@ -12,17 +12,17 @@
 |---|---|
 | 名称 / 版本 | 阿克索配置助手 v2.1.0 |
 | 规模 | 8 个文件、**3,456 行**、纯 JS 无构建（`content.js` 用 ES5 `var`，其余用 `const/let/async`） |
-| 目标平台 | 同 QuickLogin：阿克索 EGMP（低代码平台） |
+| 目标平台 | 同 Akso Pass：阿克索 EGMP（低代码平台） |
 | 权限 | `storage`, `tabs`, `scripting`, `activeTab` + `optional_host_permissions: http/https` |
 | **关键结论** | **它不做任何账号隔离**——没有 `cookies`、没有 `declarativeNetRequest`、没有 `webRequest`，全局假设「一个 profile 一个已登录账号」 |
 
-→ **与 QuickLogin 是互补关系，不是竞品。** 它的价值集中在「平台业务操作的快捷入口」，QuickLogin 的价值集中在「多账号并行隔离」。
+→ **与 Akso Pass 是互补关系，不是竞品。** **Akso Pass** 的价值集中在「多账号并行隔离」。
 
 ---
 
 ## 二、功能全清单（23 项）
 
-图例：**QuickLogin 现状** = 已有 / 部分 / 无 ｜ **建议** = ★★★强推 / ★★建议 / ★可选 / ✗不建议 ｜ **工作量** S(<0.5d) / M(0.5–2d) / L(>2d)
+图例：**Akso Pass 现状** = 已有 / 部分 / 无 ｜ **建议** = ★★★强推 / ★★建议 / ★可选 / ✗不建议 ｜ **工作量** S(<0.5d) / M(0.5–2d) / L(>2d)
 
 ### A. 标题与基础信息
 
@@ -36,7 +36,7 @@
 | A6 | 角标「本页已生效」圆点 | 命中时图标上一个小圆点，**只显示点、不显示用户名** | `background.js:14` | 部分（角标用于版本号/轮盘闪标） | ★ 可选（隐私取舍值得沿用） | S |
 | A7 | 状态灯六态 | 运行中/已暂停/未授权/域名不匹配/未命中/本页未运行 | `popup.js:409-459` | 部分（徽标 4 态：在线/待登录/未授权·已暂停/离线） | ✗ 已覆盖 | — |
 | A8 | 「立即执行一次」 | 强制 tick 一次并回显结果 | `content.js:342-346` | 无 | ★ 可选 | S |
-| **A9** | **选择器测试按钮** | 在活动页试跑选择器，**逐条回显命中/「元素存在但无文字」/语法错误**，并预览最终标题 | `options.js:100-151`、`content.js:319-341` | 无 | ★★★ **强推**（诊断粒度极好，正好补 QuickLogin 的选择器兜底） | S |
+| **A9** | **选择器测试按钮** | 在活动页试跑选择器，**逐条回显命中/「元素存在但无文字」/语法错误**，并预览最终标题 | `options.js:100-151`、`content.js:319-341` | 无 | ★★★ **强推**（诊断粒度极好，正好补 Akso Pass 的选择器兜底） | S |
 | A10 | 系统版本（点击复制） | `GET /api/platform/Build/BuildInfo` → `gitBranch` | `popup.js:186-242` | 无 | ★★ 建议（并入诊断包） | S |
 | A11 | 流程 Id（点击复制） | URL 的 `id=` 参数 | `popup.js:219` | 部分（参数在 URL 里，未显性展示） | ★★ 建议（并入 B1） | S |
 | A12 | 系统地址（点击复制） | 当前页 origin | `popup.js:220` | 部分（管理页有站点列表） | ★ 可选 | S |
@@ -101,21 +101,21 @@
 | **DOM 约定** | React + CSS Modules 哈希类名（`header_QZ9Sk`、`status-text_4fqtL`），配 `[class*="status-text-"]` 兜底 |
 | **鉴权** | Cookie + Bearer 双轨；同源请求 `credentials:'same-origin'` 即可 |
 
-> 其中 D1 内置的 7 条路由里，有 5 条是 QuickLogin 的 `page-monitor.ts` L1 分类器**未覆盖**的（user-mgmt / role-mgmt / menu-mgmt / view-management / trace-log / form-layout）——可以直接补进去。
+> 其中 D1 内置的 7 条路由里，有 5 条是 Akso Pass 的 `page-monitor.ts` L1 分类器**未覆盖**的（user-mgmt / role-mgmt / menu-mgmt / view-management / trace-log / form-layout）——可以直接补进去。
 
 ---
 
 ## 四、融合前必须先解决的 4 件事
 
 **1. 标题所有权冲突（硬冲突，必须单选）**
-QuickLogin 的 `title-hook.ts:12-17` 监听 `documentElement` 全量变更并强制回写账号别名；同事的 `content.js:172-184` 监听 `<title>` 父节点并强制回写用户信息。两边都是「与目标不同就写」→ **互相触发，标题抖动 + CPU 抖动**，并让「标题=账号名」这个核心区分能力失效。
-→ 结论：**A1 不融合，QuickLogin 独占标题**；若将来要共存，QL 需改用 `chrome.tabs.update` 权威写入。
+Akso Pass 的 `title-hook.ts:12-17` 监听 `documentElement` 全量变更并强制回写账号别名；同事的 `content.js:172-184` 监听 `<title>` 父节点并强制回写用户信息。两边都是「与目标不同就写」→ **互相触发，标题抖动 + CPU 抖动**，并让「标题=账号名」这个核心区分能力失效。
+→ 结论：**A1 不融合，Akso Pass 独占标题**；若将来要共存，QL 需改用 `chrome.tabs.update` 权威写入。
 
 **2. 跨世界读 cookie（B1 数据源必须换）**
-同事的 `content.js` 跑在 **ISOLATED** world，而 QuickLogin 的 Cookie 虚拟化补丁打在 **MAIN** world 的 `document` 上 → **管不到它**。它读到的是**真实 jar**，不是账号 Cookie 袋。后果：
-- ① QuickLogin 的会话卫生会把身份键从真实 jar 驱逐 → `__auth_token__` 常为空 → 参数面板 token 空、所有平台请求不带 Authorization；
+同事的 `content.js` 跑在 **ISOLATED** world，而 Akso Pass 的 Cookie 虚拟化补丁打在 **MAIN** world 的 `document` 上 → **管不到它**。它读到的是**真实 jar**，不是账号 Cookie 袋。后果：
+- ① Akso Pass 的会话卫生会把身份键从真实 jar 驱逐 → `__auth_token__` 常为空 → 参数面板 token 空、所有平台请求不带 Authorization；
 - ② 若真实 jar 残留别的账号 token → **跨账号凭据外显并可一键复制**。
-→ 结论：**借它的 UI/交互（5 字段 + 分项复制 + 折叠），数据源换成 QuickLogin 后台**——后台本来就握着权威数据（`ql:parTokens` 的本账号 token + 账号 Cookie 快照）。这样反而更简单。
+→ 结论：**借它的 UI/交互（5 字段 + 分项复制 + 折叠），数据源换成 Akso Pass 后台**——后台本来就握着权威数据（`ql:parTokens` 的本账号 token + 账号 Cookie 快照）。这样反而更简单。
 
 **3. 改状态的交互与判定（B4 必须重做）**
 现有三个缺陷：① **一键写库无二次确认**；② 成功判定是「响应体里没有 `message` 就算成功」→ 空响应/非 JSON 错误页会被当成成功；③ 成功后 reload「此刻的活动标签页」→ 请求期间切页会**刷错页**；④ 状态项缺 `code` 时会**兜底用 `name` 当 code** POST 出去。
@@ -123,7 +123,7 @@ QuickLogin 的 `title-hook.ts:12-17` 监听 `documentElement` 全量变更并强
 
 **4. 去重会误关绑定页签（C1 必须重做）**
 三个坑：① 分组键 `t.title || ''` **未排除空标题** → 所有无标题标签落进同一个 `''` 组，只留 1 个其余全关；② 跨**全部窗口**、无范围选项；③ 计划是分析时快照、确认时不复核（期间被固定的标签仍会被关）。
-→ 对 QuickLogin 更严重：**关掉绑定页签会触发 v3.12.0 的「登录态终结」**（清 token/快照）。
+→ 对 Akso Pass 更严重：**关掉绑定页签会触发 v3.12.0 的「登录态终结」**（清 token/快照）。
 → 结论：必须排除空标题、限定窗口范围、**绑定页签默认保护**（或至少显著警告）。
 
 ---

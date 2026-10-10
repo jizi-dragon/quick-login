@@ -652,7 +652,7 @@ dataExportBtn.addEventListener('click', () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `quicklogin-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `akso-pass-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 5000);
   })();
@@ -675,7 +675,7 @@ dataImportFile.addEventListener('change', () => {
       return;
     }
     if (backup?.format !== 'quicklogin-backup' || backup.version !== 1) {
-      alert('不是 QuickLogin 备份文件（格式版本不符）。');
+      alert('不是 Akso Pass 备份文件（格式版本不符）。');
       return;
     }
     const total = backup.accounts?.length ?? 0;
@@ -1242,7 +1242,7 @@ async function revokeHost(displayHost: string): Promise<void> {
     blocked.add(displayHost);
     await chrome.storage.local.set({ [LOCAL_KEYS.blockedHosts]: Array.from(blocked).sort() });
     alert(
-      `「${displayHost}」已在 QuickLogin 中停用（改头规则立即失效）。\n\n` +
+      `「${displayHost}」已在 Akso Pass 中停用（改头规则立即失效）。\n\n` +
         `浏览器底层授权未能回收：\n${errors.join('\n') || '(无明细)'}\n\n` +
         `如需彻底回收浏览器层权限：chrome://extensions → 详情 → 网站访问权限 → 手动收窄。`,
     );
@@ -1255,7 +1255,7 @@ async function revokeHost(displayHost: string): Promise<void> {
   await refreshAll();
 }
 
-/** 恢复此前手动停用的站点（仅解除 QuickLogin 内部封锁） */
+/** 恢复此前手动停用的站点（仅解除 Akso Pass 内部封锁） */
 async function unblockHost(host: string): Promise<void> {
   const stored = await chrome.storage.local.get(LOCAL_KEYS.blockedHosts);
   const blocked = new Set<string>((stored[LOCAL_KEYS.blockedHosts] as string[] | undefined) ?? []);
@@ -1355,7 +1355,7 @@ siteForm.addEventListener('submit', (e) => {
  */
 const CLOUD_ORIGIN_PATTERN = 'https://www.dragonrain.top/*';
 /** 设备自报的名字（批准页会显示它，用户据此确认"是我这台浏览器"） */
-const DEVICE_CLIENT_NAME = 'Chrome 扩展 · QuickLogin';
+const DEVICE_CLIENT_NAME = 'Chrome 扩展 · Akso Pass';
 /** 服务端没给 interval 时的兜底秒数（实测服务端会给；这里只是"读不到就别拿 0 去问"） */
 const DEVICE_POLL_FALLBACK_S = 3;
 
@@ -1925,7 +1925,7 @@ exportDiagBtn.addEventListener('click', () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `quicklogin-diag-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    a.download = `akso-pass-diag-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
     exportDiagBtn.textContent = '已导出 ✓';

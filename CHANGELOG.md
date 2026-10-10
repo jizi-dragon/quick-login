@@ -2,6 +2,50 @@
 
 版本号约定：每次功能性更新同步递增根 `package.json`、`packages/extension/manifest.json` 与 UI 内显性展示的 `EXT_VERSION`（`src/shared/constants.ts`），三处必须一致。
 
+> **更名说明（2026-10-11）**：本项目 2026-10-11 由 `quick-login` 更名为 `akso-pass`，品牌名 `QuickLogin` → **Akso Pass**。
+> **历史条目里的旧名保留不动** —— "当时叫 QuickLogin"是事实，改写它等于伪造当时的记录。
+
+## 4.0.0（2026-10-11）
+
+**更名：`quick-login` → `akso-pass`；品牌名 `QuickLogin` → Akso Pass。** 主版本号（3.17.1 → 4.0.0）的依据不是改名本身，而是 3.18 已完成、本次才随版本号固化下来的**本地数据源整体废除**（见 §6）：一个被移除的能力 + 一个更名后的对外标识，按语义化版本都属于"不兼容变更"。
+
+### 一、改了什么
+
+| 类别 | 内容 |
+|---|---|
+| 展示名 | `manifest.json`：`name` → `Akso Pass · 多账号并行`、`short_name` → `Akso Pass`、`action.default_title` → `Akso Pass · 多账号并行`；`ui/popup/popup.html` 与 `ui/parallel/parallel.html` 的 `<h1>` → `Akso Pass` |
+| 包标识 | 根 `package.json` 的 `name` → `akso-pass`、`description` → `Akso Pass：…（七平面隔离 + 账号轮盘）`（原文写「六平面」，实测为 **7** 个平面，见 `docs/CODEBASE_OVERVIEW.md` §Architecture）；**`package-lock.json` 顶层两处 `name` 同步**（否则 `npm ci` 报 lock 与 package.json 不一致） |
+| 版本号三处 | `package.json` / `packages/extension/manifest.json` / `src/shared/constants.ts` 的 `EXT_VERSION`：`3.17.1` → **`4.0.0`**（本仓规则 7） |
+| 产物命名 | `.gitignore`：新增 `akso-pass-*.zip`；**保留** `quicklogin-*.zip`（旧包仍在磁盘上，删规则会让它们变成待入库文件） |
+| 用户可见字符串 | 备份文件名 `quicklogin-backup-*.json` → `akso-pass-backup-*.json`、诊断包 `quicklogin-diag-*.json` → `akso-pass-diag-*.json`、设备自报名 `Chrome 扩展 · QuickLogin` → `Chrome 扩展 · Akso Pass`、导入报错与停用提示里的品牌名 |
+| 文档 | `README.md`（品牌 + 「六平面」→「七平面」并补上漏掉的 **平面 1.5 广播**）、`docs/*.md`、`AGENTS.md`、源码注释；跨仓引用 `akso-vault` → `akso-cloud`（兄弟仓库同期更名，**仅改仓库标识，不改历史叙事**） |
+
+### 二、刻意**没有**改（契约，动一条就是破坏）
+
+| 契约 | 位置 | 为什么不能动 |
+|---|---|---|
+| `manifest.json` 的 `"key"` | `packages/extension/manifest.json` | 扩展 ID 由它派生 —— 改了等于换一个扩展，用户已装的实例、已授权的站点全部脱钩 |
+| **`'quicklogin-backup'`** | `background/service-worker.ts`（×2）、`shared/messages.ts`、`ui/parallel/parallel.ts` | **备份文件格式标识**。它是**文件格式契约**，不是品牌名：改了之后**用户按旧版本导出的备份就再也导不进来** |
+| 消息协议前缀 | `ql:*` / `par.*` / `ql:log` / `ql:diag` / `ql:cloudAuth` 等 `LOCAL_KEYS` | 已落盘的用户数据（会话、诊断环形缓冲、授权痕迹）以这些键寻址 |
+| `manifest.json` 的 `commands` 键名 | `quick-wheel` / `quick-status` / `quick-favorites` | 用户可能已在 `chrome://extensions/shortcuts` 为这些**键名**自定义过快捷键 |
+| `tools/verify/**` 的断言 | 全部验证脚本 | **只改注释与消息字符串里的品牌名，不动任何断言的期望值与条数** |
+
+### 三、门禁实测（本机 Node 24.19.0 / npm 11.17.0）
+
+```
+npm run typecheck                        → 0 错误
+npm run build                            → BUILD_OK
+npm run check-deps                       → 0 幽灵依赖
+node tools/verify/verify-load.mjs        → 17/17（真起 Chromium --load-extension）
+node tools/verify/verify-log-redaction.mjs → 121/121
+node tools/verify/verify-user-docs.mjs   → 7/7
+node tools/verify/verify-css-vars.mjs    → 22/22
+node tools/verify/verify-brand.mjs       → 10/10
+node tools/verify/verify-icons.mjs       → 42/42
+```
+
+★ **更名最危险的正是 `verify-load.mjs`**：`manifest.name` / `short_name` 是 Chrome 装载时真正解析的字段，写错（长度、非法字符、与 `key` 冲突）会让扩展**静默装不上**，而 `manifest.json` 的 JSON 依然合法、`check-dist.mjs` 依然绿。⇒ 改名后必须真起浏览器装载一次。
+
 ## 3.17.1（2026-10-08）
 
 **排障：Alt+W 唤不出状态轮盘 —— 修 3 处「让故障无法被看见」的缺陷。**
@@ -269,7 +313,7 @@
 - **修复：另一页面的下载被拒（v3.10.6 的残留归属盲区）**：① `webRequest` 响应的 `tabId<=0`（Service Worker 内 fetch / 下载管理器重试 / 预取）此前直接丢弃——**当前恰好只有一个已绑定账号时归属给它**（多账号并存仍无法判定，维持丢弃）；② `Content-Disposition: attachment` 的响应若来自覆盖域（[host, *.父域]）之外，写入诊断埋点（`ql:diag`）标明「下载响应来自未覆盖域」——现场可定位是否需要扩展覆盖策略（不自动向第三方域回放账号 Cookie，避免泄露面扩大）。
 - **缓解：袋回流节流 300ms → 120ms**——「页内写票据 → 立刻下载」的竞态窗口压缩 60%。
 
-> 已知边界（不变）：无页签且多账号并存的响应仍无法归属；覆盖域之外的下载不受账号 Cookie 保护（原生 jar 行为）。现场排查：`chrome://extensions` → QuickLogin → Service Worker 控制台查看 `ql:diag`，或用 v3.10.x 的诊断脚本核对回放值。
+> 已知边界（不变）：无页签且多账号并存的响应仍无法归属；覆盖域之外的下载不受账号 Cookie 保护（原生 jar 行为）。现场排查：`chrome://extensions` → Akso Pass → Service Worker 控制台查看 `ql:diag`，或用 v3.10.x 的诊断脚本核对回放值。
 
 ## 3.10.7（2026-08-29）
 
@@ -428,7 +472,7 @@
 
 - 移除遗留本地引擎时代源码：`packages/engine/`、`packages/shared/nm-protocol.ts`、`src/background/nm-client.ts`（自 v2.4 起无调用方）；`scripts/build.mjs` 不再打包引擎。
 - 移除取证/研究工具链：`tools/e2e/`（harness/peek/analyze-events/rule-probe/fix-verify/ui-check）、`research/idb-permissions/`（驱动器 + 5 份报告）；相关结论已沉淀于 `docs/PROJECT-STATUS.md`，完整历史见 git。
-- 清理陈旧构建包 `QuickLogin-v3.7.2.zip` 与引擎时代设计文档；依赖瘦身（移除 better-sqlite3 / chrome-remote-interface / playwright 相关 devDeps）。
+- 清理陈旧构建包 `Akso Pass-v3.7.2.zip` 与引擎时代设计文档；依赖瘦身（移除 better-sqlite3 / chrome-remote-interface / playwright 相关 devDeps）。
 - 新增用户手册 `docs/USER-MANUAL.md`。
 
 ## 3.9.1（2026-08-29）
@@ -585,8 +629,8 @@ copy(JSON.stringify({
 
 ### 升级注意（本次必须执行）
 
-1. 在 `chrome://extensions` 点击 QuickLogin 的**移除**按钮，然后重新「加载已解压」选择 dist 目录——彻底清掉旧版本驻留的服务工作进程与键位注册；
-2. 打开 `chrome://extensions/shortcuts`，找到「QuickLogin · 多账号并行 → 打开账号选择轮盘」，手动设置为 **Alt+Q**（若显示为空或仍是旧组合键）；
+1. 在 `chrome://extensions` 点击 Akso Pass 的**移除**按钮，然后重新「加载已解压」选择 dist 目录——彻底清掉旧版本驻留的服务工作进程与键位注册；
+2. 打开 `chrome://extensions/shortcuts`，找到「Akso Pass · 多账号并行 → 打开账号选择轮盘」，手动设置为 **Alt+Q**（若显示为空或仍是旧组合键）；
 3. 重测快捷键与移除授权两个场景。
 
 ## 2.8.0（2026-08-28）
